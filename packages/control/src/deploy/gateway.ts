@@ -46,6 +46,7 @@ export interface AppRouteConfig {
   customDomain?: string | null;
   port: number;
   basicAuth?: { htpasswd: string } | null;
+  ssoEnabled?: boolean;
 }
 
 /**
@@ -79,33 +80,80 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
   await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
 
   const routerKey = `app-${cfg.appId}`;
-  const domains = [cfg.domain];
-  if (cfg.customDomain) domains.push(cfg.customDomain);
-  const hostRule = domains.map((d) => `Host(\`${d}\`)`).join(" || ");
+  const useBasicAuth = !cfg.ssoEnabled && !!cfg.basicAuth?.htpasswd;
+  const useSso = !!cfg.ssoEnabled;
 
-  const middlewareKey = `${routerKey}-basicauth`;
-  const useBasicAuth = !!cfg.basicAuth?.htpasswd;
+  const basicAuthKey = `${routerKey}-basicauth`;
+  const forwardAuthKey = `${routerKey}-forwardauth`;
 
-  const router: Record<string, unknown> = {
-    rule: hostRule,
-    entryPoints: ["websecure"],
-    service: routerKey,
-    tls: {
-      certResolver: "letsencrypt",
-      ...(cfg.customDomain
-        ? {
-            domains: domains.map((d) => ({ main: d })),
-          }
-        : {}),
-    },
-  };
-  if (useBasicAuth) router.middlewares = [middlewareKey];
+  const middlewares: Record<string, unknown> = {};
+  if (useBasicAuth) {
+    middlewares[basicAuthKey] = {
+      basicAuth: { users: [cfg.basicAuth!.htpasswd] },
+    };
+  }
+  if (useSso) {
+    middlewares[forwardAuthKey] = {
+      forwardAuth: {
+        address: "http://control:3000/auth/verify",
+        trustForwardHeader: true,
+        authResponseHeaders: ["X-Forwarded-User"],
+      },
+    };
+  }
+
+  const routerMiddlewares: string[] = [];
+  if (useSso) routerMiddlewares.push(forwardAuthKey);
+  else if (useBasicAuth) routerMiddlewares.push(basicAuthKey);
+
+  const routers: Record<string, unknown> = {};
+  const allDomains = [cfg.domain];
+  if (cfg.customDomain) allDomains.push(cfg.customDomain);
+
+  if (useSso && cfg.customDomain) {
+    // SSO only works on subdomains (session cookie scope). Split
+    // into two routers: subdomain with forwardAuth, custom domain
+    // without.
+    routers[routerKey] = {
+      rule: `Host(\`${cfg.domain}\`)`,
+      entryPoints: ["websecure"],
+      service: routerKey,
+      tls: { certResolver: "letsencrypt" },
+      middlewares: [forwardAuthKey],
+    };
+    routers[`${routerKey}-custom`] = {
+      rule: `Host(\`${cfg.customDomain}\`)`,
+      entryPoints: ["websecure"],
+      service: routerKey,
+      tls: {
+        certResolver: "letsencrypt",
+        domains: allDomains.map((d) => ({ main: d })),
+      },
+    };
+  } else {
+    const hostRule = allDomains
+      .map((d) => `Host(\`${d}\`)`)
+      .join(" || ");
+    const router: Record<string, unknown> = {
+      rule: hostRule,
+      entryPoints: ["websecure"],
+      service: routerKey,
+      tls: {
+        certResolver: "letsencrypt",
+        ...(cfg.customDomain
+          ? { domains: allDomains.map((d) => ({ main: d })) }
+          : {}),
+      },
+    };
+    if (routerMiddlewares.length > 0) {
+      router.middlewares = routerMiddlewares;
+    }
+    routers[routerKey] = router;
+  }
 
   const doc: Record<string, unknown> = {
     http: {
-      routers: {
-        [routerKey]: router,
-      },
+      routers,
       services: {
         [routerKey]: {
           loadBalancer: {
@@ -113,17 +161,7 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
           },
         },
       },
-      ...(useBasicAuth
-        ? {
-            middlewares: {
-              [middlewareKey]: {
-                basicAuth: {
-                  users: [cfg.basicAuth!.htpasswd],
-                },
-              },
-            },
-          }
-        : {}),
+      ...(Object.keys(middlewares).length > 0 ? { middlewares } : {}),
     },
   };
 

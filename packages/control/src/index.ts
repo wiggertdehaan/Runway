@@ -4,14 +4,22 @@ import { app } from "./app.js";
 import { writeDashboardRoute } from "./deploy/gateway.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
+import { refreshDb } from "./deploy/scan.js";
 
 migrate();
 
+// Hourly housekeeping
 setInterval(() => {
   deleteExpiredSessions();
   cleanupExpiredEntries();
 }, 60 * 60 * 1000);
 deleteExpiredSessions();
+
+// Daily Trivy vulnerability DB refresh (every 24h, first run 60s after startup)
+setTimeout(() => {
+  refreshDb();
+  setInterval(refreshDb, 24 * 60 * 60 * 1000);
+}, 60 * 1000);
 
 const dashboardDomain = process.env.DASHBOARD_DOMAIN;
 if (dashboardDomain) {

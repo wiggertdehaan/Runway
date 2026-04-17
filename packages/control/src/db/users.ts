@@ -10,6 +10,8 @@ export interface User {
   id: string;
   username: string;
   password_hash: string;
+  email: string | null;
+  oauth_provider: string | null;
   totp_secret: string | null;
   totp_enabled: number; // 0 | 1 from SQLite
   role: Role;
@@ -55,6 +57,33 @@ export async function createUser(
   return getUser(id)!;
 }
 
+/**
+ * Create a user from an OAuth login. Password is set to a random
+ * unverifiable value so password login is effectively disabled until
+ * an admin sets one.
+ */
+export async function createOAuthUser(
+  email: string,
+  provider: string
+): Promise<User> {
+  const id = nanoid(12);
+  // Username: email prefix, deduplicated with a numeric suffix
+  let base = email.split("@")[0]!.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 32);
+  if (!base) base = "user";
+  let username = base;
+  let attempt = 0;
+  while (getUserByUsername(username)) {
+    attempt++;
+    username = `${base}${attempt}`;
+  }
+  const password_hash = await hashPassword(nanoid(64));
+  db.prepare(
+    `INSERT INTO users (id, username, password_hash, email, oauth_provider, role)
+     VALUES (?, ?, ?, ?, ?, 'member')`
+  ).run(id, username, password_hash, email.toLowerCase(), provider);
+  return getUser(id)!;
+}
+
 export function setUserRole(id: string, role: Role): void {
   db.prepare(`UPDATE users SET role = ? WHERE id = ?`).run(role, id);
 }
@@ -76,6 +105,16 @@ export function getUserByUsername(username: string): User | undefined {
   return db.prepare(`SELECT * FROM users WHERE username = ?`).get(username) as
     | unknown
     | undefined as User | undefined;
+}
+
+export function getUserByEmail(email: string): User | undefined {
+  return db
+    .prepare(`SELECT * FROM users WHERE email = ? COLLATE NOCASE`)
+    .get(email) as unknown as User | undefined;
+}
+
+export function setUserEmail(userId: string, email: string | null): void {
+  db.prepare(`UPDATE users SET email = ? WHERE id = ?`).run(email, userId);
 }
 
 export function listUsers(): User[] {

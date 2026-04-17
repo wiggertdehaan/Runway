@@ -114,6 +114,15 @@ export function migrate() {
   const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{
     name: string;
   }>;
+  if (!userColumns.some((c) => c.name === "email")) {
+    db.exec(`ALTER TABLE users ADD COLUMN email TEXT`);
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL`
+    );
+  }
+  if (!userColumns.some((c) => c.name === "oauth_provider")) {
+    db.exec(`ALTER TABLE users ADD COLUMN oauth_provider TEXT`);
+  }
   if (!userColumns.some((c) => c.name === "totp_secret")) {
     db.exec(`ALTER TABLE users ADD COLUMN totp_secret TEXT`);
   }
@@ -204,6 +213,24 @@ export function migrate() {
       `ALTER TABLE apps ADD COLUMN scan_floor_exempt INTEGER NOT NULL DEFAULT 0`
     );
   }
+  if (!appCols.some((c) => c.name === "sso_enabled")) {
+    db.exec(
+      `ALTER TABLE apps ADD COLUMN sso_enabled INTEGER NOT NULL DEFAULT 0`
+    );
+  }
+
+  // SSO per-app email allowlist
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_allowed_emails (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      email TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(app_id, email)
+    );
+    CREATE INDEX IF NOT EXISTS idx_app_allowed_emails_app
+      ON app_allowed_emails(app_id);
+  `);
   if (!appCols.some((c) => c.name === "basic_auth_enabled")) {
     db.exec(
       `ALTER TABLE apps ADD COLUMN basic_auth_enabled INTEGER NOT NULL DEFAULT 0`

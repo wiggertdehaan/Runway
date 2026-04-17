@@ -28,6 +28,7 @@ export interface AppConfig {
   scan_floor_exempt: boolean;
   effective_scan_threshold: ScanThreshold;
   basic_auth?: { enabled: boolean; username: string | null };
+  sso_enabled: boolean;
   configured: boolean;
 }
 
@@ -187,6 +188,30 @@ export class RunwayClient {
       body.password = password;
     }
     return this.request<BasicAuthResponse>("/app/basic-auth", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async getSso(): Promise<{
+    app_id: string;
+    sso_enabled: boolean;
+    allowed_emails: string[];
+  }> {
+    return this.request("/app/sso");
+  }
+
+  async setSso(
+    enabled: boolean,
+    allowedEmails?: string[]
+  ): Promise<{
+    app_id: string;
+    sso_enabled: boolean;
+    allowed_emails: string[];
+  }> {
+    const body: Record<string, unknown> = { enabled };
+    if (allowedEmails !== undefined) body.allowed_emails = allowedEmails;
+    return this.request("/app/sso", {
       method: "PUT",
       body: JSON.stringify(body),
     });

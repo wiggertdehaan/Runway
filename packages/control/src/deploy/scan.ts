@@ -247,6 +247,24 @@ export function meetsThreshold(
   return findings.some((f) => SEVERITY_ORDER[f.severity] >= min);
 }
 
+/**
+ * Refresh the Trivy vulnerability DB without running a scan. Called
+ * on a daily schedule so the DB stays fresh even when no deploys
+ * happen for a while. Failures are logged but never thrown — this
+ * is best-effort background maintenance.
+ */
+export async function refreshDb(): Promise<void> {
+  if (!trivyAvailable()) return;
+  try {
+    await execFileAsync(TRIVY_BIN, ["image", "--download-db-only"], {
+      timeout: 5 * 60 * 1000,
+      env: { ...process.env, TRIVY_CACHE_DIR },
+    });
+  } catch (err: any) {
+    console.error("Trivy DB refresh failed:", err?.message ?? err);
+  }
+}
+
 export function isValidThreshold(v: unknown): v is Threshold {
   return typeof v === "string" && (THRESHOLDS as string[]).includes(v);
 }
@@ -273,7 +291,11 @@ export function effectiveThreshold(
 const TRIVY_CACHE_DIR = process.env.TRIVY_CACHE_DIR || "/root/.cache/trivy";
 // Trivy's public advisory DB normally refreshes every 6 hours; warn
 // once the local copy is older than two full update cycles.
-const DB_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+// Warn after 48 hours instead of 24 — the DB refreshes on every
+// deploy, so quiet periods between deploys are normal and should not
+// alarm users. The scheduled daily refresh (see index.ts) keeps the
+// DB fresh even without deploys.
+const DB_STALE_AFTER_MS = 48 * 60 * 60 * 1000;
 
 export interface ScannerHealth {
   binary: { ok: boolean; detail: string };
@@ -340,7 +362,7 @@ async function checkDb(): Promise<{ ok: boolean; detail: string }> {
     if (ageMs > DB_STALE_AFTER_MS) {
       return {
         ok: false,
-        detail: `Vulnerability DB is ${ageHours}h old — Trivy should refresh on next scan, but a persistent network/TLS problem will leave it stale`,
+        detail: `Vulnerability DB is ${ageHours}h old — it refreshes automatically overnight and on every deploy. If this persists for multiple days, check network connectivity from the control container.`,
       };
     }
     return {

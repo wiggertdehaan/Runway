@@ -9,7 +9,11 @@ export type SettingKey =
   | "base_domain"
   | "acme_email"
   | "webhook_url"
-  | "min_scan_threshold";
+  | "min_scan_threshold"
+  | "oauth_google_client_id"
+  | "oauth_google_client_secret"
+  | "oauth_microsoft_client_id"
+  | "oauth_microsoft_client_secret";
 
 export function getSetting(key: SettingKey): string | undefined {
   const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as

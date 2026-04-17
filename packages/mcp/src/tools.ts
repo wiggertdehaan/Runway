@@ -425,6 +425,47 @@ export function registerTools(server: McpServer, client: RunwayClient) {
   );
 
   server.tool(
+    "runway_get_sso",
+    "Fetch SSO protection status and the email allowlist for the Runway app.",
+    {},
+    async () => {
+      const result = await client.getSso();
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_set_sso",
+    "Enable or disable SSO protection for the Runway app and manage the email allowlist. When SSO is enabled, only users with emails in the allowlist can access the app through the gateway. Requires at least one OAuth provider configured on the server.",
+    {
+      enabled: z
+        .boolean()
+        .describe("true to enable SSO, false to disable"),
+      allowed_emails: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Full list of allowed emails. Replaces existing list. Omit to keep current list."
+        ),
+    },
+    async ({ enabled, allowed_emails }) => {
+      const result = await client.setSso(enabled, allowed_emails);
+      return {
+        content: [
+          {
+            type: "text",
+            text: enabled
+              ? `SSO enabled. ${result.allowed_emails.length} email(s) in allowlist.`
+              : "SSO disabled.",
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
     "runway_list_deploys",
     "List recent deploys of the Runway app (most recent first). Each entry has id, image_tag, status, scan summary, created_at, and is_current. Use the id with runway_rollback to restore any successful historical deploy.",
     {

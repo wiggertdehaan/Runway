@@ -400,6 +400,42 @@ curl -sS -X PUT ${base}/api/v1/app/basic-auth \\
   -d '{"enabled":false}'
 \`\`\`
 
+## SSO protection
+
+Protect the app with Single Sign-On. Only users with emails in the
+allowlist can access the app via the subdomain. Requires OAuth
+providers configured on the server (Google and/or Microsoft).
+
+### Read SSO status
+
+\`\`\`bash
+curl -sS ${base}/api/v1/app/sso \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
+
+### Enable SSO and set allowlist
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/sso \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"enabled":true,"allowed_emails":["alice@example.com","bob@example.com"]}'
+\`\`\`
+
+### Disable SSO
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/sso \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"enabled":false}'
+\`\`\`
+
+SSO takes effect immediately via Traefik forward-auth on the
+subdomain. When both SSO and basic auth are enabled, SSO takes
+precedence. No redeploy required. Custom domain routes do not carry
+the session cookie and are not SSO-protected.
+
 ## Deploy history & rollback
 
 List recent deploys (most recent first) — useful to find a specific

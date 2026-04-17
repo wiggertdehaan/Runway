@@ -23,6 +23,7 @@ import { appContainerName } from "../deploy/index.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { notifyDeployFailure } from "../util/webhook.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
+import { getAppAllowedEmails, setAppAllowedEmails } from "../db/app-emails.js";
 
 type Env = { Variables: { app: App } };
 
@@ -56,6 +57,7 @@ function toConfigResponse(app: App) {
       enabled: !!app.basic_auth_enabled,
       username: app.basic_auth_username,
     },
+    sso_enabled: !!app.sso_enabled,
     configured: isConfigured(app),
   };
 }
@@ -443,6 +445,7 @@ apiRoutes.put("/app/domain", async (c) => {
       customDomain: updated.custom_domain,
       port: updated.port,
       basicAuth: appBasicAuth(updated),
+      ssoEnabled: !!updated.sso_enabled,
     });
   }
 
@@ -504,6 +507,7 @@ apiRoutes.put("/app/basic-auth", async (c) => {
       customDomain: updated.custom_domain,
       port: updated.port,
       basicAuth: appBasicAuth(updated),
+      ssoEnabled: !!updated.sso_enabled,
     });
   }
 
@@ -541,6 +545,63 @@ apiRoutes.put("/app/healthcheck", async (c) => {
   if (!updated) return c.json({ error: "App not found" }, 404);
 
   return c.json(toConfigResponse(updated));
+});
+
+// ── SSO ─────────────────────────────────────────────────
+apiRoutes.get("/app/sso", (c) => {
+  const app = c.get("app");
+  return c.json({
+    app_id: app.id,
+    sso_enabled: !!app.sso_enabled,
+    allowed_emails: getAppAllowedEmails(app.id),
+  });
+});
+
+apiRoutes.put("/app/sso", async (c) => {
+  const app = c.get("app");
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object") {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const enabled =
+    body.enabled !== undefined ? !!body.enabled : !!app.sso_enabled;
+  const emails = Array.isArray(body.allowed_emails)
+    ? body.allowed_emails
+    : undefined;
+
+  if (emails) {
+    for (const e of emails) {
+      if (typeof e !== "string" || !e.includes("@")) {
+        return c.json({ error: `Invalid email: ${e}` }, 400);
+      }
+    }
+    setAppAllowedEmails(
+      app.id,
+      emails.map((e: string) => e.toLowerCase().trim())
+    );
+  }
+
+  const updated = updateApp(app.id, { sso_enabled: enabled ? 1 : 0 });
+  if (!updated) return c.json({ error: "App not found" }, 404);
+
+  if (updated.domain) {
+    await writeAppRoute({
+      appId: updated.id,
+      containerName: appContainerName(updated.id),
+      domain: updated.domain,
+      customDomain: updated.custom_domain,
+      port: updated.port,
+      basicAuth: appBasicAuth(updated),
+      ssoEnabled: !!updated.sso_enabled,
+    });
+  }
+
+  return c.json({
+    app_id: updated.id,
+    sso_enabled: !!updated.sso_enabled,
+    allowed_emails: getAppAllowedEmails(updated.id),
+  });
 });
 
 // ── Rollback ────────────────────────────────────────────

@@ -36,8 +36,9 @@ server.
   full control.
 - **Production features built in** — environment variables, persistent
   volumes, custom domains, health checks, deploy rollback, 2FA, audit
-  logging, admin/member roles, per-app HTTP basic auth, and a per-deploy
-  security scan (Trivy) with a configurable severity gate.
+  logging, admin/member roles, per-app HTTP basic auth, SSO with
+  Google/Microsoft OAuth2, and a per-deploy security scan (Trivy) with
+  a configurable severity gate.
 
 ## How it works
 
@@ -161,8 +162,32 @@ Put HTTP basic auth in front of any app at the gateway with one
 toggle in the dashboard (or one MCP call). Useful for password-
 protecting an internal tool without writing login code. Credentials
 are hashed before they hit disk and the route is re-written on the
-fly, no redeploy required. For anything public, use in-app auth or
-wait for SSO.
+fly, no redeploy required. For multi-user access control, use SSO
+instead.
+
+### Single Sign-On (SSO)
+
+Sign in to the Runway dashboard with Google or Microsoft. Admin
+configures OAuth2 client credentials on the Settings page; the login
+screen then shows provider buttons alongside the regular password
+form.
+
+For deployed apps, SSO acts as a gateway-level auth layer. Toggle
+"SSO protection" on the app detail page and manage an email
+allowlist — only users with a matching Runway account can reach the
+app. Traefik's forward-auth middleware checks the session cookie on
+every request; no code changes in the app needed.
+
+- **Provider support**: Google OAuth2 and Microsoft OAuth2.
+- **Auto-provisioning**: first-time OAuth users get a `member`
+  account linked by email.
+- **Email allowlist**: per-app, managed via dashboard, API
+  (`PUT /app/sso`), or MCP (`runway_set_sso`).
+- **Cookie scope**: the session cookie is set on `.{base_domain}`
+  so it's shared across the dashboard and all app subdomains.
+  Custom domains are **not** SSO-protected (different cookie scope).
+- **Precedence**: when both SSO and basic auth are enabled on an
+  app, SSO takes precedence.
 
 ### Roles
 
@@ -275,6 +300,15 @@ pnpm --filter @runway/control dev   # Dashboard on http://localhost:3000
   Failed attempts are logged in the audit log with the source IP.
 - **API rate limiting** — 60 requests per minute per IP on all `/api/v1/*`
   endpoints.
+- **OAuth2 / SSO** — authorization code flow with Google and Microsoft.
+  ID tokens are decoded (not signature-verified) after a direct HTTPS
+  code exchange with the provider, which is safe because the token was
+  just issued to us. A random `state` cookie prevents CSRF on the OAuth
+  redirect. Session cookies are scoped to `.{base_domain}` when SSO is
+  active so Traefik's forward-auth on app subdomains can read them.
+  Custom domains do not share this cookie and are therefore not
+  SSO-protected. OAuth client secrets are stored in the settings table
+  (SQLite on disk, same trust boundary as password hashes).
 - **Traefik** is configured with the dashboard disabled. Do not add
   `--api.insecure=true` on a public server. Traefik does not have access
   to the Docker socket at all — routing is driven by YAML files in a
@@ -317,7 +351,7 @@ Planned improvements — contributions welcome:
 - ~~Deploy version history UI~~ *(v0.5.2 — dashboard table of recent deploys with one-click restore to any successful version, also via API and MCP)*
 - **Activity feed** — show recent deploys, status changes, and events on the dashboard
 - **Multiple deploy targets** — support deploying to multiple servers from a single dashboard
-- **SSO support** — single sign-on both for the Runway dashboard/API itself and as a reusable auth layer in front of deployed apps, so operators can grant per-app access without each app rolling its own login
+- ~~SSO support~~ *(v0.6 — Google + Microsoft OAuth2 for dashboard login, Traefik forward-auth for per-app SSO with email allowlists)*
 - ~~Per-app basic auth~~ *(v0.5 — toggle HTTP basic auth at the gateway per app, set via dashboard or MCP, no redeploy needed)*
 - ~~Security scanning on deploy~~ *(v0.4 — Trivy, image CVEs + source secrets + Dockerfile misconfig, configurable block threshold)*
 - ~~Wildcard DNS check at setup~~ *(v0.3)*

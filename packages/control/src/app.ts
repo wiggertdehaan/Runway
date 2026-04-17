@@ -6,6 +6,7 @@ import { apiRateLimit } from "./middleware/rate-limit.js";
 import { apiRoutes } from "./routes/api.js";
 import { llmsRoutes } from "./routes/llms.js";
 import { webRoutes } from "./routes/web.js";
+import { oauthRoutes } from "./routes/oauth.js";
 
 export const app = new Hono();
 
@@ -21,6 +22,9 @@ app.route("/api/v1", apiRoutes);
 // must be registered before the web routes so its path is matched
 // instead of falling through to the session-guarded dashboard.
 app.route("/", llmsRoutes);
+
+// OAuth and forward-auth routes (before web so /auth/* matches first)
+app.route("/", oauthRoutes);
 
 // Web UI routes
 app.route("/", webRoutes);

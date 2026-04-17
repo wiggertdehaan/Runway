@@ -240,6 +240,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
       customDomain: app.custom_domain,
       port: app.port,
       basicAuth: appBasicAuth(app),
+      ssoEnabled: !!app.sso_enabled,
     });
   }
 
@@ -327,6 +328,7 @@ export async function rollbackApp(
       customDomain: app.custom_domain,
       port: app.port,
       basicAuth: appBasicAuth(app),
+      ssoEnabled: !!app.sso_enabled,
     });
   }
 

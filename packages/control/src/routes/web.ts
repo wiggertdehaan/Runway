@@ -55,6 +55,7 @@ import { toDataURL as qrDataUrl } from "qrcode";
 import {
   getSetting,
   setSetting,
+  deleteSetting,
   normalizeBaseDomain,
 } from "../db/settings.js";
 import {
@@ -69,6 +70,7 @@ import { updateApp } from "../db/apps.js";
 import { getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
+import { getAppAllowedEmails, addAppAllowedEmail, removeAppAllowedEmail } from "../db/app-emails.js";
 import { appContainerName, destroyApp, rollbackApp } from "../deploy/index.js";
 import { docker } from "../deploy/docker.js";
 import { csrfField } from "../middleware/csrf.js";
@@ -99,12 +101,16 @@ function isSecureRequest(c: Context): boolean {
 const PREAUTH_COOKIE = "runway_preauth";
 
 function sessionCookieOptions(c: Context) {
+  const baseDomain = getSetting("base_domain");
   return {
     httpOnly: true,
     sameSite: "Lax" as const,
     path: "/",
     maxAge: 60 * 60 * 24 * 30,
     secure: isSecureRequest(c),
+    // Set domain-wide cookie when base_domain is configured so the
+    // session is readable by forward-auth on app subdomains.
+    ...(baseDomain ? { domain: `.${baseDomain}` } : {}),
   };
 }
 
@@ -358,17 +364,36 @@ webRoutes.get("/login", (c) => {
         ? '<div class="error">Invalid username or password.</div>'
         : "";
 
+  const returnTo = c.req.query("return_to") ?? "";
+  const returnParam = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
+
+  const hasGoogle = !!getSetting("oauth_google_client_id");
+  const hasMicrosoft = !!getSetting("oauth_microsoft_client_id");
+
+  const oauthButtons = (hasGoogle || hasMicrosoft)
+    ? `<div style="margin-top:1rem;border-top:1px solid #333;padding-top:1rem">
+        ${hasGoogle ? `<a href="/auth/google${returnParam}" style="display:block;text-align:center;padding:0.6rem;margin-bottom:0.5rem;background:#1a73e8;color:#fff;text-decoration:none;border-radius:4px;font-size:0.9rem">Sign in with Google</a>` : ""}
+        ${hasMicrosoft ? `<a href="/auth/microsoft${returnParam}" style="display:block;text-align:center;padding:0.6rem;background:#0078d4;color:#fff;text-decoration:none;border-radius:4px;font-size:0.9rem">Sign in with Microsoft</a>` : ""}
+      </div>`
+    : "";
+
+  const oauthError = error === "oauth_state" || error === "oauth_no_code" || error === "oauth_exchange" || error === "oauth_no_email"
+    ? '<div class="error">OAuth login failed. Please try again.</div>'
+    : "";
+
   return c.html(
     authLayout(
       "Login",
       `
       <h1>Sign in</h1>
       ${errorMsg}
+      ${oauthError}
       <form method="POST" action="/login">
         <input type="text" name="username" placeholder="Username" required autofocus />
         <input type="password" name="password" placeholder="Password" required />
         <button type="submit">Sign in</button>
       </form>
+      ${oauthButtons}
     `,
       csrfField(c)
     )
@@ -1125,6 +1150,40 @@ webRoutes.get("/apps/:id", (c) => {
         </form>
       </div>
 
+      <div class="card" id="sso">
+        <h2>SSO protection</h2>
+        <p class="hint" style="margin:0.5rem 0 1rem">
+          Protect this app with Single Sign-On. Only users with emails in the
+          allow list can access the app via the subdomain. Requires at least one
+          OAuth provider configured in Settings.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:#fbbf24">SSO takes precedence over basic auth.</strong>' : ""}
+        </p>
+        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso">
+          <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
+            <input type="checkbox" name="enabled" value="1"${app.sso_enabled ? " checked" : ""} />
+            Enable SSO
+          </label>
+          <h3 style="margin:0 0 0.5rem;font-size:0.85rem">Allowed emails</h3>
+          ${(() => {
+            const emails = getAppAllowedEmails(app.id);
+            return emails.length > 0
+              ? `<div style="margin-bottom:0.5rem">${emails.map((e) =>
+                  `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem">
+                    <code style="flex:1;font-size:0.8rem">${escapeHtml(e)}</code>
+                    <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso/email/delete" style="margin:0">
+                      <input type="hidden" name="email" value="${escapeHtml(e)}" />
+                      <button type="submit" class="ghost" style="font-size:0.7rem;padding:0.15rem 0.4rem;color:#f87171">&times;</button>
+                    </form>
+                  </div>`
+                ).join("")}</div>`
+              : '<p class="meta" style="margin-bottom:0.5rem;font-size:0.8rem">No emails in allow list.</p>';
+          })()}
+          <div class="flex">
+            <input type="email" name="new_email" placeholder="user@example.com" style="flex:1" />
+            <button type="submit">Save</button>
+          </div>
+        </form>
+      </div>
+
       ${renderDeployHistory(app)}
 
       ${renderScanSection(app, isAdmin(user))}
@@ -1209,6 +1268,7 @@ webRoutes.post("/apps/:id/domain", async (c) => {
       customDomain: updated.custom_domain,
       port: updated.port,
       basicAuth: appBasicAuth(updated),
+      ssoEnabled: !!updated.sso_enabled,
     });
   }
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1`);
@@ -1280,6 +1340,7 @@ webRoutes.post("/apps/:id/basic-auth", async (c) => {
       customDomain: updated.custom_domain,
       port: updated.port,
       basicAuth: appBasicAuth(updated),
+      ssoEnabled: !!updated.sso_enabled,
     });
   }
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1`);
@@ -1305,6 +1366,42 @@ webRoutes.post("/apps/:id/scan-floor-exempt", async (c) => {
   const exempt = body["exempt"] === "1" ? 1 : 0;
   updateApp(app.id, { scan_floor_exempt: exempt });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+webRoutes.post("/apps/:id/sso", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const enabled = body["enabled"] === "1" ? 1 : 0;
+  const newEmail = ((body["new_email"] as string | undefined) ?? "").trim().toLowerCase();
+
+  updateApp(app.id, { sso_enabled: enabled });
+  if (newEmail && newEmail.includes("@")) {
+    addAppAllowedEmail(app.id, newEmail);
+  }
+
+  const updated = getApp(app.id);
+  if (updated?.domain) {
+    await writeAppRoute({
+      appId: updated.id,
+      containerName: appContainerName(updated.id),
+      domain: updated.domain,
+      customDomain: updated.custom_domain,
+      port: updated.port,
+      basicAuth: appBasicAuth(updated),
+      ssoEnabled: !!updated.sso_enabled,
+    });
+  }
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#sso`);
+});
+
+webRoutes.post("/apps/:id/sso/email/delete", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const email = (body["email"] as string | undefined) ?? "";
+  removeAppAllowedEmail(app.id, email);
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#sso`);
 });
 
 webRoutes.post("/apps/:id/healthcheck", async (c) => {
@@ -1559,6 +1656,8 @@ webRoutes.get("/settings", (c) => {
   const baseDomain = getSetting("base_domain") ?? "";
   const webhookUrl = getSetting("webhook_url") ?? "";
   const minScanThreshold = getSetting("min_scan_threshold") ?? "none";
+  const googleClientId = getSetting("oauth_google_client_id") ?? "";
+  const microsoftClientId = getSetting("oauth_microsoft_client_id") ?? "";
   const saved = c.req.query("saved");
   const dnsWarning = c.req.query("dns_warning");
 
@@ -1614,6 +1713,31 @@ webRoutes.get("/settings", (c) => {
       </div>
 
       <div class="card">
+        <h2>Single Sign-On (OAuth2)</h2>
+        <p class="hint" style="margin:0.5rem 0 1rem">
+          Configure OAuth2 providers for dashboard login and SSO app protection.
+          Register a callback URL of <code>${escapeHtml(baseDomain ? `https://${baseDomain}` : "(set base domain first)")}/auth/{provider}/callback</code>
+          in each provider's console.
+        </p>
+        <h3 style="margin:0.5rem 0;font-size:0.9rem">Google</h3>
+        <form method="POST" action="/settings/oauth/google" style="margin-bottom:1rem">
+          <div style="display:grid;gap:0.5rem">
+            <input type="text" name="client_id" value="${escapeHtml(googleClientId)}" placeholder="Client ID" />
+            <input type="password" name="client_secret" value="" placeholder="${googleClientId ? "Client secret (leave blank to keep)" : "Client secret"}" autocomplete="new-password" />
+            <button type="submit">Save Google</button>
+          </div>
+        </form>
+        <h3 style="margin:0.5rem 0;font-size:0.9rem">Microsoft</h3>
+        <form method="POST" action="/settings/oauth/microsoft" style="margin-bottom:0.5rem">
+          <div style="display:grid;gap:0.5rem">
+            <input type="text" name="client_id" value="${escapeHtml(microsoftClientId)}" placeholder="Client ID" />
+            <input type="password" name="client_secret" value="" placeholder="${microsoftClientId ? "Client secret (leave blank to keep)" : "Client secret"}" autocomplete="new-password" />
+            <button type="submit">Save Microsoft</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
         <h2>Deploy notifications</h2>
         <p class="hint" style="margin:0.5rem 0 1rem">
           Webhook URL to receive a POST request when a deploy fails. Works with
@@ -1661,6 +1785,27 @@ webRoutes.post("/settings/scan-floor", async (c) => {
   if (isValidThreshold(threshold)) {
     setSetting("min_scan_threshold", threshold);
   }
+  return c.redirect("/settings?saved=1");
+});
+
+webRoutes.post("/settings/oauth/google", async (c) => {
+  const body = await c.req.parseBody();
+  const clientId = ((body["client_id"] as string | undefined) ?? "").trim();
+  const clientSecret = ((body["client_secret"] as string | undefined) ?? "").trim();
+  if (clientId) setSetting("oauth_google_client_id", clientId);
+  else deleteSetting("oauth_google_client_id");
+  if (clientSecret) setSetting("oauth_google_client_secret", clientSecret);
+  // Empty secret keeps existing value (don't wipe on blank)
+  return c.redirect("/settings?saved=1");
+});
+
+webRoutes.post("/settings/oauth/microsoft", async (c) => {
+  const body = await c.req.parseBody();
+  const clientId = ((body["client_id"] as string | undefined) ?? "").trim();
+  const clientSecret = ((body["client_secret"] as string | undefined) ?? "").trim();
+  if (clientId) setSetting("oauth_microsoft_client_id", clientId);
+  else deleteSetting("oauth_microsoft_client_id");
+  if (clientSecret) setSetting("oauth_microsoft_client_secret", clientSecret);
   return c.redirect("/settings?saved=1");
 });
 

@@ -38,6 +38,7 @@ export interface App {
   created_by: string | null;
   scan_threshold: string;
   scan_floor_exempt: number;
+  sso_enabled: number;
   basic_auth_enabled: number;
   basic_auth_username: string | null;
   basic_auth_htpasswd: string | null;
@@ -75,6 +76,12 @@ export function getAppByKey(api_key: string): App | undefined {
     .get(api_key) as unknown as App | undefined;
 }
 
+export function getAppByDomain(domain: string): App | undefined {
+  return db
+    .prepare(`SELECT * FROM apps WHERE domain = ? OR custom_domain = ?`)
+    .get(domain, domain) as unknown as App | undefined;
+}
+
 export function listApps(): App[] {
   return db
     .prepare(`SELECT * FROM apps ORDER BY created_at DESC`)
@@ -97,6 +104,7 @@ type UpdatableAppFields = Partial<
     | "container_id"
     | "scan_threshold"
     | "scan_floor_exempt"
+    | "sso_enabled"
     | "basic_auth_enabled"
     | "basic_auth_username"
     | "basic_auth_htpasswd"

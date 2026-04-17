@@ -144,6 +144,37 @@ without knowing why.
   `"blocked"` with an `error` message attached, not `"skipped"`.
   Only both legs failing with zero findings yields `"skipped"`.
 
+### SSO (Google + Microsoft OAuth2)
+- `packages/control/src/auth/oauth.ts` — provider configs, URL
+  building, authorization code exchange, JWT payload decode. No
+  external library; uses native `fetch()` for the token endpoint
+  and manual base64url decode for the ID token (safe because we
+  just exchanged the code over HTTPS directly with the provider).
+- `packages/control/src/routes/oauth.ts` — mounted in `app.ts`
+  before web routes. Contains:
+  - `GET /auth/{google,microsoft}` — redirects to provider consent
+  - `GET /auth/{google,microsoft}/callback` — exchanges code, looks
+    up or auto-provisions a Runway user by email, creates session
+  - `GET /auth/verify` — Traefik forward-auth endpoint, called on
+    every request to SSO-protected app subdomains. Checks session
+    cookie + email allowlist.
+- `packages/control/src/db/app-emails.ts` — per-app email allowlist
+  CRUD (add, remove, check, replace-all).
+- **Session cookie domain**: when `base_domain` is configured, the
+  session cookie is set on `.{base_domain}` (both in `web.ts` and
+  `oauth.ts`) so it's readable by the forward-auth middleware on
+  app subdomains. Custom domains are outside this cookie scope and
+  therefore not SSO-protected.
+- **Gateway**: `writeAppRoute()` emits a `forwardAuth` middleware
+  when `ssoEnabled` is true. If the app also has a custom domain,
+  two separate Traefik routers are generated: the subdomain router
+  has forwardAuth, the custom-domain router does not.
+- **SSO vs basic auth**: when both are enabled on an app, SSO takes
+  precedence — the forwardAuth middleware replaces basicAuth.
+- OAuth client credentials are stored in the settings table
+  (`oauth_google_client_id`, `oauth_google_client_secret`,
+  `oauth_microsoft_client_id`, `oauth_microsoft_client_secret`).
+
 ## Migrations
 
 `packages/control/src/db/index.ts` runs `migrate()` on startup. It
