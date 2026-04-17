@@ -7,8 +7,11 @@ import {
   exchangeCode,
   decodeIdToken,
   generateState,
+  generateNonce,
+  generatePkcePair,
   type OAuthProvider,
 } from "../auth/oauth.js";
+import { timingSafeEqual } from "node:crypto";
 import { getSetting } from "../db/settings.js";
 import {
   getUserByEmail,
@@ -23,6 +26,8 @@ import { logAudit } from "../db/audit.js";
 export const oauthRoutes = new Hono();
 
 const STATE_COOKIE = "runway_oauth_state";
+const NONCE_COOKIE = "runway_oauth_nonce";
+const PKCE_COOKIE = "runway_oauth_pkce";
 const RETURN_COOKIE = "runway_oauth_return";
 const SESSION_COOKIE = "runway_session";
 
@@ -74,31 +79,43 @@ function startHandler(provider: OAuthProvider) {
     }
 
     const state = generateState();
+    const nonce = generateNonce();
+    const pkce = generatePkcePair();
     const returnTo = c.req.query("return_to") ?? "/";
 
-    setCookie(c, STATE_COOKIE, state, {
+    const transientCookie = {
       httpOnly: true,
-      sameSite: "Lax",
+      sameSite: "Lax" as const,
       path: "/",
       maxAge: 300,
       secure: isSecureRequest(c),
-    });
-    setCookie(c, RETURN_COOKIE, returnTo, {
-      httpOnly: true,
-      sameSite: "Lax",
-      path: "/",
-      maxAge: 300,
-      secure: isSecureRequest(c),
-    });
+    };
 
-    const url = buildAuthUrl(
-      provider,
-      config.clientId,
-      callbackUrl(provider),
-      state
-    );
+    setCookie(c, STATE_COOKIE, state, transientCookie);
+    setCookie(c, NONCE_COOKIE, nonce, transientCookie);
+    setCookie(c, PKCE_COOKIE, pkce.verifier, transientCookie);
+    setCookie(c, RETURN_COOKIE, returnTo, transientCookie);
+
+    const url = buildAuthUrl(provider, config.clientId, callbackUrl(provider), {
+      state,
+      nonce,
+      codeChallenge: pkce.challenge,
+    });
     return c.redirect(url);
   };
+}
+
+/**
+ * Constant-time cookie comparison. Random 192-bit values make naive
+ * string compare safe in practice, but tests and future code may run
+ * this against shorter tokens where timing leaks would matter.
+ */
+function safeCookieEquals(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
 }
 
 oauthRoutes.get("/auth/google", startHandler(GOOGLE));
@@ -113,11 +130,20 @@ function callbackHandler(provider: OAuthProvider) {
       return c.text(`${provider.name} OAuth is not configured`, 500);
     }
 
-    // Verify state (CSRF)
+    // Pull and clear all transient cookies up front — we never want
+    // to leak them past this callback, even on an error path.
     const stateParam = c.req.query("state");
     const stateCookie = getCookie(c, STATE_COOKIE);
+    const nonceCookie = getCookie(c, NONCE_COOKIE);
+    const pkceCookie = getCookie(c, PKCE_COOKIE);
     deleteCookie(c, STATE_COOKIE, { path: "/" });
-    if (!stateParam || !stateCookie || stateParam !== stateCookie) {
+    deleteCookie(c, NONCE_COOKIE, { path: "/" });
+    deleteCookie(c, PKCE_COOKIE, { path: "/" });
+
+    if (!stateParam || !safeCookieEquals(stateParam, stateCookie)) {
+      return c.redirect("/login?error=oauth_state");
+    }
+    if (!pkceCookie) {
       return c.redirect("/login?error=oauth_state");
     }
 
@@ -133,9 +159,13 @@ function callbackHandler(provider: OAuthProvider) {
         config.clientId,
         config.clientSecret,
         code,
-        callbackUrl(provider)
+        callbackUrl(provider),
+        pkceCookie
       );
       const claims = decodeIdToken(tokens.id_token);
+      if (!claims.nonce || !safeCookieEquals(claims.nonce, nonceCookie)) {
+        return c.redirect("/login?error=oauth_nonce");
+      }
       if (!claims.email) {
         return c.redirect("/login?error=oauth_no_email");
       }

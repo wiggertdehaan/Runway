@@ -1,5 +1,6 @@
 import type { Context, Next } from "hono";
 import { db } from "../db/index.js";
+import { isIP } from "node:net";
 
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
@@ -26,10 +27,55 @@ function init() {
   }
 }
 
+/**
+ * Resolve the IP to key the rate limiter on. The earlier version
+ * blindly trusted `X-Forwarded-For[0]`, which any unauthenticated
+ * client could set from the outside — bypassing the lockout entirely
+ * by rotating a header value per request. We now only trust XFF when
+ * the direct connecting socket is on a Docker bridge (i.e. the only
+ * real peer the app ever has is Traefik). Requests that somehow
+ * reach this process directly from the public internet fall back to
+ * the raw socket address.
+ */
 export function getClientIp(c: Context): string {
-  const forwarded = c.req.header("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0]!.trim();
-  return "unknown";
+  const remote = getSocketRemoteAddress(c);
+  if (remote && isTrustedProxy(remote)) {
+    const forwarded = c.req.header("x-forwarded-for");
+    if (forwarded) {
+      const first = forwarded.split(",")[0]!.trim();
+      if (first) return first;
+    }
+  }
+  return remote ?? "unknown";
+}
+
+function getSocketRemoteAddress(c: Context): string | null {
+  // @hono/node-server surfaces the underlying IncomingMessage through
+  // `c.env.incoming`. Guard every hop since other runtimes shape
+  // `env` differently.
+  const env = (c as unknown as { env?: { incoming?: any } }).env;
+  const incoming = env?.incoming;
+  const raw: unknown = incoming?.socket?.remoteAddress;
+  if (typeof raw !== "string" || !raw) return null;
+  // IPv4-mapped IPv6 ("::ffff:172.18.0.3") → normalise to the IPv4
+  // form so the private-range check matches.
+  const mapped = raw.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  return mapped ? mapped[1]! : raw;
+}
+
+function isTrustedProxy(ip: string): boolean {
+  if (!isIP(ip)) return false;
+  // Only Traefik (or another component on a Docker bridge) should be
+  // calling us directly. All Docker-assigned bridge subnets fall
+  // inside the ranges below. `127.0.0.1` is here so `pnpm dev`
+  // against localhost still exercises the XFF code path in tests.
+  return (
+    ip === "127.0.0.1" ||
+    ip === "::1" ||
+    ip.startsWith("10.") ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip) ||
+    ip.startsWith("192.168.")
+  );
 }
 
 function getEntry(key: string, windowMs: number): { count: number; firstAttempt: number } | null {

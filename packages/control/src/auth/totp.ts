@@ -39,34 +39,41 @@ export function totpUri(
  * Verify a 6-digit code against the stored secret. Accepts the
  * current step plus one step of drift on either side (~90s window)
  * to absorb client/server clock skew. Comparison is constant-time.
+ *
+ * Returns the TOTP counter value that matched, or `null` if the code
+ * is invalid. Callers MUST check that the returned counter has not
+ * been consumed before by the same user (see `db/totp-history.ts`)
+ * — otherwise a captured code can be replayed within the drift
+ * window to mint multiple sessions.
  */
 export function verifyTotp(
   secret: string,
   code: string,
   now = Date.now()
-): boolean {
-  if (!/^\d{6}$/.test(code)) return false;
+): number | null {
+  if (!/^\d{6}$/.test(code)) return null;
 
   let key: Buffer;
   try {
     key = base32Decode(secret);
   } catch {
-    return false;
+    return null;
   }
 
   const counter = Math.floor(now / 1000 / STEP_SECONDS);
   const expected = Buffer.from(code, "utf8");
 
   for (let drift = -1; drift <= 1; drift++) {
-    const candidate = Buffer.from(hotp(key, counter + drift), "utf8");
+    const candidateCounter = counter + drift;
+    const candidate = Buffer.from(hotp(key, candidateCounter), "utf8");
     if (
       candidate.length === expected.length &&
       timingSafeEqual(candidate, expected)
     ) {
-      return true;
+      return candidateCounter;
     }
   }
-  return false;
+  return null;
 }
 
 /**

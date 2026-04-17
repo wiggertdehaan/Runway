@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 
 export interface OAuthProvider {
   name: "google" | "microsoft";
@@ -25,18 +25,56 @@ export function generateState(): string {
   return randomBytes(24).toString("base64url");
 }
 
+/**
+ * A fresh OIDC nonce. Sent in the auth URL and echoed back inside the
+ * id_token's `nonce` claim, so a replayed id_token (captured from a
+ * victim via a compromised client or phishing proxy) cannot be
+ * presented to our callback — it won't carry the nonce we stored in
+ * the user's browser cookie.
+ */
+export function generateNonce(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+export interface PkcePair {
+  verifier: string;
+  challenge: string;
+}
+
+/**
+ * PKCE verifier + S256 challenge. The verifier stays in a cookie on
+ * the user's browser and is submitted during token exchange; the
+ * challenge travels through the provider. This binds the authorization
+ * code to this specific browser session — an intercepted `code`
+ * cannot be redeemed elsewhere.
+ */
+export function generatePkcePair(): PkcePair {
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+
+export interface AuthUrlOptions {
+  state: string;
+  nonce: string;
+  codeChallenge: string;
+}
+
 export function buildAuthUrl(
   provider: OAuthProvider,
   clientId: string,
   redirectUri: string,
-  state: string
+  opts: AuthUrlOptions
 ): string {
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
     scope: provider.scopes.join(" "),
-    state,
+    state: opts.state,
+    nonce: opts.nonce,
+    code_challenge: opts.codeChallenge,
+    code_challenge_method: "S256",
     access_type: "offline",
     prompt: "select_account",
   });
@@ -48,7 +86,8 @@ export async function exchangeCode(
   clientId: string,
   clientSecret: string,
   code: string,
-  redirectUri: string
+  redirectUri: string,
+  codeVerifier: string
 ): Promise<{ id_token: string; access_token: string }> {
   const body = new URLSearchParams({
     client_id: clientId,
@@ -56,6 +95,7 @@ export async function exchangeCode(
     code,
     redirect_uri: redirectUri,
     grant_type: "authorization_code",
+    code_verifier: codeVerifier,
   });
 
   const res = await fetch(provider.tokenUrl, {
@@ -88,6 +128,7 @@ export interface IdTokenClaims {
   sub: string;
   email?: string;
   name?: string;
+  nonce?: string;
 }
 
 /**
@@ -105,5 +146,6 @@ export function decodeIdToken(idToken: string): IdTokenClaims {
     sub: payload.sub ?? "",
     email: payload.email ?? undefined,
     name: payload.name ?? undefined,
+    nonce: typeof payload.nonce === "string" ? payload.nonce : undefined,
   };
 }

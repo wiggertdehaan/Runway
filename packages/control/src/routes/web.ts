@@ -42,7 +42,8 @@ import {
   deletePreauthSession,
   getPreauthUserId,
 } from "../db/preauth.js";
-import { generateTotpSecret, totpUri, verifyTotp } from "../auth/totp.js";
+import { generateTotpSecret, totpUri } from "../auth/totp.js";
+import { verifyAndConsumeTotp } from "../db/totp-history.js";
 import { verifyPassword } from "../auth/password.js";
 import {
   consumeBackupCode,
@@ -472,7 +473,7 @@ webRoutes.get("/login", (c) => {
       </div>`
     : "";
 
-  const oauthError = error === "oauth_state" || error === "oauth_no_code" || error === "oauth_exchange" || error === "oauth_no_email"
+  const oauthError = error === "oauth_state" || error === "oauth_no_code" || error === "oauth_exchange" || error === "oauth_no_email" || error === "oauth_nonce"
     ? '<div class="error">OAuth login failed. Please try again.</div>'
     : "";
 
@@ -591,7 +592,7 @@ webRoutes.post("/login/2fa", async (c) => {
 
   let ok = false;
   if (/^\d{6}$/.test(code)) {
-    ok = verifyTotp(user.totp_secret!, code);
+    ok = verifyAndConsumeTotp(user.id, user.totp_secret!, code);
   } else {
     ok = await consumeBackupCode(user.id, code);
   }
@@ -1777,7 +1778,7 @@ webRoutes.post("/users/:id/2fa/reset", async (c) => {
   }
   const body = await c.req.parseBody();
   const code = ((body["code"] as string | undefined) ?? "").trim();
-  if (!verifyTotp(current.totp_secret!, code)) {
+  if (!verifyAndConsumeTotp(current.id, current.totp_secret!, code)) {
     return c.redirect("/users?error=1");
   }
 
@@ -2371,7 +2372,7 @@ webRoutes.post("/account/2fa/verify", async (c) => {
 
   const body = await c.req.parseBody();
   const code = ((body["code"] as string | undefined) ?? "").trim();
-  if (!verifyTotp(user.totp_secret, code)) {
+  if (!verifyAndConsumeTotp(user.id, user.totp_secret, code)) {
     return c.redirect("/account/2fa/verify?error=1");
   }
 
@@ -2418,7 +2419,7 @@ webRoutes.post("/account/2fa/disable", async (c) => {
   const body = await c.req.parseBody();
   const code = ((body["code"] as string | undefined) ?? "").trim();
   const ok =
-    verifyTotp(user.totp_secret!, code) ||
+    verifyAndConsumeTotp(user.id, user.totp_secret!, code) ||
     (await consumeBackupCode(user.id, code));
   if (!ok) return c.redirect("/account?error=1");
 
@@ -2434,7 +2435,7 @@ webRoutes.post("/account/2fa/regenerate", async (c) => {
 
   const body = await c.req.parseBody();
   const code = ((body["code"] as string | undefined) ?? "").trim();
-  if (!verifyTotp(user.totp_secret!, code)) {
+  if (!verifyAndConsumeTotp(user.id, user.totp_secret!, code)) {
     return c.redirect("/account?error=1");
   }
 

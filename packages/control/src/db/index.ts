@@ -48,6 +48,16 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_backup_codes_user
       ON user_backup_codes(user_id) WHERE used_at IS NULL;
 
+    -- Each accepted TOTP counter is recorded so that the same code
+    -- cannot be submitted twice within the drift window. Rows are
+    -- trimmed opportunistically when a new code is accepted.
+    CREATE TABLE IF NOT EXISTS used_totp_counters (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      counter INTEGER NOT NULL,
+      used_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, counter)
+    );
+
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
