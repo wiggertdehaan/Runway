@@ -22,7 +22,7 @@ Dockerfiles, builds, TLS certificates, and routing automatically.
 No CI/CD pipelines to configure. No Kubernetes. Just your code and a
 server.
 
-![Runway Dashboard](docs/dashboard2.png)
+![Runway Dashboard](docs/dashboard.png)
 
 ## Why Runway?
 
@@ -242,9 +242,17 @@ response, on the dashboard, and via `runway_get_scan` from the MCP.
 
 The web dashboard lets you manage apps, users, and settings.
 
-| Setup wizard | Empty state | App settings |
+| Login | Dashboard | Settings |
 |:---:|:---:|:---:|
-| ![Setup](docs/setup.png) | ![Empty](docs/dashboard-empty.png) | ![Settings](docs/settings.png) |
+| ![Login](docs/login.png) | ![Dashboard](docs/dashboard.png) | ![Settings](docs/settings.png) |
+
+| Deploy history | Config | Access & SSO |
+|:---:|:---:|:---:|
+| ![Deploys](docs/app-deploys.png) | ![Config](docs/app-config.png) | ![Access](docs/app-access.png) |
+
+| System health |
+|:---:|
+| ![Health](docs/health.png) |
 
 ## Tech stack
 
@@ -346,6 +354,10 @@ pnpm --filter @runway/control dev   # Dashboard on http://localhost:3000
 
 Planned improvements — contributions welcome:
 
+- **Invite flow for users** — replace admin-set passwords with invite links; invited user sets their own password on first visit
+- **Auto-refresh app status on dashboard** — poll or stream status on the apps list so transitions (e.g. `building` → `published`) are visible without a manual refresh
+- **App detail: sticky meta bar + scan in deploy table** — sticky summary bar (domain/status/uptime) across tabs; scan badge inline per deploy row instead of separate section
+- **Audit log filters** — filter by user/action/date, colored action badges, pagination, CSV export
 - **Multiple custom domains per app** — currently limited to one custom domain plus the auto-generated subdomain
 - ~~Server-wide scan floor~~ *(v0.5.4 — admin-configurable minimum threshold that all apps must respect, with per-app exemption for admins; low findings muted in badge and report UI)*
 - ~~Deploy version history UI~~ *(v0.5.2 — dashboard table of recent deploys with one-click restore to any successful version, also via API and MCP)*

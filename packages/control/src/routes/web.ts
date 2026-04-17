@@ -156,13 +156,13 @@ function layout(
     : "";
   const nav = username
     ? `<nav class="nav">
+         <a href="/" class="nav-brand">&#9992; Runway</a>
          <a href="/">Apps</a>
          ${adminLinks}
-         <a href="/account">Account</a>
-         <span class="meta" style="margin-left:0.25rem">v${escapeHtml(APP_VERSION)}</span>
-         <a href="https://github.com/wiggertdehaan/Runway" target="_blank" rel="noopener noreferrer" style="color:#737373;font-size:0.8rem" title="Documentation">Docs</a>
          <div class="nav-spacer"></div>
-         <span class="meta">${escapeHtml(username)}</span>
+         <span class="nav-meta">v${escapeHtml(APP_VERSION)}</span>
+         <span class="nav-meta"><a href="https://github.com/wiggertdehaan/Runway" target="_blank" rel="noopener noreferrer" title="Documentation">Docs</a></span>
+         <a href="/account" style="font-weight:400">${escapeHtml(username)}</a>
          <form method="POST" action="/logout" style="display:inline;margin:0">
            ${csrf ?? ""}
            <button type="submit" class="ghost">Logout</button>
@@ -178,30 +178,73 @@ function layout(
         <title>${title} - Runway</title>
         <script src="https://unpkg.com/htmx.org@2.0.4"></script>
         <style>
+          :root {
+            --bg: #0a0a0a; --bg-card: #171717; --bg-inset: #0f0f0f;
+            --border: #262626; --text: #e5e5e5; --text-muted: #8a8a8a; --text-dim: #6a6a6a;
+            --brand: #60a5fa; --brand-hover: #3b82f6;
+            --status-success: #4ade80; --status-success-bg: #14532d;
+            --status-warn: #fbbf24; --status-warn-bg: #3b2f00;
+            --status-error: #f87171; --status-error-bg: #7f1d1d;
+            --status-info: #60a5fa; --status-info-bg: #1e3a5f;
+            --status-neutral: #a3a3a3; --status-neutral-bg: #262626;
+          }
           * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #e5e5e5; padding: 2rem; }
-          h1 { font-size: 1.5rem; margin-bottom: 1.5rem; }
+          body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; }
+          h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 1.5rem; letter-spacing: -0.01em; }
           h2 { font-size: 1.1rem; }
           .container { max-width: 960px; margin: 0 auto; }
-          .app-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 1rem; }
+          .app-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1rem; }
           @media (max-width: 500px) { .app-grid { grid-template-columns: 1fr; } }
-          .nav { display: flex; gap: 1rem; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid #262626; }
-          .nav a { color: #e5e5e5; text-decoration: none; font-weight: 500; }
-          .nav a:hover { color: #60a5fa; }
+          .app-card { display: flex; flex-direction: column; border-left: 3px solid var(--border); }
+          .app-card.status-running { border-left-color: var(--status-success); }
+          .app-card.status-building, .app-card.status-starting { border-left-color: var(--status-warn); }
+          .app-card.status-failed, .app-card.status-exited { border-left-color: var(--status-error); }
+          .app-card.status-created { border-left-color: var(--status-info); }
+          .overflow-menu { position: relative; }
+          .overflow-menu summary { list-style: none; cursor: pointer; color: var(--text-dim); font-size: 1.1rem; padding: 0.1rem 0.4rem; border-radius: 4px; line-height: 1; }
+          .overflow-menu summary:hover { color: var(--text); background: var(--border); }
+          .overflow-menu summary::-webkit-details-marker { display: none; }
+          .overflow-menu[open] .overflow-dropdown { display: block; }
+          .overflow-dropdown { display: none; position: absolute; right: 0; top: 100%; z-index: 10; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 0.25rem; min-width: 180px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+          .overflow-dropdown button, .overflow-dropdown .overflow-item { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text-muted); font-size: 0.8rem; padding: 0.4rem 0.75rem; cursor: pointer; border-radius: 4px; font-family: inherit; }
+          .overflow-dropdown button:hover, .overflow-dropdown .overflow-item:hover { background: var(--border); color: var(--text); }
+          .overflow-dropdown .overflow-danger:hover { color: var(--status-error); }
+          .dashboard-filter { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+          .dashboard-filter input[type="search"] { flex: 1; min-width: 180px; }
+          .nav { display: flex; gap: 1rem; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+          .nav a { color: var(--text); text-decoration: none; font-weight: 500; }
+          .nav a:hover { color: var(--brand); }
+          .nav-brand { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.02em; margin-right: 0.75rem; color: var(--text) !important; }
+          .nav-brand:hover { color: var(--brand) !important; }
+          .nav-meta { font-size: 0.75rem; color: var(--text-dim); }
+          .nav-meta a { color: var(--text-dim); font-weight: 400; font-size: 0.75rem; }
+          .nav-meta a:hover { color: var(--text-muted); }
           .nav-spacer { flex: 1; }
-          .card { background: #171717; border: 1px solid #262626; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
+          .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
+          .tabs { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+          .tabs input[type="radio"] { display: none; }
+          .tabs label { padding: 0.6rem 1.2rem; cursor: pointer; color: var(--text-dim); border-bottom: 3px solid transparent; font-size: 0.95rem; font-weight: 500; transition: color 0.15s; }
+          .tabs label:hover { color: var(--text); }
+          .tabs input:checked + label { color: var(--text); border-bottom-color: var(--brand); }
+          .tab-panel { display: none; }
+          #tab-deploys:checked ~ .tab-panels .panel-deploys,
+          #tab-access:checked ~ .tab-panels .panel-access,
+          #tab-config:checked ~ .tab-panels .panel-config,
+          #tab-general:checked ~ .tab-panels .panel-general,
+          #tab-security:checked ~ .tab-panels .panel-security,
+          #tab-sso:checked ~ .tab-panels .panel-sso { display: block; }
           .card h2 { margin-bottom: 0.5rem; }
-          .meta { color: #737373; font-size: 0.85rem; }
-          .key { font-family: monospace; background: #262626; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; word-break: break-all; }
+          .meta { color: var(--text-muted); font-size: 0.85rem; }
+          .key { font-family: monospace; background: var(--border); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; word-break: break-all; }
           .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; text-transform: lowercase; }
-          .badge-created { background: #1e3a5f; color: #60a5fa; }
-          .badge-running { background: #14532d; color: #4ade80; }
-          .badge-starting, .badge-building { background: #3b2f00; color: #facc15; }
-          .badge-exited, .badge-stopped, .badge-failed { background: #451a03; color: #fb923c; }
+          .badge-created { background: var(--status-info-bg); color: var(--status-info); }
+          .badge-running { background: var(--status-success-bg); color: var(--status-success); }
+          .badge-starting, .badge-building { background: var(--status-warn-bg); color: var(--status-warn); }
+          .badge-exited, .badge-stopped, .badge-failed { background: var(--status-error-bg); color: var(--status-error); }
           .badge-restarting, .badge-paused { background: #3a1d5f; color: #c084fc; }
-          .badge-healthy { background: #14532d; color: #4ade80; }
-          .badge-unhealthy { background: #451a03; color: #fb923c; }
-          .badge-starting-health { background: #3b2f00; color: #facc15; }
+          .badge-healthy { background: var(--status-success-bg); color: var(--status-success); }
+          .badge-unhealthy { background: var(--status-error-bg); color: var(--status-error); }
+          .badge-starting-health { background: var(--status-warn-bg); color: var(--status-warn); }
           .stats {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -240,11 +283,28 @@ function layout(
           button.ghost:hover { background: #171717; }
           .flex { display: flex; gap: 0.5rem; align-items: center; }
           .between { justify-content: space-between; }
-          .auth-card { max-width: 400px; margin: 4rem auto; }
+          .auth-card { max-width: 400px; margin: 0 auto; min-height: calc(100vh - 8rem); display: flex; flex-direction: column; justify-content: center; }
           .auth-card input { width: 100%; margin-bottom: 0.75rem; }
-          .auth-card button { width: 100%; }
+          .auth-card button[type="submit"] { width: 100%; }
+          .auth-brand { text-align: center; margin-bottom: 2rem; }
+          .auth-brand h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+          .auth-brand p { color: var(--text-muted); font-size: 0.9rem; }
           .error { background: #451a1a; border: 1px solid #dc2626; color: #fca5a5; padding: 0.75rem; border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem; }
-          .hint { color: #737373; font-size: 0.85rem; margin-bottom: 1rem; }
+          .hint { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem; }
+          .feature-body { transition: opacity 0.15s; }
+          .feature-body.disabled { opacity: 0.35; pointer-events: none; }
+          .settings-layout { display: grid; grid-template-columns: 180px 1fr; gap: 2rem; }
+          .settings-nav { position: sticky; top: 2rem; align-self: start; display: flex; flex-direction: column; gap: 0.25rem; }
+          .settings-nav a { color: var(--text-dim); text-decoration: none; font-size: 0.85rem; padding: 0.4rem 0.75rem; border-radius: 4px; transition: color 0.15s, background 0.15s; }
+          .settings-nav a:hover { color: var(--text); background: var(--bg-card); }
+          .settings-nav a.active { color: var(--brand); background: var(--bg-card); }
+          @media (max-width: 700px) { .settings-layout { grid-template-columns: 1fr; } .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; } }
+          .health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.75rem; }
+          .health-tile { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; display: flex; align-items: flex-start; gap: 0.75rem; }
+          .health-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 0.3rem; flex-shrink: 0; }
+          .health-dot.ok { background: var(--status-success); }
+          .health-dot.warn { background: var(--status-warn); }
+          .health-dot.fail { background: var(--status-error); }
           .copy-group { position: relative; display: flex; align-items: stretch; background: #0f0f0f; border: 1px solid #262626; border-radius: 6px; margin-top: 0.5rem; }
           .copy-group code { flex: 1; padding: 0.6rem 0.75rem; background: transparent; border: none; font-size: 0.8rem; white-space: nowrap; overflow-x: auto; display: block; }
           .copy-btn { padding: 0.4rem 0.75rem; background: #262626; border: none; border-left: 1px solid #262626; color: #a3a3a3; cursor: pointer; font-size: 0.75rem; font-family: inherit; border-radius: 0 5px 5px 0; white-space: nowrap; }
@@ -256,6 +316,29 @@ function layout(
           .section-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.75rem; margin-top: 1.25rem; color: #a3a3a3; }
         </style>
         <script>
+          function filterApps() {
+            var q = (document.getElementById('app-search') || {}).value || '';
+            q = q.toLowerCase();
+            var cards = document.querySelectorAll('.app-card[data-name]');
+            var shown = 0;
+            cards.forEach(function(c) {
+              var match = !q || c.getAttribute('data-name').toLowerCase().indexOf(q) !== -1
+                || (c.getAttribute('data-domain') || '').toLowerCase().indexOf(q) !== -1;
+              c.style.display = match ? '' : 'none';
+              if (match) shown++;
+            });
+            var empty = document.getElementById('no-match');
+            if (empty) empty.style.display = shown === 0 && q ? '' : 'none';
+          }
+          document.addEventListener('click', function(e) {
+            document.querySelectorAll('.overflow-menu[open]').forEach(function(m) {
+              if (!m.contains(e.target)) m.removeAttribute('open');
+            });
+          });
+          function featureToggle(checkbox) {
+            var body = checkbox.closest('.card').querySelector('.feature-body');
+            if (body) { body.classList.toggle('disabled', !checkbox.checked); }
+          }
           function confirmDelete(form) {
             var expected = form.getAttribute('data-app-name');
             var input = prompt('Type "' + expected + '" to confirm deletion:');
@@ -292,7 +375,17 @@ function layout(
 }
 
 function authLayout(title: string, body: string, csrf?: string) {
-  return layout(title, `<div class="auth-card">${body}</div>`, { csrf });
+  return layout(
+    title,
+    `<div class="auth-card">
+      <div class="auth-brand">
+        <h1>&#9992; Runway</h1>
+        <p>Deploy AI apps to your own server</p>
+      </div>
+      ${body}
+    </div>`,
+    { csrf }
+  );
 }
 
 // ── Public routes (no auth) ──────────────────────────────
@@ -604,13 +697,26 @@ webRoutes.get("/", (c) => {
           </p>
         </div>
       ` : ""}
-      <div class="flex between" style="margin-bottom:1.5rem">
+      <div class="flex between" style="margin-bottom:1rem">
         <h1 style="margin:0">Apps</h1>
         <form method="POST" action="/apps" style="margin:0">
-          <button type="submit">+ New app</button>
+          <button type="submit" style="width:auto">+ New app</button>
         </form>
       </div>
-      ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:#60a5fa">Set one in settings</a> to get automatic subdomains.</p>' : ""}
+      ${apps.length > 0 ? (() => {
+        const running = apps.filter((a) => a.status === "running").length;
+        const failing = apps.filter((a) => ["failed", "exited"].includes(a.status)).length;
+        const parts = [`${apps.length} app${apps.length !== 1 ? "s" : ""}`];
+        if (running) parts.push(`<span style="color:var(--status-success)">${running} running</span>`);
+        if (failing) parts.push(`<span style="color:var(--status-error)">${failing} failing</span>`);
+        return `<div style="margin-bottom:1rem">
+          <p class="meta">${parts.join(" &middot; ")}</p>
+          ${apps.length >= 4 ? `<div class="dashboard-filter" style="margin-top:0.75rem">
+            <input type="search" id="app-search" placeholder="Search apps..." oninput="filterApps()" style="font-size:0.85rem" />
+          </div>` : ""}
+        </div>`;
+      })() : ""}
+      ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
       ${apps.length === 0 ? `
         <div class="card" style="text-align:center;padding:3rem 2rem">
           <h2 style="margin-bottom:1rem">Get started</h2>
@@ -629,7 +735,8 @@ webRoutes.get("/", (c) => {
             or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:#60a5fa">API docs</a>.
           </p>
         </div>
-      ` : `<div class="app-grid">${appCards}</div>`}
+      ` : `<div class="app-grid">${appCards}</div>
+      <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your search.</p>`}
     `,
       { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
@@ -941,7 +1048,7 @@ function renderAppCard(
 
   const domain = app.custom_domain ?? app.domain;
   const domainLink = domain
-    ? `<a href="https://${encodeURI(domain)}" target="_blank" rel="noopener noreferrer" class="app-domain">${escapeHtml(domain)}</a>`
+    ? `<a href="https://${encodeURI(domain)}" target="_blank" rel="noopener noreferrer" style="color:var(--brand);text-decoration:none;font-size:0.95rem;font-weight:500;display:block;margin-bottom:0.5rem">${escapeHtml(domain)} &#8599;</a>`
     : "";
 
   const llmsTxtUrl = dashboardDomain
@@ -951,61 +1058,59 @@ function renderAppCard(
 
   const statsPlaceholder = configured
     ? `<div hx-get="/apps/${encodeURIComponent(app.id)}/stats" hx-trigger="load" hx-swap="outerHTML">
-        <div class="stats">
-          <div><div class="stat-label">Runtime</div><div class="stat-value">${escapeHtml(app.runtime!)}</div></div>
-          <div><div class="stat-label">Image</div><div class="stat-value meta">...</div></div>
-          <div><div class="stat-label">Memory</div><div class="stat-value meta">...</div></div>
-          <div><div class="stat-label">Uptime</div><div class="stat-value meta">...</div></div>
+        <div class="stats" style="grid-template-columns:repeat(4,1fr);gap:0.5rem;padding:0.5rem;margin-top:0.5rem">
+          <div><div class="stat-label">Runtime</div><div class="stat-value" style="font-size:0.8rem">${escapeHtml(app.runtime!)}</div></div>
+          <div><div class="stat-label">Image</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
+          <div><div class="stat-label">Memory</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
+          <div><div class="stat-label">Uptime</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
         </div>
       </div>`
     : "";
 
-  const creator = app.created_by
-    ? `<span class="meta" style="font-size:0.75rem">${escapeHtml(app.created_by)}</span>`
+  const initials = app.created_by
+    ? app.created_by.slice(0, 2).toUpperCase()
+    : "";
+  const avatar = initials
+    ? `<span title="${escapeHtml(app.created_by ?? "")}" style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--border);color:var(--text-muted);font-size:0.6rem;font-weight:600;flex-shrink:0">${escapeHtml(initials)}</span>`
     : "";
 
-  // Brand-new (unconfigured) apps get a full-width call-to-action that
-  // spells out the exact next step. Configured apps only need compact
-  // copy buttons with the instruction behind a tooltip.
-  const deployBlock = configured
-    ? `<div style="margin-top:auto;padding-top:0.75rem;display:flex;gap:0.5rem;align-items:center">
-        <button type="button" class="ghost" style="padding:0.2rem 0.5rem;font-size:0.75rem" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)" title="${escapeHtml(claudeInstruction)}">Copy deploy instruction</button>
-        <button type="button" class="ghost" style="padding:0.2rem 0.5rem;font-size:0.75rem" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)" title="Copy the raw API key (for manual curl / CI use)">Copy API key</button>
-        ${creator}
-      </div>`
-    : `<div style="margin-top:auto;padding-top:0.75rem;border-top:1px solid #262626">
-        <p style="font-size:0.8rem;margin:0 0 0.5rem;color:#a3a3a3">
-          <strong style="color:#e5e5e5">Next step:</strong> open your project in
-          <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">Claude Code</a>
-          and paste this instruction. Claude will fetch the API docs, package your
-          project, upload it, and deploy — no config required.
+  const overflowMenu = `
+    <details class="overflow-menu">
+      <summary>&#8943;</summary>
+      <div class="overflow-dropdown">
+        ${configured ? `<a href="/apps/${encodeURIComponent(app.id)}" class="overflow-item" style="text-decoration:none">Settings</a>` : ""}
+        <button type="button" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy deploy instruction</button>
+        <button type="button" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)">Copy API key</button>
+        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/delete" style="margin:0" data-app-name="${escapeHtml(configured ? app.name! : app.id)}" onsubmit="return confirmDelete(this)">
+          <button type="submit" class="overflow-danger">Delete app</button>
+        </form>
+      </div>
+    </details>`;
+
+  const unconfiguredBlock = !configured
+    ? `<div style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)">
+        <p style="font-size:0.8rem;margin:0 0 0.5rem;color:var(--text-muted)">
+          Paste this in <a href="https://claude.ai/code" target="_blank" rel="noopener" style="color:var(--brand)">Claude Code</a>:
         </p>
-        <pre style="background:#0a0a0a;border:1px solid #262626;border-radius:4px;padding:0.5rem 0.75rem;margin:0 0 0.5rem;font-size:0.7rem;white-space:pre-wrap;word-break:break-all;color:#d4d4d4;user-select:all">${escapeHtml(claudeInstruction)}</pre>
-        <div class="flex" style="gap:0.5rem;align-items:center">
-          <button type="button" style="padding:0.3rem 0.75rem;font-size:0.75rem" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)" title="Copies the full line above to your clipboard">Copy deploy instruction</button>
-          <button type="button" class="ghost" style="padding:0.3rem 0.6rem;font-size:0.75rem" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)" title="Copy just the API key (rwy_...) for manual use">Copy API key only</button>
-          ${creator}
-        </div>
-      </div>`;
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;margin:0 0 0.5rem;font-size:0.65rem;white-space:pre-wrap;word-break:break-all;color:#d4d4d4;user-select:all">${escapeHtml(claudeInstruction)}</pre>
+        <button type="button" style="padding:0.25rem 0.6rem;font-size:0.75rem;width:auto" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy</button>
+      </div>`
+    : "";
 
   return `
-    <div class="card" style="display:flex;flex-direction:column${configured ? "" : ";border-color:#1e3a8a"}">
+    <div class="card app-card status-${escapeHtml(app.status)}" data-name="${escapeHtml(app.name ?? app.id)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${escapeHtml(app.status)}"${!configured ? ' style="border-color:var(--status-info-bg)"' : ""}>
       <div class="flex between" style="margin-bottom:0.25rem">
-        <div class="app-header">
-          <h2 style="font-size:1rem">${title}</h2>
+        <div style="display:flex;align-items:center;gap:0.5rem;min-width:0">
+          ${avatar}
+          <h2 style="font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</h2>
           <span class="badge badge-${escapeHtml(app.status)}" hx-get="/apps/${encodeURIComponent(app.id)}/badge" hx-trigger="load" hx-swap="outerHTML">${escapeHtml(app.status)}</span>
           ${configured ? renderScanBadge(app) : ""}
         </div>
-        <div class="flex" style="gap:0.25rem">
-          ${configured ? `<a href="/apps/${encodeURIComponent(app.id)}" title="Settings" style="color:#737373;text-decoration:none;font-size:1rem;padding:0.1rem 0.3rem;border-radius:4px;line-height:1" onmouseover="this.style.color='#e5e5e5'" onmouseout="this.style.color='#737373'">&#9881;</a>` : ""}
-          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/delete" style="margin:0" data-app-name="${escapeHtml(configured ? app.name! : app.id)}" onsubmit="return confirmDelete(this)">
-            <button type="submit" title="Delete" style="background:transparent;border:none;color:#737373;font-size:1rem;padding:0.1rem 0.3rem;cursor:pointer;line-height:1" onmouseover="this.style.color='#dc2626'" onmouseout="this.style.color='#737373'">&#128465;</button>
-          </form>
-        </div>
+        ${overflowMenu}
       </div>
       ${domainLink}
       ${statsPlaceholder}
-      ${deployBlock}
+      ${unconfiguredBlock}
     </div>
   `;
 }
@@ -1098,154 +1203,166 @@ webRoutes.get("/apps/:id", (c) => {
       ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Saved.</div>' : ""}
       ${rollbackError ? `<div class="card" style="border-color:#7f1d1d;color:#fca5a5"><strong>Rollback failed:</strong> ${escapeHtml(rollbackError)}</div>` : ""}
 
-      <div class="card">
-        <h2>Custom domain</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Point a CNAME or A record to the Runway server, then enter the domain here.
-          Traefik will issue a Let's Encrypt certificate automatically.
-        </p>
-        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/domain">
-          <div class="flex">
-            <input type="text" name="custom_domain" value="${escapeHtml(app.custom_domain ?? "")}" placeholder="app.example.com" style="flex:1" />
-            <button type="submit">Save</button>
+      <div class="tabs">
+        <input type="radio" name="app-tab" id="tab-deploys" checked />
+        <label for="tab-deploys">Deploys</label>
+        <input type="radio" name="app-tab" id="tab-access" />
+        <label for="tab-access">Access</label>
+        <input type="radio" name="app-tab" id="tab-config" />
+        <label for="tab-config">Config</label>
+
+        <div class="tab-panels" style="width:100%">
+          <!-- ── Deploys tab ────────────────────────── -->
+          <div class="tab-panel panel-deploys">
+            ${renderDeployHistory(app)}
+            ${renderScanSection(app, isAdmin(user))}
           </div>
-        </form>
-      </div>
 
-      <div class="card">
-        <h2>Health check</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          HTTP path to probe inside the container every 30 seconds. Leave empty to disable.
-          Takes effect on the next deploy.
-        </p>
-        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/healthcheck">
-          <div class="flex">
-            <input type="text" name="path" value="${escapeHtml(app.health_check_path ?? "")}" placeholder="/health" style="flex:1" />
-            <button type="submit">Save</button>
+          <!-- ── Access tab ─────────────────────────── -->
+          <div class="tab-panel panel-access">
+            <div class="card">
+              <h2>Custom domain</h2>
+              <p class="hint" style="margin:0.5rem 0 1rem">
+                Point a CNAME or A record to the Runway server, then enter the domain here.
+                Traefik will issue a Let's Encrypt certificate automatically.
+              </p>
+              <form method="POST" action="/apps/${encodeURIComponent(app.id)}/domain">
+                <div class="flex">
+                  <input type="text" name="custom_domain" value="${escapeHtml(app.custom_domain ?? "")}" placeholder="app.example.com" style="flex:1" />
+                  <button type="submit">Save</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="card">
+              <h2>Basic auth</h2>
+              <p class="hint" style="margin:0.5rem 0 1rem">
+                Put HTTP basic auth in front of this app at the gateway.
+              </p>
+              <form method="POST" action="/apps/${encodeURIComponent(app.id)}/basic-auth">
+                <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
+                  <input type="checkbox" name="enabled" value="1"${app.basic_auth_enabled ? " checked" : ""} onchange="featureToggle(this)" />
+                  Require basic auth
+                </label>
+                <div class="feature-body${app.basic_auth_enabled ? "" : " disabled"}">
+                  <div class="flex" style="margin-bottom:0.5rem">
+                    <input type="text" name="username" value="${escapeHtml(app.basic_auth_username ?? "")}" placeholder="username" autocomplete="off" style="flex:1" />
+                    <input type="password" name="password" placeholder="${app.basic_auth_enabled ? "leave blank to keep" : "password"}" autocomplete="new-password" style="flex:1" />
+                  </div>
+                </div>
+                <button type="submit" style="margin-top:0.5rem">Save</button>
+              </form>
+            </div>
+
+            <div class="card" id="sso">
+              <h2>SSO protection</h2>
+              <p class="hint" style="margin:0.5rem 0 1rem">
+                Protect this app with Single Sign-On via the subdomain.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
+              </p>
+              <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso">
+                <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
+                  <input type="checkbox" name="enabled" value="1"${app.sso_enabled ? " checked" : ""} onchange="featureToggle(this)" />
+                  Enable SSO
+                </label>
+                <div class="feature-body${app.sso_enabled ? "" : " disabled"}">
+                  <h3 style="margin:0 0 0.5rem;font-size:0.85rem">Allowed emails</h3>
+                  ${(() => {
+                    const emails = getAppAllowedEmails(app.id);
+                    return emails.length > 0
+                      ? `<div style="margin-bottom:0.5rem">${emails.map((e) =>
+                          `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem">
+                            <code style="flex:1;font-size:0.8rem">${escapeHtml(e)}</code>
+                            <button type="submit" class="ghost" formaction="/apps/${encodeURIComponent(app.id)}/sso/email/delete" formmethod="post" name="email" value="${escapeHtml(e)}" style="font-size:0.7rem;padding:0.15rem 0.4rem;color:var(--status-error)">&times;</button>
+                          </div>`
+                        ).join("")}</div>`
+                      : '<p class="meta" style="margin-bottom:0.5rem;font-size:0.8rem">No emails in allow list.</p>';
+                  })()}
+                  <div class="flex">
+                    <input type="email" name="new_email" placeholder="user@example.com" style="flex:1" />
+                  </div>
+                </div>
+                <button type="submit" style="margin-top:0.5rem">Save</button>
+              </form>
+            </div>
           </div>
-        </form>
-      </div>
 
-      <div class="card">
-        <h2>Basic auth</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Put HTTP basic auth in front of this app at the gateway. Useful for
-          quickly password-protecting an internal tool. Only one username is
-          supported per app; leave username &amp; password empty and uncheck
-          to disable.
-        </p>
-        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/basic-auth">
-          <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
-            <input type="checkbox" name="enabled" value="1"${app.basic_auth_enabled ? " checked" : ""} />
-            Require basic auth
-          </label>
-          <div class="flex" style="margin-bottom:0.5rem">
-            <input type="text" name="username" value="${escapeHtml(app.basic_auth_username ?? "")}" placeholder="username" autocomplete="off" style="flex:1" />
-            <input type="password" name="password" placeholder="${app.basic_auth_enabled ? "leave blank to keep current" : "password"}" autocomplete="new-password" style="flex:1" />
-            <button type="submit">Save</button>
+          <!-- ── Config tab ─────────────────────────── -->
+          <div class="tab-panel panel-config">
+            <div class="card">
+              <h2>Health check</h2>
+              <p class="hint" style="margin:0.5rem 0 1rem">
+                HTTP path to probe inside the container every 30 seconds. Leave empty to disable.
+                Takes effect on the next deploy.
+              </p>
+              <form method="POST" action="/apps/${encodeURIComponent(app.id)}/healthcheck">
+                <div class="flex">
+                  <input type="text" name="path" value="${escapeHtml(app.health_check_path ?? "")}" placeholder="/health" style="flex:1" />
+                  <button type="submit">Save</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="card">
+              <h2>Environment variables</h2>
+              <p class="hint" style="margin:0.5rem 0 1rem">
+                Set secrets and configuration here. Changes take effect on the next deploy.
+              </p>
+              ${
+                Object.keys(env).length > 0
+                  ? `<div style="overflow-x:auto;margin-bottom:1rem">
+                      <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+                        <thead>
+                          <tr style="text-align:left;border-bottom:1px solid #262626">
+                            <th style="padding:0.5rem 0.75rem">Key</th>
+                            <th style="padding:0.5rem 0.75rem">Value</th>
+                            <th style="padding:0.5rem 0.75rem"></th>
+                          </tr>
+                        </thead>
+                        <tbody>${envRows}</tbody>
+                      </table>
+                    </div>`
+                  : '<p class="meta" style="margin-bottom:1rem">No environment variables set.</p>'
+              }
+              <form method="POST" action="/apps/${encodeURIComponent(app.id)}/env">
+                <div class="flex">
+                  <input type="text" name="key" placeholder="KEY" pattern="[A-Za-z_][A-Za-z0-9_]*" required style="width:12rem" />
+                  <input type="text" name="value" placeholder="value" required style="flex:1" />
+                  <button type="submit">Add</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="card">
+              <h2>Persistent volumes</h2>
+              <p class="hint" style="margin:0.5rem 0 1rem">
+                Mount paths inside the container that persist across redeploys.
+                Data is stored in named Docker volumes. Changes take effect on the next deploy.
+              </p>
+              ${
+                volumes.length > 0
+                  ? `<div style="overflow-x:auto;margin-bottom:1rem">
+                      <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+                        <thead>
+                          <tr style="text-align:left;border-bottom:1px solid #262626">
+                            <th style="padding:0.5rem 0.75rem">Mount path</th>
+                            <th style="padding:0.5rem 0.75rem">Added</th>
+                            <th style="padding:0.5rem 0.75rem"></th>
+                          </tr>
+                        </thead>
+                        <tbody>${volRows}</tbody>
+                      </table>
+                    </div>`
+                  : '<p class="meta" style="margin-bottom:1rem">No volumes configured.</p>'
+              }
+              <form method="POST" action="/apps/${encodeURIComponent(app.id)}/volumes">
+                <div class="flex">
+                  <input type="text" name="mount_path" placeholder="/app/data" pattern="/.*" required style="flex:1" />
+                  <button type="submit">Add</button>
+                </div>
+              </form>
+            </div>
           </div>
-          <p class="meta" style="font-size:0.8rem">
-            ${app.basic_auth_enabled ? `Currently enabled for user <code>${escapeHtml(app.basic_auth_username ?? "")}</code>.` : "Currently disabled."}
-          </p>
-        </form>
-      </div>
-
-      <div class="card" id="sso">
-        <h2>SSO protection</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Protect this app with Single Sign-On. Only users with emails in the
-          allow list can access the app via the subdomain. Requires at least one
-          OAuth provider configured in Settings.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:#fbbf24">SSO takes precedence over basic auth.</strong>' : ""}
-        </p>
-        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso">
-          <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
-            <input type="checkbox" name="enabled" value="1"${app.sso_enabled ? " checked" : ""} />
-            Enable SSO
-          </label>
-          <h3 style="margin:0 0 0.5rem;font-size:0.85rem">Allowed emails</h3>
-          ${(() => {
-            const emails = getAppAllowedEmails(app.id);
-            return emails.length > 0
-              ? `<div style="margin-bottom:0.5rem">${emails.map((e) =>
-                  `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem">
-                    <code style="flex:1;font-size:0.8rem">${escapeHtml(e)}</code>
-                    <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso/email/delete" style="margin:0">
-                      <input type="hidden" name="email" value="${escapeHtml(e)}" />
-                      <button type="submit" class="ghost" style="font-size:0.7rem;padding:0.15rem 0.4rem;color:#f87171">&times;</button>
-                    </form>
-                  </div>`
-                ).join("")}</div>`
-              : '<p class="meta" style="margin-bottom:0.5rem;font-size:0.8rem">No emails in allow list.</p>';
-          })()}
-          <div class="flex">
-            <input type="email" name="new_email" placeholder="user@example.com" style="flex:1" />
-            <button type="submit">Save</button>
-          </div>
-        </form>
-      </div>
-
-      ${renderDeployHistory(app)}
-
-      ${renderScanSection(app, isAdmin(user))}
-
-      <div class="card">
-        <h2>Environment variables</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Set secrets and configuration here. Changes take effect on the next deploy.
-        </p>
-        ${
-          Object.keys(env).length > 0
-            ? `<div style="overflow-x:auto;margin-bottom:1rem">
-                <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
-                  <thead>
-                    <tr style="text-align:left;border-bottom:1px solid #262626">
-                      <th style="padding:0.5rem 0.75rem">Key</th>
-                      <th style="padding:0.5rem 0.75rem">Value</th>
-                      <th style="padding:0.5rem 0.75rem"></th>
-                    </tr>
-                  </thead>
-                  <tbody>${envRows}</tbody>
-                </table>
-              </div>`
-            : '<p class="meta" style="margin-bottom:1rem">No environment variables set.</p>'
-        }
-        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/env">
-          <div class="flex">
-            <input type="text" name="key" placeholder="KEY" pattern="[A-Za-z_][A-Za-z0-9_]*" required style="width:12rem" />
-            <input type="text" name="value" placeholder="value" required style="flex:1" />
-            <button type="submit">Add</button>
-          </div>
-        </form>
-      </div>
-
-      <div class="card">
-        <h2>Persistent volumes</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Mount paths inside the container that persist across redeploys.
-          Data is stored in named Docker volumes. Changes take effect on the next deploy.
-        </p>
-        ${
-          volumes.length > 0
-            ? `<div style="overflow-x:auto;margin-bottom:1rem">
-                <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
-                  <thead>
-                    <tr style="text-align:left;border-bottom:1px solid #262626">
-                      <th style="padding:0.5rem 0.75rem">Mount path</th>
-                      <th style="padding:0.5rem 0.75rem">Added</th>
-                      <th style="padding:0.5rem 0.75rem"></th>
-                    </tr>
-                  </thead>
-                  <tbody>${volRows}</tbody>
-                </table>
-              </div>`
-            : '<p class="meta" style="margin-bottom:1rem">No volumes configured.</p>'
-        }
-        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/volumes">
-          <div class="flex">
-            <input type="text" name="mount_path" placeholder="/app/data" pattern="/.*" required style="flex:1" />
-            <button type="submit">Add</button>
-          </div>
-        </form>
+        </div>
       </div>
     `,
       { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
@@ -1668,88 +1785,114 @@ webRoutes.get("/settings", (c) => {
       <h1>Settings</h1>
       ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Settings saved.</div>' : ""}
       ${dnsWarning ? `<div class="error">${escapeHtml(dnsWarning)}</div>` : ""}
-      <div class="card">
-        <h2>Base domain</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Wildcard domain used to generate subdomains for your apps. Point a DNS
-          record <span class="key">*.your-domain</span> to this server's public IP.
-          When set, new apps get <span class="key">&lt;app-slug&gt;.your-domain</span>
-          automatically and Traefik issues Let's Encrypt certificates on demand.
-        </p>
-        <form method="POST" action="/settings">
-          <div class="flex">
-            <input type="text" name="base_domain" value="${escapeHtml(baseDomain)}" placeholder="runway.example.com" style="flex:1" />
-            <button type="submit">Save</button>
-          </div>
-        </form>
-      </div>
 
-      <div class="card">
-        <h2>Security scan floor</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Server-wide minimum severity at which deploys are blocked. Individual
-          apps can set a stricter threshold, but cannot go below this floor.
-          Admins can exempt specific apps from the floor on the app detail page.
-          Set to None to leave blocking entirely up to per-app settings.
-        </p>
-        <form method="POST" action="/settings/scan-floor">
-          <div class="flex">
-            <select name="threshold" style="flex:1">
-              ${THRESHOLDS.map((t) => {
-                const sel = t === minScanThreshold ? " selected" : "";
-                const labels: Record<string, string> = {
-                  none: "None — no server-wide floor",
-                  low: "Low — block on any finding",
-                  medium: "Medium — block on medium+",
-                  high: "High — block on high/critical",
-                  critical: "Critical — block only on critical",
-                };
-                return `<option value="${t}"${sel}>${escapeHtml(labels[t] ?? t)}</option>`;
-              }).join("")}
-            </select>
-            <button type="submit">Save</button>
+      <div class="settings-layout">
+        <nav class="settings-nav">
+          <a href="#domain">Base domain</a>
+          <a href="#notifications">Notifications</a>
+          <a href="#scan-floor">Scan floor</a>
+          <a href="#sso">Single Sign-On</a>
+        </nav>
+        <div>
+          <div class="card" id="domain">
+            <h2>Base domain</h2>
+            <p class="hint" style="margin:0.5rem 0 1rem">
+              Wildcard domain for app subdomains. Point <span class="key">*.your-domain</span> to this server.
+            </p>
+            <form method="POST" action="/settings">
+              <div class="flex">
+                <input type="text" name="base_domain" value="${escapeHtml(baseDomain)}" placeholder="runway.example.com" style="flex:1" />
+                <button type="submit">Save</button>
+              </div>
+            </form>
           </div>
-        </form>
-      </div>
 
-      <div class="card">
-        <h2>Single Sign-On (OAuth2)</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Configure OAuth2 providers for dashboard login and SSO app protection.
-          Register a callback URL of <code>${escapeHtml(baseDomain ? `https://${baseDomain}` : "(set base domain first)")}/auth/{provider}/callback</code>
-          in each provider's console.
-        </p>
-        <h3 style="margin:0.5rem 0;font-size:0.9rem">Google</h3>
-        <form method="POST" action="/settings/oauth/google" style="margin-bottom:1rem">
-          <div style="display:grid;gap:0.5rem">
-            <input type="text" name="client_id" value="${escapeHtml(googleClientId)}" placeholder="Client ID" />
-            <input type="password" name="client_secret" value="" placeholder="${googleClientId ? "Client secret (leave blank to keep)" : "Client secret"}" autocomplete="new-password" />
-            <button type="submit">Save Google</button>
+          <div class="card" id="notifications">
+            <h2>Deploy notifications</h2>
+            <p class="hint" style="margin:0.5rem 0 1rem">
+              Webhook URL called on deploy failure. Works with Slack, Discord, ntfy.
+            </p>
+            <form method="POST" action="/settings/webhook">
+              <div class="flex">
+                <input type="url" name="webhook_url" value="${escapeHtml(webhookUrl)}" placeholder="https://hooks.slack.com/..." style="flex:1" />
+                <button type="submit">Save</button>
+              </div>
+            </form>
           </div>
-        </form>
-        <h3 style="margin:0.5rem 0;font-size:0.9rem">Microsoft</h3>
-        <form method="POST" action="/settings/oauth/microsoft" style="margin-bottom:0.5rem">
-          <div style="display:grid;gap:0.5rem">
-            <input type="text" name="client_id" value="${escapeHtml(microsoftClientId)}" placeholder="Client ID" />
-            <input type="password" name="client_secret" value="" placeholder="${microsoftClientId ? "Client secret (leave blank to keep)" : "Client secret"}" autocomplete="new-password" />
-            <button type="submit">Save Microsoft</button>
-          </div>
-        </form>
-      </div>
 
-      <div class="card">
-        <h2>Deploy notifications</h2>
-        <p class="hint" style="margin:0.5rem 0 1rem">
-          Webhook URL to receive a POST request when a deploy fails. Works with
-          Slack, Discord, ntfy, or any service that accepts JSON webhooks. Leave
-          empty to disable.
-        </p>
-        <form method="POST" action="/settings/webhook">
-          <div class="flex">
-            <input type="url" name="webhook_url" value="${escapeHtml(webhookUrl)}" placeholder="https://hooks.slack.com/..." style="flex:1" />
-            <button type="submit">Save</button>
+          <div class="card" id="scan-floor">
+            <h2>Scan floor</h2>
+            <p class="hint" style="margin:0.5rem 0 1rem">
+              Server-wide minimum severity at which deploys are blocked.
+              Apps can be stricter but not looser. Admins can exempt individual apps.
+            </p>
+            <form method="POST" action="/settings/scan-floor">
+              <div class="flex">
+                <select name="threshold" style="flex:1">
+                  ${THRESHOLDS.map((t) => {
+                    const sel = t === minScanThreshold ? " selected" : "";
+                    const labels: Record<string, string> = {
+                      none: "None — no server-wide floor",
+                      low: "Low — block on any finding",
+                      medium: "Medium — block on medium+",
+                      high: "High — block on high/critical",
+                      critical: "Critical — block only on critical",
+                    };
+                    return `<option value="${t}"${sel}>${escapeHtml(labels[t] ?? t)}</option>`;
+                  }).join("")}
+                </select>
+                <button type="submit">Save</button>
+              </div>
+            </form>
           </div>
-        </form>
+
+          <div class="card" id="sso">
+            <h2>Single Sign-On</h2>
+            <p class="hint" style="margin:0.5rem 0 1rem">
+              OAuth2 providers for dashboard login and per-app SSO.
+            </p>
+
+            <details style="margin-bottom:1rem;background:var(--bg-inset);padding:0.75rem 1rem;border-radius:6px;border:1px solid var(--border)">
+              <summary style="cursor:pointer;font-size:0.85rem;font-weight:500;color:var(--brand)">
+                ${googleClientId ? "&#9679; Google — Connected" : "&#9675; Google — Not configured"}
+              </summary>
+              <div style="margin-top:0.75rem;font-size:0.8rem;line-height:1.6;color:var(--text-muted)">
+                <ol style="margin:0 0 0.75rem 1.25rem">
+                  <li>Open <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style="color:var(--brand)">Google Cloud Console</a></li>
+                  <li>Create OAuth client ID (type: Web application)</li>
+                  <li>Redirect URI: <code style="font-size:0.75rem">${escapeHtml(baseDomain ? `https://${baseDomain}/auth/google/callback` : "(set base domain first)")}</code></li>
+                </ol>
+                <form method="POST" action="/settings/oauth/google">
+                  <div style="display:grid;gap:0.5rem">
+                    <input type="text" name="client_id" value="${escapeHtml(googleClientId)}" placeholder="Client ID" />
+                    <input type="password" name="client_secret" value="" placeholder="${googleClientId ? "Secret (leave blank to keep)" : "Client secret"}" autocomplete="new-password" />
+                    <div><button type="submit" style="width:auto">Save Google</button></div>
+                  </div>
+                </form>
+              </div>
+            </details>
+
+            <details style="background:var(--bg-inset);padding:0.75rem 1rem;border-radius:6px;border:1px solid var(--border)">
+              <summary style="cursor:pointer;font-size:0.85rem;font-weight:500;color:var(--brand)">
+                ${microsoftClientId ? "&#9679; Microsoft — Connected" : "&#9675; Microsoft — Not configured"}
+              </summary>
+              <div style="margin-top:0.75rem;font-size:0.8rem;line-height:1.6;color:var(--text-muted)">
+                <ol style="margin:0 0 0.75rem 1.25rem">
+                  <li>Open <a href="https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener" style="color:var(--brand)">Azure Portal</a></li>
+                  <li>Register app, add redirect URI (type: Web):<br/><code style="font-size:0.75rem">${escapeHtml(baseDomain ? `https://${baseDomain}/auth/microsoft/callback` : "(set base domain first)")}</code></li>
+                  <li>Under Certificates &amp; secrets, create a client secret</li>
+                </ol>
+                <form method="POST" action="/settings/oauth/microsoft">
+                  <div style="display:grid;gap:0.5rem">
+                    <input type="text" name="client_id" value="${escapeHtml(microsoftClientId)}" placeholder="Client ID" />
+                    <input type="password" name="client_secret" value="" placeholder="${microsoftClientId ? "Secret (leave blank to keep)" : "Client secret"}" autocomplete="new-password" />
+                    <div><button type="submit" style="width:auto">Save Microsoft</button></div>
+                  </div>
+                </form>
+              </div>
+            </details>
+          </div>
+        </div>
       </div>
     `,
       { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
@@ -1938,15 +2081,22 @@ webRoutes.get("/health", async (c) => {
     detail: scanner.db.detail,
   });
 
-  const rows = checks
+  const allOk = checks.every((ch) => ch.ok);
+  const failCount = checks.filter((ch) => !ch.ok).length;
+  const summaryText = allOk
+    ? `All ${checks.length} components healthy`
+    : `${failCount} issue${failCount !== 1 ? "s" : ""} detected`;
+  const summaryColor = allOk ? "var(--status-success)" : "var(--status-error)";
+
+  const tiles = checks
     .map(
       (ch) => `
-      <div class="card" style="border-color:${ch.ok ? "#14532d" : "#451a03"}">
-        <div class="flex between">
-          <h2>${escapeHtml(ch.name)}</h2>
-          <span class="badge ${ch.ok ? "badge-running" : "badge-failed"}">${ch.ok ? "ok" : "issue"}</span>
+      <div class="health-tile"${!ch.ok ? ' style="border-color:var(--status-error-bg)"' : ""}>
+        <div class="health-dot ${ch.ok ? "ok" : "fail"}"></div>
+        <div>
+          <div style="font-weight:600;font-size:0.9rem;margin-bottom:0.2rem">${escapeHtml(ch.name)}</div>
+          <div class="meta" style="font-size:0.8rem">${escapeHtml(ch.detail)}</div>
         </div>
-        <p class="meta" style="margin-top:0.5rem">${escapeHtml(ch.detail)}</p>
       </div>`
     )
     .join("");
@@ -1955,9 +2105,11 @@ webRoutes.get("/health", async (c) => {
     layout(
       "Health",
       `
-      <h1>System health</h1>
-      <p class="hint">Status of core Runway components.</p>
-      ${rows}
+      <div class="flex between" style="margin-bottom:1.5rem">
+        <h1 style="margin-bottom:0">System health</h1>
+        <span style="color:${summaryColor};font-size:0.85rem;font-weight:500">${summaryText}</span>
+      </div>
+      <div class="health-grid">${tiles}</div>
     `,
       { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
