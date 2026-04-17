@@ -28,15 +28,17 @@ import {
   getUserByUsername,
   isTotpEnabled,
   listUsers,
+  setPassword,
   setTotpPending,
 } from "../db/users.js";
-import { createSession, deleteSession } from "../db/sessions.js";
+import { createSession, deleteAllUserSessions, deleteSession } from "../db/sessions.js";
 import {
   createPreauthSession,
   deletePreauthSession,
   getPreauthUserId,
 } from "../db/preauth.js";
 import { generateTotpSecret, totpUri, verifyTotp } from "../auth/totp.js";
+import { verifyPassword } from "../auth/password.js";
 import {
   consumeBackupCode,
   deleteBackupCodes,
@@ -57,6 +59,8 @@ import {
 } from "../middleware/session.js";
 import { logAudit, getRecentAuditEntries } from "../db/audit.js";
 import { updateApp } from "../db/apps.js";
+import { getLatestDeployWithScan } from "../db/deploys.js";
+import { THRESHOLDS, isValidThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
 import { writeAppRoute } from "../deploy/gateway.js";
 import { appContainerName, destroyApp } from "../deploy/index.js";
 import { docker } from "../deploy/docker.js";
@@ -139,6 +143,7 @@ function layout(title: string, body: string, opts?: { username?: string; csrf?: 
          <div class="nav-spacer"></div>
          <span class="meta">${escapeHtml(username)}</span>
          <form method="POST" action="/logout" style="display:inline;margin:0">
+           ${csrf ?? ""}
            <button type="submit" class="ghost">Logout</button>
          </form>
        </nav>`
@@ -569,6 +574,132 @@ webRoutes.post("/apps", (c) => {
   return c.redirect("/");
 });
 
+function renderScanSection(
+  app: ReturnType<typeof listApps>[number]
+): string {
+  const thresholdOptions = THRESHOLDS.map((t) => {
+    const selected = app.scan_threshold === t ? " selected" : "";
+    const labels: Record<Threshold, string> = {
+      none: "None — never block (warn only)",
+      low: "Low — block on any finding",
+      medium: "Medium — block on medium+ findings",
+      high: "High — block on high/critical",
+      critical: "Critical — block only on critical",
+    };
+    return `<option value="${t}"${selected}>${escapeHtml(labels[t])}</option>`;
+  }).join("");
+
+  const latest = getLatestDeployWithScan(app.id);
+  let reportHtml = '<p class="meta">No scan has run yet. Deploy the app to generate a report.</p>';
+  if (latest?.scan_report) {
+    try {
+      const report: ScanResult = JSON.parse(latest.scan_report);
+      const findings = report.findings ?? [];
+      if (findings.length === 0) {
+        reportHtml = `<p style="color:#4ade80">&#10003; No findings in deploy #${latest.id} (image <code>${escapeHtml(latest.image_tag ?? "?")}</code>).</p>`;
+      } else {
+        const rows = findings
+          .slice(0, 50)
+          .map(
+            (f: Finding) => `
+          <tr>
+            <td style="padding:0.4rem 0.6rem"><span class="badge badge-${
+              f.severity === "CRITICAL" || f.severity === "HIGH"
+                ? "failed"
+                : "stopped"
+            }" style="font-size:0.65rem">${escapeHtml(f.severity)}</span></td>
+            <td style="padding:0.4rem 0.6rem;font-size:0.75rem">${escapeHtml(f.source)}</td>
+            <td style="padding:0.4rem 0.6rem;font-size:0.75rem"><code>${escapeHtml(f.id)}</code></td>
+            <td style="padding:0.4rem 0.6rem;font-size:0.75rem">${
+              f.pkg ? `<code>${escapeHtml(f.pkg)}${f.version ? `@${escapeHtml(f.version)}` : ""}</code>` : escapeHtml(f.location ?? "")
+            }</td>
+            <td style="padding:0.4rem 0.6rem;font-size:0.75rem">${
+              f.fixedVersion ? `<code>${escapeHtml(f.fixedVersion)}</code>` : '<span class="meta">—</span>'
+            }</td>
+            <td style="padding:0.4rem 0.6rem;font-size:0.75rem">${escapeHtml(f.title ?? "")}</td>
+          </tr>`
+          )
+          .join("");
+        const more =
+          findings.length > 50
+            ? `<p class="meta" style="margin-top:0.5rem">Showing first 50 of ${findings.length} findings.</p>`
+            : "";
+        reportHtml = `
+          <p class="meta" style="margin-bottom:0.5rem">Deploy #${latest.id} — status <strong>${escapeHtml(report.status)}</strong> — ${report.counts.critical} critical, ${report.counts.high} high, ${report.counts.medium} medium, ${report.counts.low} low.</p>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:0.8rem">
+              <thead>
+                <tr style="text-align:left;border-bottom:1px solid #262626">
+                  <th style="padding:0.4rem 0.6rem">Severity</th>
+                  <th style="padding:0.4rem 0.6rem">Source</th>
+                  <th style="padding:0.4rem 0.6rem">ID</th>
+                  <th style="padding:0.4rem 0.6rem">Package / location</th>
+                  <th style="padding:0.4rem 0.6rem">Fixed in</th>
+                  <th style="padding:0.4rem 0.6rem">Title</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          ${more}
+        `;
+      }
+    } catch {
+      reportHtml = '<p class="meta">Scan report could not be parsed.</p>';
+    }
+  }
+
+  return `
+    <div class="card" id="scan">
+      <h2>Security scan</h2>
+      <p class="hint" style="margin:0.5rem 0 1rem">
+        Every deploy is scanned with Trivy for image vulnerabilities, secrets
+        in source, and Dockerfile misconfigurations. Pick the severity at
+        which a deploy should be blocked. The scan still runs when set to
+        None — you'll just see findings instead of having the deploy halted.
+      </p>
+      <form method="POST" action="/apps/${encodeURIComponent(app.id)}/scan-threshold" style="margin-bottom:1rem">
+        <div class="flex">
+          <select name="threshold" style="flex:1">${thresholdOptions}</select>
+          <button type="submit">Save</button>
+        </div>
+      </form>
+      ${reportHtml}
+    </div>
+  `;
+}
+
+function renderScanBadge(app: ReturnType<typeof listApps>[number]): string {
+  const latest = getLatestDeployWithScan(app.id);
+  if (!latest || !latest.scan_summary) return "";
+  let summary: { status?: string; counts?: Record<string, number> };
+  try {
+    summary = JSON.parse(latest.scan_summary);
+  } catch {
+    return "";
+  }
+  const status = summary.status ?? "";
+  const c = summary.counts ?? {};
+  const crit = c.critical ?? 0;
+  const high = c.high ?? 0;
+  let label: string;
+  let color: string;
+  if (status === "passed") {
+    label = "&#10003; secure";
+    color = "#14532d;color:#4ade80";
+  } else if (status === "blocked") {
+    label = `&#10007; blocked: ${crit} crit, ${high} high`;
+    color = "#7f1d1d;color:#fca5a5";
+  } else if (status === "warned") {
+    label = `&#9888; ${crit + high} issues`;
+    color = "#713f12;color:#fbbf24";
+  } else {
+    label = "scan skipped";
+    color = "#262626;color:#737373";
+  }
+  return `<a href="/apps/${encodeURIComponent(app.id)}#scan" class="badge" style="background:${color};text-decoration:none;font-size:0.7rem">${label}</a>`;
+}
+
 function renderAppCard(
   app: ReturnType<typeof listApps>[number],
   dashboardDomain: string
@@ -609,11 +740,12 @@ function renderAppCard(
         <div class="app-header">
           <h2 style="font-size:1rem">${title}</h2>
           <span class="badge badge-${escapeHtml(app.status)}" hx-get="/apps/${encodeURIComponent(app.id)}/badge" hx-trigger="load" hx-swap="outerHTML">${escapeHtml(app.status)}</span>
+          ${configured ? renderScanBadge(app) : ""}
         </div>
         <div class="flex" style="gap:0.25rem">
-          ${configured ? `<a href="/apps/${encodeURIComponent(app.id)}" class="ghost" style="color:#a3a3a3;text-decoration:none;font-size:0.75rem;padding:0.2rem 0.4rem;border:1px solid #262626;border-radius:4px">Settings</a>` : ""}
+          ${configured ? `<a href="/apps/${encodeURIComponent(app.id)}" title="Settings" style="color:#737373;text-decoration:none;font-size:1rem;padding:0.1rem 0.3rem;border-radius:4px;line-height:1" onmouseover="this.style.color='#e5e5e5'" onmouseout="this.style.color='#737373'">&#9881;</a>` : ""}
           <form method="POST" action="/apps/${encodeURIComponent(app.id)}/delete" style="margin:0" data-app-name="${escapeHtml(configured ? app.name! : app.id)}" onsubmit="return confirmDelete(this)">
-            <button class="danger" type="submit" style="padding:0.2rem 0.4rem;font-size:0.75rem">Delete</button>
+            <button type="submit" title="Delete" style="background:transparent;border:none;color:#737373;font-size:1rem;padding:0.1rem 0.3rem;cursor:pointer;line-height:1" onmouseover="this.style.color='#dc2626'" onmouseout="this.style.color='#737373'">&#128465;</button>
           </form>
         </div>
       </div>
@@ -742,6 +874,8 @@ webRoutes.get("/apps/:id", (c) => {
         </form>
       </div>
 
+      ${renderScanSection(app)}
+
       <div class="card">
         <h2>Environment variables</h2>
         <p class="hint" style="margin:0.5rem 0 1rem">
@@ -824,6 +958,17 @@ webRoutes.post("/apps/:id/domain", async (c) => {
     });
   }
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1`);
+});
+
+webRoutes.post("/apps/:id/scan-threshold", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const threshold = body["threshold"] as string | undefined;
+  if (isValidThreshold(threshold)) {
+    updateApp(app.id, { scan_threshold: threshold });
+  }
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 
 webRoutes.post("/apps/:id/healthcheck", async (c) => {
@@ -1200,6 +1345,26 @@ webRoutes.get("/health", async (c) => {
     checks.push({ name: "Traefik", ok: false, detail: "Container not found" });
   }
 
+  // Security scanner (Trivy). Three checks: binary present, cache volume
+  // writable, vulnerability DB present and fresh. Each one can fail
+  // independently, so they're separate rows.
+  const scanner = await getScannerHealth();
+  checks.push({
+    name: "Scanner binary",
+    ok: scanner.binary.ok,
+    detail: scanner.binary.detail,
+  });
+  checks.push({
+    name: "Scanner cache",
+    ok: scanner.cache.ok,
+    detail: scanner.cache.detail,
+  });
+  checks.push({
+    name: "Vulnerability DB",
+    ok: scanner.db.ok,
+    detail: scanner.db.detail,
+  });
+
   const rows = checks
     .map(
       (ch) => `
@@ -1233,6 +1398,29 @@ webRoutes.get("/account", (c) => {
   const enabled = isTotpEnabled(user);
   const backup = enabled ? getBackupCodeStatus(user.id) : null;
   const error = c.req.query("error");
+  const pwError = c.req.query("pw_error");
+  const pwSaved = c.req.query("pw_saved");
+
+  const passwordCard = `
+    <div class="card">
+      <h2>Password</h2>
+      <p class="meta" style="margin-top:0.5rem;margin-bottom:0.75rem">
+        Changing your password signs you out of other devices.
+      </p>
+      ${pwSaved ? '<p style="color:#4ade80;margin:0 0 0.75rem">Password updated.</p>' : ""}
+      ${pwError === "wrong" ? '<div class="error" style="margin-bottom:0.75rem">Current password is incorrect.</div>' : ""}
+      ${pwError === "short" ? '<div class="error" style="margin-bottom:0.75rem">New password must be at least 8 characters.</div>' : ""}
+      ${pwError === "mismatch" ? '<div class="error" style="margin-bottom:0.75rem">New passwords do not match.</div>' : ""}
+      <form method="POST" action="/account/password">
+        <div class="flex" style="flex-direction:column;gap:0.5rem;align-items:stretch">
+          <input type="password" name="current_password" placeholder="Current password" autocomplete="current-password" required />
+          <input type="password" name="new_password" placeholder="New password (min 8)" autocomplete="new-password" minlength="8" required />
+          <input type="password" name="confirm_password" placeholder="Confirm new password" autocomplete="new-password" minlength="8" required />
+          <button type="submit" style="align-self:flex-start">Change password</button>
+        </div>
+      </form>
+    </div>
+  `;
 
   const twofaCard = enabled
     ? `
@@ -1289,11 +1477,49 @@ webRoutes.get("/account", (c) => {
           Member since ${escapeHtml(user.created_at)}
         </p>
       </div>
+      ${passwordCard}
       ${twofaCard}
     `,
       { username: user.username, csrf: csrfField(c) }
     )
   );
+});
+
+webRoutes.post("/account/password", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const current = (body["current_password"] as string | undefined) ?? "";
+  const next = (body["new_password"] as string | undefined) ?? "";
+  const confirm = (body["confirm_password"] as string | undefined) ?? "";
+
+  const ok = await verifyPassword(current, user.password_hash);
+  if (!ok) {
+    return c.redirect("/account?pw_error=wrong");
+  }
+  if (next.length < 8) {
+    return c.redirect("/account?pw_error=short");
+  }
+  if (next !== confirm) {
+    return c.redirect("/account?pw_error=mismatch");
+  }
+
+  await setPassword(user.id, next);
+
+  // Invalidate every existing session (including this one) and mint a
+  // fresh one so the current tab stays signed in. Other devices are
+  // logged out on their next request.
+  deleteAllUserSessions(user.id);
+  const oldToken = getCookieValue(c, SESSION_COOKIE);
+  if (oldToken) deleteSession(oldToken);
+  const session = createSession(user.id);
+  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+
+  logAudit(user.id, user.username, "password_changed", {
+    targetUserId: user.id,
+    targetUsername: user.username,
+  });
+
+  return c.redirect("/account?pw_saved=1");
 });
 
 /**

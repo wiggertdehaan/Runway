@@ -112,6 +112,38 @@ without knowing why.
   `createRequire(import.meta.url)` as a workaround — do not revert
   to a plain ESM import.
 
+### Trivy security scan on every deploy
+- `packages/control/src/deploy/scan.ts` shells out to a bundled
+  Trivy binary (`COPY --from=aquasec/trivy:<version>` in
+  `packages/control/Dockerfile`). Two scans run per deploy:
+  `trivy fs --scanners secret,misconfig` on the extracted tar, and
+  `trivy image --scanners vuln` on the built image after
+  `loadImage()`.
+- Findings are evaluated against the per-app `scan_threshold`
+  (`none` / `low` / `medium` / `high` / `critical`, default `none`).
+  On block, the new container is **not** started — the previously
+  running container keeps serving. The `deploys` row is recorded
+  with `status="blocked"` so the report stays inspectable.
+- `node:24-slim` (bookworm-slim) ships **without** `ca-certificates`.
+  Trivy is a Go binary and uses the system cert pool, so without the
+  bundle it fails TLS when pulling its vulnerability DB from
+  `mirror.gcr.io` with `x509: certificate signed by unknown authority`.
+  The runtime stage of `packages/control/Dockerfile` installs
+  `ca-certificates` — do not remove.
+- The vuln DB (~500 MB) lives in a named `trivy-cache` volume
+  mounted at `/root/.cache/trivy` (see `docker-compose.yml`). Trivy
+  refreshes it every ~6 h; the system health page flags it red
+  after 24 h.
+- **Secret scanner whitelists known example keys.** The canonical
+  AWS SDK sample `AKIAIOSFODNN7EXAMPLE` is explicitly ignored, so a
+  test app using it will look like the scanner is broken when it
+  isn't. Use realistic-looking random strings for negative tests.
+- `runScans()` in `packages/control/src/deploy/index.ts` runs the
+  source and image passes independently and merges findings +
+  errors. A single leg failing produces `status="warned"` /
+  `"blocked"` with an `error` message attached, not `"skipped"`.
+  Only both legs failing with zero findings yields `"skipped"`.
+
 ## Migrations
 
 `packages/control/src/db/index.ts` runs `migrate()` on startup. It

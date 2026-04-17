@@ -34,9 +34,21 @@ ENV DB_PATH=/data/runway.db
 # is needed for module resolution at runtime.
 COPY --from=build /app /app
 
+# Trivy scans uploaded source (secrets, misconfig) and built images
+# (vulns). Pinned to a specific release — bump deliberately, the DB
+# schema occasionally changes.
+COPY --from=aquasec/trivy:0.60.0 /usr/local/bin/trivy /usr/local/bin/trivy
+
 # NOTE: control still runs as root because it talks to the host
 # Docker socket for container lifecycle (run/stop/logs/stats).
 # Builds are now isolated in a separate BuildKit service.
+#
+# ca-certificates is required for the Trivy binary to verify TLS when
+# downloading its vulnerability DB from mirror.gcr.io. node:24-slim
+# (bookworm-slim) does not ship the bundle by default.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /data
 EXPOSE 3000
 WORKDIR /app/packages/control

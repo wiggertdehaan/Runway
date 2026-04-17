@@ -131,11 +131,24 @@ On success the response is JSON like:
   "domain": "my-bot.runway.example.com",
   "container_id": "...",
   "image_tag": "runway-app-xxx:latest",
-  "log_tail": "Step 6/6 : CMD ...\\nSuccessfully tagged ..."
+  "log_tail": "Step 6/6 : CMD ...\\nSuccessfully tagged ...",
+  "scan": {
+    "status": "passed",
+    "counts": { "critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0 },
+    "findings": [],
+    "truncated": false,
+    "total_findings": 0
+  }
 }
 \`\`\`
 
 Tell the user the app is live at \`https://\${domain}\`.
+
+If the scan produced findings, \`scan.status\` is \`warned\` (deploy still
+went through) or \`blocked\` (deploy halted — see below). Each finding has
+\`severity\`, \`source\` (\`image\`, \`secret\`, or \`misconfig\`), \`id\`,
+and often \`pkg\`/\`version\`/\`fixedVersion\`. Summarize any \`CRITICAL\`
+or \`HIGH\` findings for the user before moving on.
 
 **Important:** the TLS certificate is issued on demand by Let's Encrypt
 on the first HTTPS request. This takes 5–15 seconds. Wait before
@@ -279,6 +292,67 @@ curl -sS -X PUT ${base}/api/v1/app/healthcheck \\
 The container will be probed every 30 seconds. If three consecutive
 checks fail, the container is marked unhealthy. Pass \`null\` to disable.
 Takes effect on the next deploy.
+
+## Security scan
+
+Every deploy is scanned with [Trivy](https://trivy.dev) before the new
+container is started. Three things are checked:
+
+- **Image vulnerabilities** — OS packages and language dependencies in
+  the built image, matched against the CVE database.
+- **Secrets** — hardcoded keys or tokens in the uploaded source tree.
+- **Dockerfile misconfigurations** — running as root, missing
+  \`HEALTHCHECK\`, \`ADD\` with remote URLs, etc.
+
+The scan result is returned inline in the deploy response under \`scan\`
+and also stored per deploy on the server.
+
+### Blocking behavior
+
+Each app has a \`scan_threshold\`. The scan always runs; the threshold
+only controls when a deploy is *halted*:
+
+- \`none\` (default) — never block, just report findings.
+- \`low\` / \`medium\` / \`high\` / \`critical\` — block the deploy if any
+  finding meets or exceeds that severity.
+
+When a deploy is blocked, the response is HTTP **409** with:
+
+\`\`\`json
+{
+  "status": "blocked",
+  "image_tag": "runway-app-xxx:latest",
+  "deploy_id": 42,
+  "scan": { "...": "..." },
+  "hint": "Fix the findings, lower scan_threshold, or deploy again. ..."
+}
+\`\`\`
+
+The existing container keeps running — nothing is replaced on block.
+The built image is retained so you can inspect the full report:
+
+\`\`\`bash
+curl -sS ${base}/api/v1/app/deploys/42/scan \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
+
+### Change the threshold
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/scan-threshold \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"threshold":"high"}'
+\`\`\`
+
+You can also pass \`scan_threshold\` in the \`/app/configure\` body.
+
+### Read the latest scan
+
+\`\`\`bash
+curl -sS ${base}/api/v1/app/scan \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
 
 ## Rollback
 

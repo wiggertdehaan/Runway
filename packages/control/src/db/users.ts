@@ -75,6 +75,14 @@ export function deleteUser(id: string): boolean {
   return result.changes > 0;
 }
 
+export async function setPassword(userId: string, password: string): Promise<void> {
+  const password_hash = await hashPassword(password);
+  db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(
+    password_hash,
+    userId
+  );
+}
+
 export async function authenticate(
   username: string,
   password: string

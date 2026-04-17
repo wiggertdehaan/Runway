@@ -14,7 +14,10 @@ import {
   getAppLogs,
   getAppStatus,
   rollbackApp,
+  ScanBlockedError,
 } from "../deploy/index.js";
+import { THRESHOLDS, isValidThreshold, type Threshold } from "../deploy/scan.js";
+import { getDeploy, getLatestDeployWithScan } from "../db/deploys.js";
 import { writeAppRoute } from "../deploy/gateway.js";
 import { appContainerName } from "../deploy/index.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
@@ -42,7 +45,22 @@ function toConfigResponse(app: App) {
     memory_limit: app.memory_limit,
     status: app.status,
     health_check_path: app.health_check_path,
+    scan_threshold: app.scan_threshold,
     configured: isConfigured(app),
+  };
+}
+
+// Keep the deploy response bounded: truncate the findings list so large
+// scans don't balloon the JSON body. The full report is available via
+// the scan detail endpoint.
+const MAX_FINDINGS_IN_DEPLOY_RESPONSE = 25;
+
+function summarizeScanForResponse<T extends { findings: unknown[] }>(scan: T) {
+  return {
+    ...scan,
+    findings: scan.findings.slice(0, MAX_FINDINGS_IN_DEPLOY_RESPONSE),
+    truncated: scan.findings.length > MAX_FINDINGS_IN_DEPLOY_RESPONSE,
+    total_findings: scan.findings.length,
   };
 }
 
@@ -89,16 +107,48 @@ apiRoutes.post("/app/configure", async (c) => {
   const domain = baseDomain ? `${slug}.${baseDomain}` : null;
   const port = defaultPortForRuntime(runtime as Runtime);
 
-  const updated = updateApp(app.id, {
+  const patch: Parameters<typeof updateApp>[1] = {
     name,
     runtime: runtime as Runtime,
     domain,
     port,
-  });
+  };
+
+  if (body.scan_threshold !== undefined) {
+    if (!isValidThreshold(body.scan_threshold)) {
+      return c.json(
+        {
+          error: `scan_threshold must be one of: ${THRESHOLDS.join(", ")}`,
+        },
+        400
+      );
+    }
+    patch.scan_threshold = body.scan_threshold;
+  }
+
+  const updated = updateApp(app.id, patch);
   if (!updated) {
     return c.json({ error: "App not found" }, 404);
   }
 
+  return c.json(toConfigResponse(updated));
+});
+
+apiRoutes.put("/app/scan-threshold", async (c) => {
+  const app = c.get("app");
+  const body = await c.req.json().catch(() => null);
+  if (!body || !isValidThreshold(body.threshold)) {
+    return c.json(
+      {
+        error: `threshold must be one of: ${THRESHOLDS.join(", ")}`,
+      },
+      400
+    );
+  }
+  const updated = updateApp(app.id, {
+    scan_threshold: body.threshold as Threshold,
+  });
+  if (!updated) return c.json({ error: "App not found" }, 404);
   return c.json(toConfigResponse(updated));
 });
 
@@ -158,11 +208,27 @@ apiRoutes.post("/app/deploy", async (c) => {
     return c.json({
       status: "deployed",
       ...result,
+      scan: summarizeScanForResponse(result.scan),
       note: result.domain
         ? `TLS certificate is issued on first request and may take 5-15 seconds. Use /app/status to verify without TLS.`
         : undefined,
     });
   } catch (err: any) {
+    if (err instanceof ScanBlockedError) {
+      // Keep app status untouched — the previous container is still
+      // running. The deploy row is already recorded as "blocked".
+      return c.json(
+        {
+          status: "blocked",
+          error: err.message,
+          image_tag: err.imageTag,
+          deploy_id: err.deployId,
+          scan: summarizeScanForResponse(err.scan),
+          hint: `Fix the findings, lower scan_threshold, or deploy again. Full report: GET /api/v1/app/deploys/${err.deployId}/scan`,
+        },
+        409
+      );
+    }
     updateApp(app.id, { status: "failed" });
     notifyDeployFailure(app.name ?? app.id, app.id, err?.message ?? "Deploy failed");
     return c.json(
@@ -179,11 +245,58 @@ apiRoutes.post("/app/deploy", async (c) => {
   }
 });
 
+apiRoutes.get("/app/deploys/:deployId/scan", (c) => {
+  const app = c.get("app");
+  const deployId = parseInt(c.req.param("deployId"), 10);
+  if (Number.isNaN(deployId)) {
+    return c.json({ error: "Invalid deploy id" }, 400);
+  }
+  const deploy = getDeploy(app.id, deployId);
+  if (!deploy) return c.json({ error: "Deploy not found" }, 404);
+  const report = deploy.scan_report ? JSON.parse(deploy.scan_report) : null;
+  return c.json({
+    deploy_id: deploy.id,
+    image_tag: deploy.image_tag,
+    created_at: deploy.created_at,
+    scan_status: deploy.scan_status,
+    scan: report,
+  });
+});
+
+apiRoutes.get("/app/scan", (c) => {
+  const app = c.get("app");
+  const deploy = getLatestDeployWithScan(app.id);
+  if (!deploy) return c.json({ scan: null });
+  const report = deploy.scan_report ? JSON.parse(deploy.scan_report) : null;
+  return c.json({
+    deploy_id: deploy.id,
+    image_tag: deploy.image_tag,
+    created_at: deploy.created_at,
+    scan_status: deploy.scan_status,
+    scan: report,
+  });
+});
+
 apiRoutes.get("/app/status", async (c) => {
   const app = c.get("app");
   try {
     const status = await getAppStatus(app);
-    return c.json(status);
+    const latest = getLatestDeployWithScan(app.id);
+    const scanSummary = latest?.scan_summary
+      ? JSON.parse(latest.scan_summary)
+      : null;
+    return c.json({
+      ...status,
+      scan_threshold: app.scan_threshold,
+      latest_scan: latest
+        ? {
+            deploy_id: latest.id,
+            image_tag: latest.image_tag,
+            created_at: latest.created_at,
+            ...scanSummary,
+          }
+        : null,
+    });
   } catch (err: any) {
     return c.json({ error: err?.message ?? "Status check failed" }, 500);
   }

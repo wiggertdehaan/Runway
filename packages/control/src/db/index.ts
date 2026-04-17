@@ -187,4 +187,21 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "created_by")) {
     db.exec(`ALTER TABLE apps ADD COLUMN created_by TEXT`);
   }
+  if (!appCols.some((c) => c.name === "scan_threshold")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN scan_threshold TEXT NOT NULL DEFAULT 'none'`);
+  }
+
+  // Scan results are attached to individual deploys so history is preserved.
+  const deployCols = db.prepare("PRAGMA table_info(deploys)").all() as Array<{
+    name: string;
+  }>;
+  if (!deployCols.some((c) => c.name === "scan_status")) {
+    db.exec(`ALTER TABLE deploys ADD COLUMN scan_status TEXT`);
+  }
+  if (!deployCols.some((c) => c.name === "scan_summary")) {
+    db.exec(`ALTER TABLE deploys ADD COLUMN scan_summary TEXT`);
+  }
+  if (!deployCols.some((c) => c.name === "scan_report")) {
+    db.exec(`ALTER TABLE deploys ADD COLUMN scan_report TEXT`);
+  }
 }

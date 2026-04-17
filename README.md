@@ -35,8 +35,9 @@ server.
   Node.js, Python, Go, and static sites. Bring your own Dockerfile for
   full control.
 - **Production features built in** — environment variables, persistent
-  volumes, custom domains, health checks, deploy rollback, 2FA, and
-  audit logging.
+  volumes, custom domains, health checks, deploy rollback, 2FA, audit
+  logging, and a per-deploy security scan (Trivy) with a configurable
+  severity gate.
 
 ## How it works
 
@@ -64,6 +65,14 @@ On a fresh Linux server (Ubuntu, Debian, CentOS, RHEL, Fedora, Rocky,
 Alma):
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/wiggertdehaan/Runway/main/install.sh | sudo bash
+```
+
+The installer prompts for your dashboard hostname and a Let's Encrypt
+email. If you'd rather pass them up-front (useful for unattended
+installs), set them as environment variables:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/wiggertdehaan/Runway/main/install.sh \
   | sudo DASHBOARD_DOMAIN=runway.example.com ACME_EMAIL=you@example.com bash
 ```
@@ -73,9 +82,11 @@ curl -fsSL https://raw.githubusercontent.com/wiggertdehaan/Runway/main/install.s
 - A wildcard DNS record (`*.runway.example.com`) for automatic app subdomains
 - Ports 80 and 443 open
 
-The installer sets up Docker, configures the firewall, and starts the
-Runway stack. Open `https://runway.example.com` to create your admin
-account.
+The installer sets up Docker, configures the firewall, starts the
+Runway stack, and waits up to two minutes for Let's Encrypt to issue
+the dashboard certificate. Open `https://runway.example.com` to create
+your admin account. If the cert isn't issued in time, the installer
+prints specific troubleshooting commands.
 
 ## Deploying an app
 
@@ -139,6 +150,24 @@ Bad deploy? Roll back to the previous working version with one API
 call. Your env vars, volumes, and domain config stay untouched — only
 the container image changes.
 
+### Security scanning
+
+Every deploy is scanned with [Trivy](https://trivy.dev) before the new
+container replaces the old one. Three passes run in parallel:
+
+- **Image vulnerabilities** — OS packages and language dependencies
+  matched against the CVE database.
+- **Secrets in source** — hardcoded API keys, tokens, and credentials
+  in the uploaded project.
+- **Dockerfile misconfigurations** — running as root, missing
+  `HEALTHCHECK`, remote `ADD`, and similar gotchas.
+
+Each app has a `scan_threshold` (`none` / `low` / `medium` / `high` /
+`critical`). When a finding meets the threshold, the deploy is blocked:
+the image is built but never started, and the previously running
+container keeps serving traffic. Findings are available in the deploy
+response, on the dashboard, and via `runway_get_scan` from the MCP.
+
 ### Security
 
 - Passwords hashed with scrypt, constant-time comparison
@@ -151,6 +180,7 @@ the container image changes.
 - Content Security Policy headers
 - Isolated builds via BuildKit (user code never touches the Docker socket)
 - Traefik has zero Docker socket access
+- Per-deploy Trivy scan (image CVEs, hardcoded secrets, Dockerfile misconfigs) with a configurable blocking threshold
 
 ## Dashboard
 
@@ -233,16 +263,25 @@ pnpm --filter @runway/control dev   # Dashboard on http://localhost:3000
 - **Health check paths** and **volume mount paths** are validated against
   strict character allowlists to prevent command injection and path
   traversal respectively.
+- **Security scanning** runs on every deploy via a bundled Trivy binary.
+  Image vulnerabilities, hardcoded secrets in source, and Dockerfile
+  misconfigurations are all checked. Each app carries a configurable
+  severity threshold; findings at or above the threshold halt the
+  deploy before the new container replaces the running one. Scan
+  reports are persisted per deploy and exposed through the dashboard,
+  REST API, and MCP tools. Trivy's vulnerability DB is cached in a
+  named Docker volume across restarts.
 
 ## Roadmap
 
 Planned improvements — contributions welcome:
 
 - **Multiple custom domains per app** — currently limited to one custom domain plus the auto-generated subdomain
-- **Security scanning on deploy** — scan uploaded code and images for vulnerabilities before going live
+- **Server-wide minimum scan threshold** — instance-level floor that individual apps cannot drop below, so an admin can forbid publishing anything with critical (or high, etc.) findings regardless of per-app settings
 - **Deploy version history UI** — dashboard view of all deployed versions with one-click rollback to any point
 - **Activity feed** — show recent deploys, status changes, and events on the dashboard
 - **Multiple deploy targets** — support deploying to multiple servers from a single dashboard
+- ~~Security scanning on deploy~~ *(v0.4 — Trivy, image CVEs + source secrets + Dockerfile misconfig, configurable block threshold)*
 - ~~Wildcard DNS check at setup~~ *(v0.3)*
 - ~~System health check page~~ *(v0.3)*
 - ~~First-app tutorial~~ *(v0.3)*

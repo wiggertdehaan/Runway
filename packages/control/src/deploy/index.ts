@@ -11,6 +11,17 @@ import {
   runContainer,
 } from "./docker.js";
 import { deleteAppRoute, writeAppRoute } from "./gateway.js";
+import {
+  buildScanResult,
+  emptyCounts,
+  isValidThreshold,
+  scanImage,
+  scanSource,
+  trivyAvailable,
+  type Finding,
+  type ScanResult,
+  type Threshold,
+} from "./scan.js";
 
 function dockerSafeId(appId: string): string {
   return appId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
@@ -48,16 +59,109 @@ export interface DeployResult {
   container_name: string;
   domain: string | null;
   log_tail: string;
+  scan: ScanResult;
+}
+
+/**
+ * Thrown when a deploy is halted because the scan produced findings at
+ * or above the app's configured severity threshold. The existing
+ * container keeps running; the new image is built but never started.
+ */
+export class ScanBlockedError extends Error {
+  scan: ScanResult;
+  imageTag: string;
+  deployId: number;
+  constructor(scan: ScanResult, imageTag: string, deployId: number) {
+    const top = scan.findings[0];
+    super(
+      top
+        ? `Deploy blocked by scan: ${top.severity} ${top.id}${top.pkg ? ` in ${top.pkg}` : ""}`
+        : "Deploy blocked by scan"
+    );
+    this.scan = scan;
+    this.imageTag = imageTag;
+    this.deployId = deployId;
+  }
+}
+
+async function runScans(
+  tarBuffer: Buffer | null,
+  imageTag: string,
+  threshold: Threshold
+): Promise<ScanResult> {
+  if (!trivyAvailable()) {
+    return {
+      status: "skipped",
+      counts: emptyCounts(),
+      findings: [],
+      error: "trivy binary not found",
+    };
+  }
+
+  const findings: Finding[] = [];
+  const errors: string[] = [];
+
+  if (tarBuffer) {
+    try {
+      findings.push(...(await scanSource(tarBuffer)));
+    } catch (err: any) {
+      errors.push(`source scan failed: ${err?.message ?? err}`);
+    }
+  }
+
+  try {
+    findings.push(...(await scanImage(imageTag)));
+  } catch (err: any) {
+    errors.push(`image scan failed: ${err?.message ?? err}`);
+  }
+
+  // Both legs failed and nothing was found → truly skipped.
+  if (errors.length === (tarBuffer ? 2 : 1) && findings.length === 0) {
+    return {
+      status: "skipped",
+      counts: emptyCounts(),
+      findings: [],
+      error: errors.join("; "),
+    };
+  }
+
+  const result = buildScanResult(findings, threshold);
+  if (errors.length > 0) {
+    result.error = errors.join("; ");
+  }
+  return result;
+}
+
+function resolveThreshold(app: App): Threshold {
+  return isValidThreshold(app.scan_threshold) ? app.scan_threshold : "none";
 }
 
 export async function deployApp(input: DeployInput): Promise<DeployResult> {
   const { app, tar } = input;
   const imageTag = appImageTag(app.id);
   const containerName = appContainerName(app.id);
+  const threshold = resolveThreshold(app);
+
+  const tarBuffer = Buffer.isBuffer(tar) ? tar : null;
 
   updateApp(app.id, { status: "building" });
 
-  const build = await buildImageFromTar(tar, { imageTag });
+  const build = await buildImageFromTar(tarBuffer ?? tar, { imageTag });
+
+  updateApp(app.id, { status: "scanning" });
+
+  const scan = await runScans(tarBuffer, imageTag, threshold);
+  const scanSummary = { status: scan.status, counts: scan.counts };
+
+  if (scan.status === "blocked") {
+    const deploy = recordDeploy(app.id, imageTag, "blocked", {
+      log: build.log,
+      scanStatus: scan.status,
+      scanSummary,
+      scanReport: scan,
+    });
+    throw new ScanBlockedError(scan, imageTag, deploy.id);
+  }
 
   updateApp(app.id, { status: "starting" });
 
@@ -90,7 +194,12 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     container_id: run.containerId,
   });
 
-  recordDeploy(app.id, imageTag, "success", build.log);
+  recordDeploy(app.id, imageTag, "success", {
+    log: build.log,
+    scanStatus: scan.status,
+    scanSummary,
+    scanReport: scan,
+  });
 
   const logTail = build.log.split("\n").slice(-20).join("\n");
 
@@ -101,6 +210,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     container_name: containerName,
     domain: app.domain,
     log_tail: logTail,
+    scan,
   };
 }
 
@@ -143,7 +253,7 @@ export async function rollbackApp(app: App): Promise<DeployResult> {
     container_id: run.containerId,
   });
 
-  recordDeploy(app.id, prev.image_tag, "success", "Rolled back");
+  recordDeploy(app.id, prev.image_tag, "success", { log: "Rolled back" });
 
   return {
     app_id: app.id,
@@ -152,6 +262,12 @@ export async function rollbackApp(app: App): Promise<DeployResult> {
     container_name: containerName,
     domain: app.domain,
     log_tail: `Rolled back to ${prev.image_tag} (deploy #${prev.id})`,
+    scan: {
+      status: "skipped",
+      counts: emptyCounts(),
+      findings: [],
+      error: "rollback reuses existing image",
+    },
   };
 }
 

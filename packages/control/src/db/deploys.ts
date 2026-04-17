@@ -6,23 +6,59 @@ export interface Deploy {
   image_tag: string | null;
   status: string;
   log: string | null;
+  scan_status: string | null;
+  scan_summary: string | null;
+  scan_report: string | null;
   created_at: string;
+}
+
+export interface RecordDeployOptions {
+  log?: string;
+  scanStatus?: string;
+  scanSummary?: unknown;
+  scanReport?: unknown;
 }
 
 export function recordDeploy(
   appId: string,
   imageTag: string,
   status: string,
-  log?: string
+  opts: string | RecordDeployOptions = {}
 ): Deploy {
+  const resolved: RecordDeployOptions =
+    typeof opts === "string" ? { log: opts } : opts;
   db.prepare(
-    `INSERT INTO deploys (app_id, image_tag, status, log) VALUES (?, ?, ?, ?)`
-  ).run(appId, imageTag, status, log ?? null);
+    `INSERT INTO deploys (app_id, image_tag, status, log, scan_status, scan_summary, scan_report)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    appId,
+    imageTag,
+    status,
+    resolved.log ?? null,
+    resolved.scanStatus ?? null,
+    resolved.scanSummary !== undefined ? JSON.stringify(resolved.scanSummary) : null,
+    resolved.scanReport !== undefined ? JSON.stringify(resolved.scanReport) : null
+  );
   return db
     .prepare(
       `SELECT * FROM deploys WHERE app_id = ? ORDER BY id DESC LIMIT 1`
     )
     .get(appId) as unknown as Deploy;
+}
+
+export function getDeploy(appId: string, deployId: number): Deploy | undefined {
+  return db
+    .prepare(`SELECT * FROM deploys WHERE app_id = ? AND id = ?`)
+    .get(appId, deployId) as unknown as Deploy | undefined;
+}
+
+export function getLatestDeployWithScan(appId: string): Deploy | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM deploys WHERE app_id = ? AND scan_status IS NOT NULL
+       ORDER BY id DESC LIMIT 1`
+    )
+    .get(appId) as unknown as Deploy | undefined;
 }
 
 export function getPreviousSuccessfulDeploy(

@@ -45,6 +45,10 @@ export function deleteSession(token: string): void {
   db.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
 }
 
+export function deleteAllUserSessions(userId: string): void {
+  db.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(userId);
+}
+
 export function deleteExpiredSessions(): void {
   db.prepare(`DELETE FROM sessions WHERE expires_at <= datetime('now')`).run();
 }

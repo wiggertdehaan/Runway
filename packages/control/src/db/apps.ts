@@ -36,6 +36,7 @@ export interface App {
   image_tag: string | null;
   container_id: string | null;
   created_by: string | null;
+  scan_threshold: string;
   created_at: string;
   updated_at: string;
 }
@@ -90,6 +91,7 @@ type UpdatableAppFields = Partial<
     | "health_check_path"
     | "image_tag"
     | "container_id"
+    | "scan_threshold"
   >
 >;
 

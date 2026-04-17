@@ -4,6 +4,56 @@ import type { AppConfig, RunwayClient, Runtime } from "./client.js";
 import { tarProject } from "./tar.js";
 
 const RUNTIMES = ["node", "python", "go", "static"] as const;
+const SCAN_THRESHOLDS = ["none", "low", "medium", "high", "critical"] as const;
+
+interface DeployResponse {
+  status?: string;
+  error?: string;
+  image_tag?: string;
+  deploy_id?: number;
+  scan?: {
+    status?: string;
+    counts?: Record<string, number>;
+    findings?: Array<{
+      id?: string;
+      severity?: string;
+      source?: string;
+      pkg?: string;
+      version?: string;
+      fixedVersion?: string;
+      title?: string;
+      location?: string;
+    }>;
+    truncated?: boolean;
+    total_findings?: number;
+    error?: string;
+  };
+  hint?: string;
+  [k: string]: unknown;
+}
+
+function formatScanForAgent(scan: DeployResponse["scan"]): string {
+  if (!scan) return "No scan data.";
+  if (scan.status === "skipped") {
+    return `Scan skipped${scan.error ? ` (${scan.error})` : ""}.`;
+  }
+  const c = scan.counts ?? {};
+  const summary = `Scan: ${scan.status?.toUpperCase() ?? "?"} — critical=${c.critical ?? 0} high=${c.high ?? 0} medium=${c.medium ?? 0} low=${c.low ?? 0}`;
+  const findings = scan.findings ?? [];
+  if (findings.length === 0) return `${summary}. No findings.`;
+  const topN = findings.slice(0, 10).map((f) => {
+    const where = f.pkg
+      ? `${f.pkg}${f.version ? `@${f.version}` : ""}`
+      : f.location ?? "";
+    const fix = f.fixedVersion ? ` (fix: ${f.fixedVersion})` : "";
+    return `  [${f.severity}] ${f.source}/${f.id} ${where}${fix}${f.title ? ` — ${f.title}` : ""}`;
+  });
+  const truncated =
+    scan.truncated || findings.length > topN.length
+      ? `\n  … ${((scan.total_findings ?? findings.length) - topN.length)} more`
+      : "";
+  return [summary, "", ...topN, truncated].filter(Boolean).join("\n");
+}
 
 export function registerTools(server: McpServer, client: RunwayClient) {
   server.tool(
@@ -93,18 +143,65 @@ export function registerTools(server: McpServer, client: RunwayClient) {
         };
       }
 
-      const result = await client.deploy(tarBuffer);
+      const result = (await client.deploy(tarBuffer)) as DeployResponse;
+      const scanText = formatScanForAgent(result.scan);
+      const blocked = result.status === "blocked";
+      const lines = [
+        `Uploaded ${(tarBuffer.length / 1024).toFixed(1)} KB from ${root}.`,
+        "",
+        blocked
+          ? `DEPLOY BLOCKED by security scan. The previous container is still running; the new image (${result.image_tag ?? "?"}) was built but not started.`
+          : `Status: ${result.status ?? "?"}`,
+        "",
+        scanText,
+        "",
+        result.hint ? `Hint: ${result.hint}` : "",
+        "",
+        "Full response:",
+        JSON.stringify(result, null, 2),
+      ].filter((l) => l !== "");
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        isError: blocked,
+      };
+    }
+  );
+
+  server.tool(
+    "runway_set_scan_threshold",
+    "Configure the minimum severity at which deploys are blocked by the security scan. 'none' never blocks (warn-only); 'low' / 'medium' / 'high' / 'critical' block if any finding meets or exceeds that severity. Scans always run; only the blocking behavior changes.",
+    {
+      threshold: z
+        .enum(SCAN_THRESHOLDS)
+        .describe(
+          "One of: none (warn-only), low, medium, high, critical"
+        ),
+    },
+    async ({ threshold }) => {
+      const config = await client.setScanThreshold(threshold);
       return {
         content: [
           {
             type: "text",
-            text: [
-              `Uploaded ${(tarBuffer.length / 1024).toFixed(1)} KB from ${root}.`,
-              "",
-              JSON.stringify(result, null, 2),
-            ].join("\n"),
+            text: `Scan threshold set to '${config.scan_threshold}'. Deploys will ${
+              config.scan_threshold === "none"
+                ? "never"
+                : `be blocked when any finding is ${config.scan_threshold} or higher`
+            }.`,
           },
         ],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_get_scan",
+    "Fetch the most recent security scan report for the Runway app (vulnerabilities, secrets, Dockerfile misconfigurations). Useful after a blocked deploy or to audit the currently running image.",
+    {},
+    async () => {
+      const scan = await client.getLatestScan();
+      return {
+        content: [{ type: "text", text: JSON.stringify(scan, null, 2) }],
       };
     }
   );

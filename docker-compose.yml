@@ -77,6 +77,9 @@ services:
       # is tracked in the roadmap.
       - /var/run/docker.sock:/var/run/docker.sock
       - build-exchange:/exchange
+      # Persist Trivy's vulnerability DB (~500 MB) across restarts so
+      # only the first scan pays the download cost.
+      - trivy-cache:/root/.cache/trivy
     environment:
       - DB_PATH=/data/runway.db
       - PORT=3000
@@ -97,6 +100,7 @@ volumes:
   gateway-config:
   buildkit-cache:
   build-exchange:
+  trivy-cache:
 
 networks:
   runway-internal:

@@ -3,6 +3,15 @@
  */
 
 export type Runtime = "node" | "python" | "go" | "static";
+export type ScanThreshold = "none" | "low" | "medium" | "high" | "critical";
+
+export const SCAN_THRESHOLDS: ScanThreshold[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "critical",
+];
 
 export interface AppConfig {
   id: string;
@@ -15,6 +24,7 @@ export interface AppConfig {
   memory_limit: string;
   status: string;
   health_check_path: string | null;
+  scan_threshold: ScanThreshold;
   configured: boolean;
 }
 
@@ -145,6 +155,17 @@ export class RunwayClient {
       method: "PUT",
       body: JSON.stringify({ path }),
     });
+  }
+
+  async setScanThreshold(threshold: ScanThreshold): Promise<AppConfig> {
+    return this.request("/app/scan-threshold", {
+      method: "PUT",
+      body: JSON.stringify({ threshold }),
+    });
+  }
+
+  async getLatestScan(): Promise<unknown> {
+    return this.request("/app/scan");
   }
 
   async rollback(): Promise<unknown> {
