@@ -1,0 +1,75 @@
+services:
+  # ── Gateway (Traefik) ──────────────────────────────────
+  # Reverse proxy with automatic HTTPS via Let's Encrypt.
+  #
+  # Uses the file provider (not the docker provider): the control
+  # plane writes Traefik dynamic config files into the shared
+  # gateway-config volume — one for the dashboard itself and one
+  # per deployed app — and Traefik picks them up. This means
+  # Traefik needs no access to the Docker daemon at all, and
+  # proxies HTTP to named services resolved through the internal
+  # Docker DNS (e.g. http://control:3000).
+  #
+  # The dashboard/insecure API is intentionally disabled.
+  gateway:
+    image: traefik:v3.5
+    container_name: runway-gateway
+    restart: unless-stopped
+    environment:
+      - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN must be set in .env}
+    command:
+      - "--providers.file.directory=/config"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:?ACME_EMAIL must be set in .env}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/data/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - gateway-config:/config
+      - gateway-data:/data
+    networks:
+      - runway-internal
+
+  # ── Control Plane ──────────────────────────────────────
+  # Web dashboard + REST API backing the MCP server.
+  control:
+    build:
+      context: .
+      dockerfile: packages/control/Dockerfile
+    container_name: runway-control
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    volumes:
+      - control-data:/data
+      - gateway-config:/gateway-config
+      # Docker socket is needed for the deploy pipeline: control builds
+      # app images and runs containers via the Docker API. This is a
+      # deliberate MVP tradeoff — a compromise of control effectively
+      # means root on the host. Moving to an isolated builder container
+      # is tracked in the roadmap.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DB_PATH=/data/runway.db
+      - PORT=3000
+      - GATEWAY_CONFIG_DIR=/gateway-config
+      - RUNWAY_NETWORK=runway-internal
+      - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN must be set in .env}
+    networks:
+      - runway-internal
+
+volumes:
+  control-data:
+  gateway-data:
+  gateway-config:
+
+networks:
+  runway-internal:
+    name: runway-internal

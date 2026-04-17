@@ -1,0 +1,269 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import type { AppConfig, RunwayClient, Runtime } from "./client.js";
+import { tarProject } from "./tar.js";
+
+const RUNTIMES = ["node", "python", "go", "static"] as const;
+
+export function registerTools(server: McpServer, client: RunwayClient) {
+  server.tool(
+    "runway_get_config",
+    "Fetch the current Runway app configuration (name, runtime, domain, resource limits, and whether it has been configured yet). Call this before deploy to know what the server expects.",
+    {},
+    async () => {
+      const config = await client.getConfig();
+      return {
+        content: [{ type: "text", text: JSON.stringify(config, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_configure",
+    "Configure a freshly created Runway app. Required on first use: sets the app's human-readable name and the runtime (node, python, go, or static). The server derives the public domain from the name and the configured base domain. Ask the user for both values if you don't already have them.",
+    {
+      name: z
+        .string()
+        .min(1)
+        .max(64)
+        .describe("Human-readable app name, e.g. 'My Bot'"),
+      runtime: z
+        .enum(RUNTIMES)
+        .describe("Runtime the app is built with"),
+    },
+    async ({ name, runtime }) => {
+      const config = await client.configure(name, runtime as Runtime);
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `App configured.`,
+              `  name:    ${config.name}`,
+              `  runtime: ${config.runtime}`,
+              `  domain:  ${config.domain ?? "(no base domain configured on server)"}`,
+            ].join("\n"),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_deploy",
+    "Deploy the current project to the Runway server. Tars the working directory (respecting .dockerignore and .gitignore), uploads it, and triggers a build-and-run on the server. The app must be configured first — call runway_get_config to check, then runway_configure if needed. A Dockerfile must exist in the project root.",
+    {
+      project_root: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to the project directory to deploy. Defaults to the current working directory."
+        ),
+    },
+    async ({ project_root }) => {
+      const config = await client.getConfig();
+      if (!config.configured) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "This Runway app has not been configured yet. Ask the user for a " +
+                "name and runtime (one of: node, python, go, static), then call " +
+                "runway_configure before retrying the deploy.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const root = project_root ?? process.cwd();
+      let tarBuffer: Buffer;
+      try {
+        tarBuffer = await tarProject(root);
+      } catch (err: any) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to package project at ${root}: ${err?.message ?? err}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const result = await client.deploy(tarBuffer);
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `Uploaded ${(tarBuffer.length / 1024).toFixed(1)} KB from ${root}.`,
+              "",
+              JSON.stringify(result, null, 2),
+            ].join("\n"),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_preflight",
+    "Run pre-deploy configuration and security checks on the server.",
+    {},
+    async () => {
+      const result = await client.preflight();
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_status",
+    "Check the current deployment status of the Runway app (created, running, stopped).",
+    {},
+    async () => {
+      const status = await client.getStatus();
+      return {
+        content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_logs",
+    "Fetch recent logs from the deployed Runway app container.",
+    {},
+    async () => {
+      const logs = await client.getLogs();
+      return {
+        content: [{ type: "text", text: JSON.stringify(logs, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_package",
+    "Generate an optimized Dockerfile and .dockerignore tailored to the Runway app's configured runtime. Requires runway_configure to have been called first.",
+    {},
+    async () => {
+      const config = await client.getConfig();
+      if (!config.configured || !config.runtime) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "Cannot generate a Dockerfile until the app is configured. " +
+                "Call runway_configure with a name and runtime first.",
+            },
+          ],
+          isError: true,
+        };
+      }
+      const dockerfile = generateDockerfile(config);
+      const dockerignore = generateDockerignore(config);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              "Generated Dockerfile and .dockerignore for your project.",
+              "",
+              "--- Dockerfile ---",
+              dockerfile,
+              "",
+              "--- .dockerignore ---",
+              dockerignore,
+            ].join("\n"),
+          },
+        ],
+      };
+    }
+  );
+}
+
+function generateDockerfile(config: AppConfig): string {
+  const port = config.port;
+  const templates: Record<Runtime, string> = {
+    node: `FROM node:24-slim AS base
+RUN corepack enable
+
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-lock.yaml* package-lock.json* yarn.lock* ./
+RUN if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; \\
+    elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \\
+    else npm ci; fi
+
+FROM base AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build --if-present
+
+FROM base
+WORKDIR /app
+COPY --from=build /app .
+RUN addgroup --system app && adduser --system --ingroup app app
+USER app
+EXPOSE ${port}
+CMD ["node", "."]`,
+
+    python: `FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+RUN addgroup --system app && adduser --system --ingroup app app
+USER app
+EXPOSE ${port}
+CMD ["python", "main.py"]`,
+
+    go: `FROM golang:1.23 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /app/server ./...
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /app/server /server
+EXPOSE ${port}
+USER nonroot:nonroot
+ENTRYPOINT ["/server"]`,
+
+    static: `FROM nginx:1.27-alpine
+COPY . /usr/share/nginx/html
+EXPOSE 80`,
+  };
+
+  return templates[config.runtime!];
+}
+
+function generateDockerignore(config: AppConfig): string {
+  const common = `node_modules
+.git
+.env
+.env.*
+*.md
+.DS_Store
+Thumbs.db
+coverage
+.nyc_output
+dist
+`;
+
+  const extras: Record<Runtime, string> = {
+    node: `npm-debug.log*\n`,
+    python: `__pycache__\n*.pyc\n.venv\nvenv\n`,
+    go: `bin\n*.test\n`,
+    static: ``,
+  };
+
+  return common + extras[config.runtime!];
+}

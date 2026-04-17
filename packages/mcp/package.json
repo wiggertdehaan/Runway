@@ -1,0 +1,25 @@
+{
+  "name": "@runway/mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "runway-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ignore": "^5.3.2",
+    "tar": "^7.4.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/tar": "^6.1.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

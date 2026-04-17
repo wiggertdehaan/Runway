@@ -1,0 +1,21 @@
+{
+  "name": "runway",
+  "private": true,
+  "description": "Deploy AI applications safely on your own server",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "scripts": {
+    "dev": "pnpm -r dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "mcp:build": "pnpm --filter @runway/mcp build",
+    "mcp:path": "node -e \"console.log(require('path').resolve('packages/mcp/dist/index.js'))\""
+  }
+}
