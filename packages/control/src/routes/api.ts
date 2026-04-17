@@ -18,6 +18,7 @@ import {
 import { writeAppRoute } from "../deploy/gateway.js";
 import { appContainerName } from "../deploy/index.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
+import { notifyDeployFailure } from "../util/webhook.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 
 type Env = { Variables: { app: App } };
@@ -163,6 +164,7 @@ apiRoutes.post("/app/deploy", async (c) => {
     });
   } catch (err: any) {
     updateApp(app.id, { status: "failed" });
+    notifyDeployFailure(app.name ?? app.id, app.id, err?.message ?? "Deploy failed");
     return c.json(
       {
         status: "failed",

@@ -35,6 +35,7 @@ export interface App {
   health_check_path: string | null;
   image_tag: string | null;
   container_id: string | null;
+  created_by: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -47,13 +48,13 @@ export function isConfigured(app: App): boolean {
  * Create a fresh app. Only an API key is generated here; name, runtime,
  * and domain are set later via the MCP configure flow.
  */
-export function createApp(): App {
+export function createApp(createdBy?: string): App {
   const id = generateAppId();
   const api_key = `rwy_${nanoid(32)}`;
 
   db.prepare(
-    `INSERT INTO apps (id, api_key, name, runtime) VALUES (?, ?, NULL, NULL)`
-  ).run(id, api_key);
+    `INSERT INTO apps (id, api_key, name, runtime, created_by) VALUES (?, ?, NULL, NULL, ?)`
+  ).run(id, api_key, createdBy ?? null);
 
   return getApp(id)!;
 }

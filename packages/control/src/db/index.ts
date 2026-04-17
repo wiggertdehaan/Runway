@@ -184,4 +184,7 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "health_check_path")) {
     db.exec(`ALTER TABLE apps ADD COLUMN health_check_path TEXT`);
   }
+  if (!appCols.some((c) => c.name === "created_by")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN created_by TEXT`);
+  }
 }

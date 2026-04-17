@@ -22,7 +22,7 @@ Dockerfiles, builds, TLS certificates, and routing automatically.
 No CI/CD pipelines to configure. No Kubernetes. Just your code and a
 server.
 
-![Runway Dashboard](docs/dashboard.png)
+![Runway Dashboard](docs/dashboard2.png)
 
 ## Why Runway?
 
@@ -156,7 +156,9 @@ the container image changes.
 
 The web dashboard lets you manage apps, users, and settings.
 
-![App settings](docs/settings.png)
+| Setup wizard | Empty state | App settings |
+|:---:|:---:|:---:|
+| ![Setup](docs/setup.png) | ![Empty](docs/dashboard-empty.png) | ![Settings](docs/settings.png) |
 
 ## Tech stack
 
@@ -240,16 +242,16 @@ Planned improvements — contributions welcome:
 - **Security scanning on deploy** — scan uploaded code and images for vulnerabilities before going live
 - **Deploy version history UI** — dashboard view of all deployed versions with one-click rollback to any point
 - **Activity feed** — show recent deploys, status changes, and events on the dashboard
-- **Faster dashboard loading** — lazy-load Docker stats via htmx instead of blocking the page render
-- **Mask API tokens in dashboard** — hide keys by default with a copy button, similar to how env var values are masked
-- **Track app creator** — store which user created each app so ownership is visible in the dashboard
 - **Multiple deploy targets** — support deploying to multiple servers from a single dashboard
-- **Wildcard DNS check at setup** — verify that `*.base_domain` resolves to the server before accepting the config
-- **System health check page** — dashboard view showing DNS, BuildKit, Docker, and Let's Encrypt status at a glance
-- **First-app tutorial** — guided "what's next" flow after the setup wizard instead of an empty dashboard
-- **Better empty state** — prominent getting-started instructions when no apps exist yet
-- **Email notifications** — optional alerts when a deploy fails
-- **Help link in UI** — link to documentation from the nav bar
+- ~~Wildcard DNS check at setup~~ *(v0.3)*
+- ~~System health check page~~ *(v0.3)*
+- ~~First-app tutorial~~ *(v0.3)*
+- ~~Better empty state~~ *(v0.3)*
+- ~~Deploy failure notifications~~ *(v0.3 — webhook)*
+- ~~Help link in UI~~ *(v0.3)*
+- ~~Mask API tokens in dashboard~~ *(v0.3)*
+- ~~Track app creator~~ *(v0.3)*
+- ~~Faster dashboard loading~~ *(v0.3 — htmx lazy loading)*
 
 ## License
 

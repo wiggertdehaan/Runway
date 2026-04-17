@@ -15,7 +15,7 @@ const APP_VERSION = (() => {
 import { listApps, createApp, deleteApp, getApp } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
-import { getAppStatsBulk, type AppStats } from "../deploy/stats.js";
+import { getAppStats } from "../deploy/stats.js";
 import { formatBytes, formatRelative } from "../util/format.js";
 import {
   authenticate,
@@ -59,7 +59,9 @@ import { logAudit, getRecentAuditEntries } from "../db/audit.js";
 import { updateApp } from "../db/apps.js";
 import { writeAppRoute } from "../deploy/gateway.js";
 import { appContainerName, destroyApp } from "../deploy/index.js";
+import { docker } from "../deploy/docker.js";
 import { csrfField } from "../middleware/csrf.js";
+import { checkWildcardDns } from "../util/dns-check.js";
 import {
   clearAttempts,
   getClientIp,
@@ -131,7 +133,9 @@ function layout(title: string, body: string, opts?: { username?: string; csrf?: 
          <a href="/settings">Settings</a>
          <a href="/audit">Audit</a>
          <a href="/account">Account</a>
+         <a href="/health">Health</a>
          <span class="meta" style="margin-left:0.25rem">v${escapeHtml(APP_VERSION)}</span>
+         <a href="https://github.com/wiggertdehaan/Runway" target="_blank" rel="noopener noreferrer" style="color:#737373;font-size:0.8rem" title="Documentation">Docs</a>
          <div class="nav-spacer"></div>
          <span class="meta">${escapeHtml(username)}</span>
          <form method="POST" action="/logout" style="display:inline;margin:0">
@@ -152,7 +156,9 @@ function layout(title: string, body: string, opts?: { username?: string; csrf?: 
           body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #e5e5e5; padding: 2rem; }
           h1 { font-size: 1.5rem; margin-bottom: 1.5rem; }
           h2 { font-size: 1.1rem; }
-          .container { max-width: 800px; margin: 0 auto; }
+          .container { max-width: 960px; margin: 0 auto; }
+          .app-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 1rem; }
+          @media (max-width: 500px) { .app-grid { grid-template-columns: 1fr; } }
           .nav { display: flex; gap: 1rem; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid #262626; }
           .nav a { color: #e5e5e5; text-decoration: none; font-weight: 500; }
           .nav a:hover { color: #60a5fa; }
@@ -219,9 +225,8 @@ function layout(title: string, body: string, opts?: { username?: string; csrf?: 
           .copy-btn:hover { background: #333; color: #e5e5e5; }
           .app-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.25rem; }
           .app-header h2 { margin: 0; }
-          .app-domains { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.25rem; }
-          .app-domains a { color: #60a5fa; text-decoration: none; font-size: 0.85rem; }
-          .app-domains a:hover { text-decoration: underline; }
+          .app-domain { color: #60a5fa; text-decoration: none; font-size: 0.8rem; display: block; margin-bottom: 0.25rem; }
+          .app-domain:hover { text-decoration: underline; }
           .section-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.75rem; margin-top: 1.25rem; color: #a3a3a3; }
         </style>
         <script>
@@ -315,7 +320,7 @@ webRoutes.post("/setup", async (c) => {
     targetUserId: user.id,
     targetUsername: user.username,
   });
-  return c.redirect("/");
+  return c.redirect("/?welcome=1");
 });
 
 webRoutes.get("/login", (c) => {
@@ -504,22 +509,28 @@ webRoutes.use("/settings/*", requireSession);
 webRoutes.use("/audit", requireSession);
 webRoutes.use("/account", requireSession);
 webRoutes.use("/account/*", requireSession);
+webRoutes.use("/health", requireSession);
 
-webRoutes.get("/", async (c) => {
+webRoutes.get("/", (c) => {
   const user = c.get("user");
   const apps = listApps();
-  const stats = await getAppStatsBulk(apps);
   const baseDomain = getSetting("base_domain");
   const dashboardDomain = process.env.DASHBOARD_DOMAIN ?? "";
 
   const appCards = apps
-    .map((app, i) => renderAppCard(app, stats[i]!, dashboardDomain))
+    .map((app) => renderAppCard(app, dashboardDomain))
     .join("");
 
   return c.html(
     layout(
       "Dashboard",
       `
+      ${c.req.query("welcome") ? `
+        <div class="card" style="border-color:#14532d;color:#4ade80;margin-bottom:1.5rem">
+          <strong>Welcome to Runway!</strong> Your admin account is ready.
+          Create your first app below to get started.
+        </div>
+      ` : ""}
       <div class="flex between" style="margin-bottom:1.5rem">
         <h1 style="margin:0">Apps</h1>
         <form method="POST" action="/apps" style="margin:0">
@@ -527,7 +538,25 @@ webRoutes.get("/", async (c) => {
         </form>
       </div>
       ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:#60a5fa">Set one in settings</a> to get automatic subdomains.</p>' : ""}
-      ${apps.length === 0 ? '<p class="meta">No apps yet. Create one to get started.</p>' : appCards}
+      ${apps.length === 0 ? `
+        <div class="card" style="text-align:center;padding:3rem 2rem">
+          <h2 style="margin-bottom:1rem">Get started</h2>
+          <p class="hint" style="max-width:500px;margin:0 auto 1.5rem">
+            Create your first app to get an API key. Then open your project in
+            <a href="https://claude.ai/code" target="_blank" style="color:#60a5fa">Claude Code</a>
+            and paste the deploy instruction — Runway handles the rest.
+          </p>
+          <p style="margin-bottom:1.5rem">
+            <strong>1.</strong> Click <em>"+ New app"</em> above<br/>
+            <strong>2.</strong> Copy the deploy instruction<br/>
+            <strong>3.</strong> Paste it in Claude Code
+          </p>
+          <p class="meta">
+            Need help? Check the <a href="https://github.com/wiggertdehaan/Runway#deploying-an-app" target="_blank" style="color:#60a5fa">deploy guide</a>
+            or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:#60a5fa">API docs</a>.
+          </p>
+        </div>
+      ` : `<div class="app-grid">${appCards}</div>`}
     `,
       { username: user.username, csrf: csrfField(c) }
     )
@@ -535,13 +564,13 @@ webRoutes.get("/", async (c) => {
 });
 
 webRoutes.post("/apps", (c) => {
-  createApp();
+  const user = c.get("user");
+  createApp(user.username);
   return c.redirect("/");
 });
 
 function renderAppCard(
   app: ReturnType<typeof listApps>[number],
-  stats: AppStats,
   dashboardDomain: string
 ): string {
   const configured = !!(app.name && app.runtime);
@@ -549,75 +578,79 @@ function renderAppCard(
     ? escapeHtml(app.name!)
     : '<span class="meta">Unconfigured</span>';
 
-  const statBadge = stats.containerState
-    ? `badge-${escapeHtml(stats.containerState)}`
-    : `badge-${escapeHtml(app.status)}`;
-  const statLabel = stats.containerState
-    ? escapeHtml(stats.containerState)
-    : escapeHtml(app.status);
-
-  const domains: string[] = [];
-  if (app.domain) domains.push(app.domain);
-  if (app.custom_domain) domains.push(app.custom_domain);
-  const domainLinks = domains
-    .map(
-      (d) =>
-        `<a href="https://${encodeURI(d)}" target="_blank" rel="noopener noreferrer">${escapeHtml(d)}</a>`
-    )
-    .join(" ");
+  const domain = app.custom_domain ?? app.domain;
+  const domainLink = domain
+    ? `<a href="https://${encodeURI(domain)}" target="_blank" rel="noopener noreferrer" class="app-domain">${escapeHtml(domain)}</a>`
+    : "";
 
   const llmsTxtUrl = dashboardDomain
     ? `https://${dashboardDomain}/llms.txt`
     : "/llms.txt";
   const claudeInstruction = `Fetch ${llmsTxtUrl} and deploy this project using API key ${app.api_key}`;
 
-  const statsRow = configured
-    ? `
-      <div class="stats">
-        <div>
-          <div class="stat-label">Runtime</div>
-          <div class="stat-value">${escapeHtml(app.runtime!)}</div>
+  const statsPlaceholder = configured
+    ? `<div hx-get="/apps/${encodeURIComponent(app.id)}/stats" hx-trigger="load" hx-swap="outerHTML">
+        <div class="stats">
+          <div><div class="stat-label">Runtime</div><div class="stat-value">${escapeHtml(app.runtime!)}</div></div>
+          <div><div class="stat-label">Image</div><div class="stat-value meta">...</div></div>
+          <div><div class="stat-label">Memory</div><div class="stat-value meta">...</div></div>
+          <div><div class="stat-label">Uptime</div><div class="stat-value meta">...</div></div>
         </div>
-        <div>
-          <div class="stat-label">Image</div>
-          <div class="stat-value">${formatBytes(stats.imageBytes)}</div>
-        </div>
-        <div>
-          <div class="stat-label">Memory</div>
-          <div class="stat-value">${formatBytes(stats.memoryBytes)}</div>
-        </div>
-        <div>
-          <div class="stat-label">Uptime</div>
-          <div class="stat-value">${escapeHtml(formatRelative(stats.startedAt))}</div>
-        </div>
-      </div>
-    `
+      </div>`
+    : "";
+
+  const creator = app.created_by
+    ? `<span class="meta" style="font-size:0.75rem">${escapeHtml(app.created_by)}</span>`
     : "";
 
   return `
-    <div class="card">
-      <div class="flex between">
+    <div class="card" style="display:flex;flex-direction:column">
+      <div class="flex between" style="margin-bottom:0.25rem">
         <div class="app-header">
-          <h2>${title}</h2>
-          <span class="badge ${statBadge}">${statLabel}</span>
+          <h2 style="font-size:1rem">${title}</h2>
+          <span class="badge badge-${escapeHtml(app.status)}" hx-get="/apps/${encodeURIComponent(app.id)}/badge" hx-trigger="load" hx-swap="outerHTML">${escapeHtml(app.status)}</span>
         </div>
-        <div class="flex" style="gap:0.5rem">
-          <button type="button" class="ghost" style="padding:0.25rem 0.5rem;font-size:0.85rem" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy deploy instruction</button>
-          ${configured ? `<a href="/apps/${encodeURIComponent(app.id)}" class="ghost" style="color:#a3a3a3;text-decoration:none;font-size:0.85rem;padding:0.25rem 0.5rem;border:1px solid #262626;border-radius:4px">Settings</a>` : ""}
+        <div class="flex" style="gap:0.25rem">
+          ${configured ? `<a href="/apps/${encodeURIComponent(app.id)}" class="ghost" style="color:#a3a3a3;text-decoration:none;font-size:0.75rem;padding:0.2rem 0.4rem;border:1px solid #262626;border-radius:4px">Settings</a>` : ""}
           <form method="POST" action="/apps/${encodeURIComponent(app.id)}/delete" style="margin:0" data-app-name="${escapeHtml(configured ? app.name! : app.id)}" onsubmit="return confirmDelete(this)">
-            <button class="danger" type="submit" style="padding:0.25rem 0.5rem;font-size:0.85rem">Delete</button>
+            <button class="danger" type="submit" style="padding:0.2rem 0.4rem;font-size:0.75rem">Delete</button>
           </form>
         </div>
       </div>
-      ${domains.length > 0 ? `<div class="app-domains">${domainLinks}</div>` : ""}
-      ${statsRow}
-      <div class="copy-group" style="margin-top:0.75rem">
-        <code>${escapeHtml(app.api_key)}</code>
-        <button type="button" class="copy-btn" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)">Copy</button>
+      ${domainLink}
+      ${statsPlaceholder}
+      <div style="margin-top:auto;padding-top:0.75rem;display:flex;gap:0.5rem;align-items:center">
+        <button type="button" class="ghost" style="padding:0.2rem 0.5rem;font-size:0.75rem" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy deploy instruction</button>
+        <button type="button" class="ghost" style="padding:0.2rem 0.5rem;font-size:0.75rem" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)">Copy API key</button>
+        ${creator}
       </div>
     </div>
   `;
 }
+
+webRoutes.get("/apps/:id/stats", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app || !app.runtime) return c.text("");
+  const stats = await getAppStats(app);
+  return c.html(`
+    <div class="stats">
+      <div><div class="stat-label">Runtime</div><div class="stat-value">${escapeHtml(app.runtime)}</div></div>
+      <div><div class="stat-label">Image</div><div class="stat-value">${formatBytes(stats.imageBytes)}</div></div>
+      <div><div class="stat-label">Memory</div><div class="stat-value">${formatBytes(stats.memoryBytes)}</div></div>
+      <div><div class="stat-label">Uptime</div><div class="stat-value">${escapeHtml(formatRelative(stats.startedAt))}</div></div>
+    </div>
+  `);
+});
+
+webRoutes.get("/apps/:id/badge", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.text("");
+  const stats = await getAppStats(app);
+  const state = stats.containerState ?? app.status;
+  return c.html(
+    `<span class="badge badge-${escapeHtml(state)}">${escapeHtml(state)}</span>`
+  );
+});
 
 webRoutes.post("/apps/:id/delete", async (c) => {
   const app = getApp(c.req.param("id"));
@@ -989,7 +1022,9 @@ webRoutes.post("/users/:id/2fa/reset", async (c) => {
 webRoutes.get("/settings", (c) => {
   const user = c.get("user");
   const baseDomain = getSetting("base_domain") ?? "";
+  const webhookUrl = getSetting("webhook_url") ?? "";
   const saved = c.req.query("saved");
+  const dnsWarning = c.req.query("dns_warning");
 
   return c.html(
     layout(
@@ -997,6 +1032,7 @@ webRoutes.get("/settings", (c) => {
       `
       <h1>Settings</h1>
       ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Settings saved.</div>' : ""}
+      ${dnsWarning ? `<div class="error">${escapeHtml(dnsWarning)}</div>` : ""}
       <div class="card">
         <h2>Base domain</h2>
         <p class="hint" style="margin:0.5rem 0 1rem">
@@ -1008,6 +1044,21 @@ webRoutes.get("/settings", (c) => {
         <form method="POST" action="/settings">
           <div class="flex">
             <input type="text" name="base_domain" value="${escapeHtml(baseDomain)}" placeholder="runway.example.com" style="flex:1" />
+            <button type="submit">Save</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Deploy notifications</h2>
+        <p class="hint" style="margin:0.5rem 0 1rem">
+          Webhook URL to receive a POST request when a deploy fails. Works with
+          Slack, Discord, ntfy, or any service that accepts JSON webhooks. Leave
+          empty to disable.
+        </p>
+        <form method="POST" action="/settings/webhook">
+          <div class="flex">
+            <input type="url" name="webhook_url" value="${escapeHtml(webhookUrl)}" placeholder="https://hooks.slack.com/..." style="flex:1" />
             <button type="submit">Save</button>
           </div>
         </form>
@@ -1032,6 +1083,18 @@ webRoutes.post("/settings", async (c) => {
   if (!normalized) return c.redirect("/settings");
 
   setSetting("base_domain", normalized);
+
+  const dns = await checkWildcardDns(normalized);
+  if (!dns.ok) {
+    return c.redirect(`/settings?saved=1&dns_warning=${encodeURIComponent(dns.message)}`);
+  }
+  return c.redirect("/settings?saved=1");
+});
+
+webRoutes.post("/settings/webhook", async (c) => {
+  const body = await c.req.parseBody();
+  const url = ((body["webhook_url"] as string | undefined) ?? "").trim();
+  setSetting("webhook_url", url);
   return c.redirect("/settings?saved=1");
 });
 
@@ -1079,6 +1142,84 @@ webRoutes.get("/audit", (c) => {
           </tbody>
         </table>
       </div>
+    `,
+      { username: user.username, csrf: csrfField(c) }
+    )
+  );
+});
+
+// ── Health check ────────────────────────────────────────
+
+webRoutes.get("/health", async (c) => {
+  const user = c.get("user");
+  const baseDomain = getSetting("base_domain");
+
+  const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
+
+  // Docker socket
+  try {
+    await docker.ping();
+    checks.push({ name: "Docker", ok: true, detail: "Socket reachable" });
+  } catch {
+    checks.push({ name: "Docker", ok: false, detail: "Cannot reach Docker socket" });
+  }
+
+  // BuildKit
+  try {
+    const bk = docker.getContainer("runway-buildkit");
+    const info = await bk.inspect();
+    const running = info.State.Status === "running";
+    checks.push({
+      name: "BuildKit",
+      ok: running,
+      detail: running ? "Running" : `Status: ${info.State.Status}`,
+    });
+  } catch {
+    checks.push({ name: "BuildKit", ok: false, detail: "Container not found" });
+  }
+
+  // DNS
+  if (baseDomain) {
+    const dns = await checkWildcardDns(baseDomain);
+    checks.push({ name: "Wildcard DNS", ok: dns.ok, detail: dns.message });
+  } else {
+    checks.push({ name: "Wildcard DNS", ok: false, detail: "No base domain configured" });
+  }
+
+  // Traefik
+  try {
+    const gw = docker.getContainer("runway-gateway");
+    const info = await gw.inspect();
+    const running = info.State.Status === "running";
+    checks.push({
+      name: "Traefik",
+      ok: running,
+      detail: running ? "Running" : `Status: ${info.State.Status}`,
+    });
+  } catch {
+    checks.push({ name: "Traefik", ok: false, detail: "Container not found" });
+  }
+
+  const rows = checks
+    .map(
+      (ch) => `
+      <div class="card" style="border-color:${ch.ok ? "#14532d" : "#451a03"}">
+        <div class="flex between">
+          <h2>${escapeHtml(ch.name)}</h2>
+          <span class="badge ${ch.ok ? "badge-running" : "badge-failed"}">${ch.ok ? "ok" : "issue"}</span>
+        </div>
+        <p class="meta" style="margin-top:0.5rem">${escapeHtml(ch.detail)}</p>
+      </div>`
+    )
+    .join("");
+
+  return c.html(
+    layout(
+      "Health",
+      `
+      <h1>System health</h1>
+      <p class="hint">Status of core Runway components.</p>
+      ${rows}
     `,
       { username: user.username, csrf: csrfField(c) }
     )
