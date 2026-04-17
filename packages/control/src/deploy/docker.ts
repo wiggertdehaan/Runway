@@ -205,6 +205,21 @@ export async function runContainer(opts: RunOptions): Promise<RunResult> {
   return { containerId: container.id };
 }
 
+/**
+ * Delete an image by tag. Tolerates 404 (already gone) and 409
+ * (still in use by a container), since pruning should never fail
+ * a deploy. Returns whether the image was actually removed.
+ */
+export async function removeImageByTag(tag: string): Promise<boolean> {
+  try {
+    await docker.getImage(tag).remove({ force: false });
+    return true;
+  } catch (err: any) {
+    if (err.statusCode === 404 || err.statusCode === 409) return false;
+    throw err;
+  }
+}
+
 export async function removeContainerByName(name: string): Promise<void> {
   try {
     const existing = docker.getContainer(name);

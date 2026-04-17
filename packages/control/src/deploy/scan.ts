@@ -251,6 +251,22 @@ export function isValidThreshold(v: unknown): v is Threshold {
   return typeof v === "string" && (THRESHOLDS as string[]).includes(v);
 }
 
+/**
+ * Compute the effective threshold after applying the server-wide
+ * floor. If the app is exempt the floor is ignored; otherwise the
+ * stricter of the two wins (= the one with the lower numeric order).
+ */
+export function effectiveThreshold(
+  appThreshold: Threshold,
+  serverFloor: Threshold,
+  exempt: boolean
+): Threshold {
+  if (exempt || serverFloor === "none") return appThreshold;
+  const appOrder = THRESHOLD_ORDER[appThreshold];
+  const floorOrder = THRESHOLD_ORDER[serverFloor];
+  return appOrder <= floorOrder ? appThreshold : serverFloor;
+}
+
 // Trivy bundles the vulnerability DB in a cache dir; at runtime that's
 // the named volume mounted at /root/.cache/trivy. Override via env for
 // tests or dev environments.

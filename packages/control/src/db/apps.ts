@@ -37,6 +37,10 @@ export interface App {
   container_id: string | null;
   created_by: string | null;
   scan_threshold: string;
+  scan_floor_exempt: number;
+  basic_auth_enabled: number;
+  basic_auth_username: string | null;
+  basic_auth_htpasswd: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -92,6 +96,10 @@ type UpdatableAppFields = Partial<
     | "image_tag"
     | "container_id"
     | "scan_threshold"
+    | "scan_floor_exempt"
+    | "basic_auth_enabled"
+    | "basic_auth_username"
+    | "basic_auth_htpasswd"
   >
 >;
 

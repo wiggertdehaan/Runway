@@ -36,8 +36,8 @@ server.
   full control.
 - **Production features built in** — environment variables, persistent
   volumes, custom domains, health checks, deploy rollback, 2FA, audit
-  logging, and a per-deploy security scan (Trivy) with a configurable
-  severity gate.
+  logging, admin/member roles, per-app HTTP basic auth, and a per-deploy
+  security scan (Trivy) with a configurable severity gate.
 
 ## How it works
 
@@ -144,11 +144,41 @@ Configure an HTTP endpoint to probe. Docker checks it every 30 seconds
 and marks the container unhealthy after 3 failures — so you know when
 something is actually broken, not just running.
 
-### Deploy rollback
+### Deploy history & rollback
 
-Bad deploy? Roll back to the previous working version with one API
-call. Your env vars, volumes, and domain config stay untouched — only
-the container image changes.
+Every deploy is recorded with its image tag, status, and scan summary.
+The app detail page shows the last 20 deploys and a one-click
+**Restore** button on any successful historical version — useful when
+a bug only shows up two deploys later. The same is available via the
+API (`GET /app/deploys`, `POST /app/rollback` with optional
+`deploy_id`) and the MCP (`runway_list_deploys`, `runway_rollback`).
+Env vars, volumes, and domain config stay untouched; only the
+container image changes.
+
+### Basic auth
+
+Put HTTP basic auth in front of any app at the gateway with one
+toggle in the dashboard (or one MCP call). Useful for password-
+protecting an internal tool without writing login code. Credentials
+are hashed before they hit disk and the route is re-written on the
+fly, no redeploy required. For anything public, use in-app auth or
+wait for SSO.
+
+### Roles
+
+Two roles: **admin** and **member**. The first account created through
+the setup wizard is an admin. Admins can promote or demote anyone else
+(except the last remaining admin, which the UI refuses). Members can:
+
+- Create, configure, deploy, roll back, and delete **their own** apps
+- Manage their own env vars, volumes, domains, health checks, and scan
+  threshold
+- Change their own password and 2FA on `/account`
+
+Members cannot reach `/users`, `/settings`, `/audit`, or `/health`, and
+they only see apps they created on the dashboard. Existing installs
+are migrated with every current user promoted to admin — nobody loses
+access on upgrade.
 
 ### Security scanning
 
@@ -181,6 +211,7 @@ response, on the dashboard, and via `runway_get_scan` from the MCP.
 - Isolated builds via BuildKit (user code never touches the Docker socket)
 - Traefik has zero Docker socket access
 - Per-deploy Trivy scan (image CVEs, hardcoded secrets, Dockerfile misconfigs) with a configurable blocking threshold
+- Two-role access model (admin / member) with per-user ownership of apps
 
 ## Dashboard
 
@@ -263,6 +294,11 @@ pnpm --filter @runway/control dev   # Dashboard on http://localhost:3000
 - **Health check paths** and **volume mount paths** are validated against
   strict character allowlists to prevent command injection and path
   traversal respectively.
+- **Per-app HTTP basic auth** can be toggled at the gateway without
+  touching the app. Credentials are hashed before they hit disk
+  (`{SHA}` htpasswd) and the route is re-written on the fly, no
+  redeploy required. Intended for password-protecting internal tools;
+  use SSO or in-app auth for anything public.
 - **Security scanning** runs on every deploy via a bundled Trivy binary.
   Image vulnerabilities, hardcoded secrets in source, and Dockerfile
   misconfigurations are all checked. Each app carries a configurable
@@ -277,10 +313,12 @@ pnpm --filter @runway/control dev   # Dashboard on http://localhost:3000
 Planned improvements — contributions welcome:
 
 - **Multiple custom domains per app** — currently limited to one custom domain plus the auto-generated subdomain
-- **Server-wide minimum scan threshold** — instance-level floor that individual apps cannot drop below, so an admin can forbid publishing anything with critical (or high, etc.) findings regardless of per-app settings
-- **Deploy version history UI** — dashboard view of all deployed versions with one-click rollback to any point
+- ~~Server-wide scan floor~~ *(v0.5.4 — admin-configurable minimum threshold that all apps must respect, with per-app exemption for admins; low findings muted in badge and report UI)*
+- ~~Deploy version history UI~~ *(v0.5.2 — dashboard table of recent deploys with one-click restore to any successful version, also via API and MCP)*
 - **Activity feed** — show recent deploys, status changes, and events on the dashboard
 - **Multiple deploy targets** — support deploying to multiple servers from a single dashboard
+- **SSO support** — single sign-on both for the Runway dashboard/API itself and as a reusable auth layer in front of deployed apps, so operators can grant per-app access without each app rolling its own login
+- ~~Per-app basic auth~~ *(v0.5 — toggle HTTP basic auth at the gateway per app, set via dashboard or MCP, no redeploy needed)*
 - ~~Security scanning on deploy~~ *(v0.4 — Trivy, image CVEs + source secrets + Dockerfile misconfig, configurable block threshold)*
 - ~~Wildcard DNS check at setup~~ *(v0.3)*
 - ~~System health check page~~ *(v0.3)*

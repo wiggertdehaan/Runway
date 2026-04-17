@@ -82,13 +82,23 @@ project root must contain a \`Dockerfile\`. If there is no Dockerfile, ask
 the user before creating one. A minimal template for each supported
 runtime:
 
-- **node**: \`FROM node:24-slim\`, copy package.json + source, \`npm ci\` (or
-  \`pnpm install --frozen-lockfile\`), run \`npm run build\` if a build script
-  exists, \`EXPOSE 3000\`, \`CMD ["node", "."]\`.
-- **python**: \`FROM python:3.12-slim\`, copy requirements.txt + source,
-  \`pip install -r requirements.txt\`, \`EXPOSE 3000\`, \`CMD ["python","main.py"]\`.
+- **node**: \`FROM node:24-slim\`, \`RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*\`,
+  copy package.json + source, \`npm ci\` (or \`pnpm install --frozen-lockfile\`),
+  run \`npm run build\` if a build script exists, \`EXPOSE 3000\`, \`CMD ["node", "."]\`.
+- **python**: \`FROM python:3.12-slim\`, \`RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*\`,
+  copy requirements.txt + source, \`pip install -r requirements.txt\`,
+  \`EXPOSE 3000\`, \`CMD ["python","main.py"]\`.
 - **go**: multi-stage build from \`golang:1.23\` to \`gcr.io/distroless/static-debian12\`.
-- **static**: \`FROM nginx:1.27-alpine\`, \`COPY . /usr/share/nginx/html\`, \`EXPOSE 80\`.
+- **static**: \`FROM nginx:1.27-alpine\`, \`RUN apk upgrade --no-cache\`,
+  create writable cache dirs and set ownership to the \`nginx\` user,
+  write a PID file to \`/tmp/nginx.pid\`, \`COPY --chown=nginx:nginx . /usr/share/nginx/html\`,
+  \`USER nginx\`, \`EXPOSE 80\`. Nginx requires writable cache and log
+  dirs to run as non-root — always prepare them before switching user.
+
+**Important:** always include an OS package upgrade step (\`apt-get upgrade\`
+or \`apk upgrade\`) right after the \`FROM\` line. Base images ship with
+known vulnerabilities in OS packages — the upgrade step patches them
+before the security scan runs and prevents unnecessary warnings.
 
 The app is expected to listen on port 3000 unless the runtime is
 \`static\` (port 80). That port is already configured on the server; do
@@ -347,6 +357,14 @@ curl -sS -X PUT ${base}/api/v1/app/scan-threshold \\
 
 You can also pass \`scan_threshold\` in the \`/app/configure\` body.
 
+### Server-wide scan floor
+
+The server admin can set a minimum scan threshold that all apps must
+respect. The \`/app\` config response includes \`effective_scan_threshold\`
+which is the stricter of the per-app setting and the server floor. If
+\`scan_floor_exempt\` is \`true\` on this app, only the per-app threshold
+applies (admin granted an exemption).
+
 ### Read the latest scan
 
 \`\`\`bash
@@ -354,18 +372,68 @@ curl -sS ${base}/api/v1/app/scan \\
   -H "Authorization: Bearer rwy_YOUR_KEY"
 \`\`\`
 
-## Rollback
+## Basic auth
 
-If a deploy breaks the app, roll back to the previous successful image:
+Put HTTP basic auth in front of the app at the gateway, useful for
+password-protecting an internal tool without wiring up login in the
+app itself. Only one username is supported per app.
+
+### Enable (or rotate credentials)
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/basic-auth \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"enabled":true,"username":"alice","password":"correct horse battery staple"}'
+\`\`\`
+
+Takes effect immediately — Traefik reloads the route, no redeploy
+required. Passwords are hashed (SHA1 \`{SHA}\` htpasswd format) before
+they hit disk.
+
+### Disable
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/basic-auth \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"enabled":false}'
+\`\`\`
+
+## Deploy history & rollback
+
+List recent deploys (most recent first) — useful to find a specific
+historical version to roll back to:
+
+\`\`\`bash
+curl -sS "${base}/api/v1/app/deploys?limit=20" \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
+
+Each entry has \`id\`, \`image_tag\`, \`status\` (\`success\`,
+\`failed\`, \`blocked\`, \`warned\`), \`scan_status\`, \`scan_summary\`,
+\`created_at\`, and \`is_current\`.
+
+Roll back to the previous successful deploy:
 
 \`\`\`bash
 curl -sS -X POST ${base}/api/v1/app/rollback \\
   -H "Authorization: Bearer rwy_YOUR_KEY"
 \`\`\`
 
-This restarts the container with the previous image. Env vars, volumes,
-and other configuration are preserved. Returns an error if there is no
-previous successful deploy to roll back to.
+Roll back to a specific historical deploy (find its \`id\` with
+\`/app/deploys\`):
+
+\`\`\`bash
+curl -sS -X POST ${base}/api/v1/app/rollback \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"deploy_id":42}'
+\`\`\`
+
+Rollback restarts the container with that image. Env vars, volumes,
+and other configuration are preserved. Only successful deploys are
+eligible; failed/blocked deploys never produced a runnable image.
 
 ## Error handling
 

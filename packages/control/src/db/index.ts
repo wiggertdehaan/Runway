@@ -17,6 +17,7 @@ export function migrate() {
       password_hash TEXT NOT NULL,
       totp_secret TEXT,
       totp_enabled INTEGER NOT NULL DEFAULT 0,
+      role TEXT NOT NULL DEFAULT 'member',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -121,6 +122,14 @@ export function migrate() {
       `ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0`
     );
   }
+  if (!userColumns.some((c) => c.name === "role")) {
+    // Pre-upgrade, every user had full rights. Preserve that by
+    // promoting all existing users to admin; new users created after
+    // this migration default to member and have to be promoted by an
+    // admin.
+    db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'`);
+    db.exec(`UPDATE users SET role = 'admin'`);
+  }
 
   // Upgrade legacy apps tables created before the MCP-driven
   // configure flow: name and runtime were NOT NULL and the
@@ -189,6 +198,22 @@ export function migrate() {
   }
   if (!appCols.some((c) => c.name === "scan_threshold")) {
     db.exec(`ALTER TABLE apps ADD COLUMN scan_threshold TEXT NOT NULL DEFAULT 'none'`);
+  }
+  if (!appCols.some((c) => c.name === "scan_floor_exempt")) {
+    db.exec(
+      `ALTER TABLE apps ADD COLUMN scan_floor_exempt INTEGER NOT NULL DEFAULT 0`
+    );
+  }
+  if (!appCols.some((c) => c.name === "basic_auth_enabled")) {
+    db.exec(
+      `ALTER TABLE apps ADD COLUMN basic_auth_enabled INTEGER NOT NULL DEFAULT 0`
+    );
+  }
+  if (!appCols.some((c) => c.name === "basic_auth_username")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN basic_auth_username TEXT`);
+  }
+  if (!appCols.some((c) => c.name === "basic_auth_htpasswd")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN basic_auth_htpasswd TEXT`);
   }
 
   // Scan results are attached to individual deploys so history is preserved.

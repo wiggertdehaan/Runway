@@ -16,9 +16,9 @@ import {
   rollbackApp,
   ScanBlockedError,
 } from "../deploy/index.js";
-import { THRESHOLDS, isValidThreshold, type Threshold } from "../deploy/scan.js";
-import { getDeploy, getLatestDeployWithScan } from "../db/deploys.js";
-import { writeAppRoute } from "../deploy/gateway.js";
+import { THRESHOLDS, isValidThreshold, effectiveThreshold, type Threshold } from "../deploy/scan.js";
+import { getDeploy, getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
+import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
 import { appContainerName } from "../deploy/index.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { notifyDeployFailure } from "../util/webhook.js";
@@ -46,6 +46,16 @@ function toConfigResponse(app: App) {
     status: app.status,
     health_check_path: app.health_check_path,
     scan_threshold: app.scan_threshold,
+    scan_floor_exempt: !!app.scan_floor_exempt,
+    effective_scan_threshold: effectiveThreshold(
+      (app.scan_threshold ?? "none") as Threshold,
+      (getSetting("min_scan_threshold") ?? "none") as Threshold,
+      !!app.scan_floor_exempt
+    ),
+    basic_auth: {
+      enabled: !!app.basic_auth_enabled,
+      username: app.basic_auth_username,
+    },
     configured: isConfigured(app),
   };
 }
@@ -432,10 +442,78 @@ apiRoutes.put("/app/domain", async (c) => {
       domain: updated.domain,
       customDomain: updated.custom_domain,
       port: updated.port,
+      basicAuth: appBasicAuth(updated),
     });
   }
 
   return c.json(toConfigResponse(updated));
+});
+
+// ── Basic auth ──────────────────────────────────────────
+apiRoutes.put("/app/basic-auth", async (c) => {
+  const app = c.get("app");
+  const body = await c.req.json().catch(() => null);
+
+  if (!body || typeof body !== "object") {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const enabled = !!body.enabled;
+
+  let patch: Parameters<typeof updateApp>[1];
+
+  if (!enabled) {
+    patch = {
+      basic_auth_enabled: 0,
+      basic_auth_username: null,
+      basic_auth_htpasswd: null,
+    };
+  } else {
+    const username =
+      typeof body.username === "string" ? body.username.trim() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+
+    if (!username || !/^[A-Za-z0-9._\-@]+$/.test(username)) {
+      return c.json(
+        { error: "username is required and must match [A-Za-z0-9._-@]+" },
+        400
+      );
+    }
+    if (password.length < 6) {
+      return c.json(
+        { error: "password must be at least 6 characters" },
+        400
+      );
+    }
+
+    patch = {
+      basic_auth_enabled: 1,
+      basic_auth_username: username,
+      basic_auth_htpasswd: buildHtpasswd(username, password),
+    };
+  }
+
+  const updated = updateApp(app.id, patch);
+  if (!updated) return c.json({ error: "App not found" }, 404);
+
+  if (updated.domain) {
+    await writeAppRoute({
+      appId: updated.id,
+      containerName: appContainerName(updated.id),
+      domain: updated.domain,
+      customDomain: updated.custom_domain,
+      port: updated.port,
+      basicAuth: appBasicAuth(updated),
+    });
+  }
+
+  return c.json({
+    app_id: updated.id,
+    basic_auth: {
+      enabled: !!updated.basic_auth_enabled,
+      username: updated.basic_auth_username,
+    },
+  });
 });
 
 // ── Health check ────────────────────────────────────────
@@ -473,10 +551,48 @@ apiRoutes.post("/app/rollback", async (c) => {
     return c.json({ error: "App is not configured yet." }, 409);
   }
 
+  let targetDeployId: number | undefined;
+  // Body is optional: omitted = previous successful deploy.
+  if (c.req.header("content-length")) {
+    const body = await c.req.json().catch(() => null);
+    if (body && body.deploy_id !== undefined) {
+      const id = Number(body.deploy_id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return c.json(
+          { error: "deploy_id must be a positive integer" },
+          400
+        );
+      }
+      targetDeployId = id;
+    }
+  }
+
   try {
-    const result = await rollbackApp(app);
+    const result = await rollbackApp(app, targetDeployId);
     return c.json({ status: "rolled_back", ...result });
   } catch (err: any) {
     return c.json({ error: err?.message ?? "Rollback failed" }, 500);
   }
+});
+
+apiRoutes.get("/app/deploys", (c) => {
+  const app = c.get("app");
+  const limit = Math.min(
+    Math.max(parseInt(c.req.query("limit") ?? "20", 10) || 20, 1),
+    100
+  );
+  const deploys = getLatestDeploys(app.id, limit).map((d) => ({
+    id: d.id,
+    image_tag: d.image_tag,
+    status: d.status,
+    scan_status: d.scan_status,
+    scan_summary: d.scan_summary ? JSON.parse(d.scan_summary) : null,
+    created_at: d.created_at,
+    is_current: d.image_tag === app.image_tag && d.status === "success",
+  }));
+  return c.json({
+    app_id: app.id,
+    current_image_tag: app.image_tag,
+    deploys,
+  });
 });

@@ -5,7 +5,11 @@ import { db } from "./index.js";
  * like the base wildcard domain, ACME email, etc.
  */
 
-export type SettingKey = "base_domain" | "acme_email" | "webhook_url";
+export type SettingKey =
+  | "base_domain"
+  | "acme_email"
+  | "webhook_url"
+  | "min_scan_threshold";
 
 export function getSetting(key: SettingKey): string | undefined {
   const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as

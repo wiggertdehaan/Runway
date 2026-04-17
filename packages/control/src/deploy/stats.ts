@@ -1,5 +1,5 @@
 import { docker } from "./docker.js";
-import { appContainerName, appImageTag } from "./index.js";
+import { appContainerName } from "./index.js";
 import type { App } from "../db/apps.js";
 
 export interface AppStats {
@@ -26,10 +26,9 @@ const EMPTY_STATS: AppStats = {
  */
 export async function getAppStats(app: App): Promise<AppStats> {
   const name = appContainerName(app.id);
-  const tag = appImageTag(app.id);
 
   const [imageBytes, runtimeState] = await Promise.all([
-    fetchImageSize(tag),
+    app.image_tag ? fetchImageSize(app.image_tag) : Promise.resolve(null),
     fetchContainerState(name),
   ]);
 

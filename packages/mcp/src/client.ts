@@ -25,7 +25,15 @@ export interface AppConfig {
   status: string;
   health_check_path: string | null;
   scan_threshold: ScanThreshold;
+  scan_floor_exempt: boolean;
+  effective_scan_threshold: ScanThreshold;
+  basic_auth?: { enabled: boolean; username: string | null };
   configured: boolean;
+}
+
+export interface BasicAuthResponse {
+  app_id: string;
+  basic_auth: { enabled: boolean; username: string | null };
 }
 
 export class RunwayClient {
@@ -168,7 +176,45 @@ export class RunwayClient {
     return this.request("/app/scan");
   }
 
-  async rollback(): Promise<unknown> {
+  async setBasicAuth(
+    enabled: boolean,
+    username?: string,
+    password?: string
+  ): Promise<BasicAuthResponse> {
+    const body: Record<string, unknown> = { enabled };
+    if (enabled) {
+      body.username = username;
+      body.password = password;
+    }
+    return this.request<BasicAuthResponse>("/app/basic-auth", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async rollback(deployId?: number): Promise<unknown> {
+    if (deployId !== undefined) {
+      return this.request("/app/rollback", {
+        method: "POST",
+        body: JSON.stringify({ deploy_id: deployId }),
+      });
+    }
     return this.request("/app/rollback", { method: "POST" });
+  }
+
+  async listDeploys(limit = 20): Promise<{
+    app_id: string;
+    current_image_tag: string | null;
+    deploys: Array<{
+      id: number;
+      image_tag: string | null;
+      status: string;
+      scan_status: string | null;
+      scan_summary: { status?: string; counts?: Record<string, number> } | null;
+      created_at: string;
+      is_current: boolean;
+    }>;
+  }> {
+    return this.request(`/app/deploys?limit=${limit}`);
   }
 }

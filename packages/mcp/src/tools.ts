@@ -52,7 +52,11 @@ function formatScanForAgent(scan: DeployResponse["scan"]): string {
     scan.truncated || findings.length > topN.length
       ? `\n  … ${((scan.total_findings ?? findings.length) - topN.length)} more`
       : "";
-  return [summary, "", ...topN, truncated].filter(Boolean).join("\n");
+  const hasImageFindings = findings.some((f) => f.source === "image");
+  const imageHint = hasImageFindings
+    ? "\n\nFindings with source \"image\" are OS-level vulnerabilities in the base Docker image, not in the user's code. Fix by adding `RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*` (Debian/slim) or `RUN apk upgrade --no-cache` (Alpine) early in the Dockerfile, or by using a newer base image tag."
+    : "";
+  return [summary, "", ...topN, truncated].filter(Boolean).join("\n") + imageHint;
 }
 
 export function registerTools(server: McpServer, client: RunwayClient) {
@@ -379,11 +383,82 @@ export function registerTools(server: McpServer, client: RunwayClient) {
   );
 
   server.tool(
+    "runway_set_basic_auth",
+    "Put HTTP basic auth in front of the Runway app at the gateway, or remove it. Useful for quickly password-protecting an internal tool without writing login code in the app. Only one username is supported per app. Takes effect immediately, no redeploy required.",
+    {
+      enabled: z
+        .boolean()
+        .describe("true to enable basic auth, false to disable"),
+      username: z
+        .string()
+        .optional()
+        .describe("Username (required when enabled=true)"),
+      password: z
+        .string()
+        .optional()
+        .describe("Password, min 6 chars (required when enabled=true)"),
+    },
+    async ({ enabled, username, password }) => {
+      if (enabled && (!username || !password)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "username and password are required when enabling basic auth.",
+            },
+          ],
+          isError: true,
+        };
+      }
+      const result = await client.setBasicAuth(enabled, username, password);
+      return {
+        content: [
+          {
+            type: "text",
+            text: enabled
+              ? `Basic auth enabled for user '${result.basic_auth.username}'.`
+              : "Basic auth disabled.",
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_list_deploys",
+    "List recent deploys of the Runway app (most recent first). Each entry has id, image_tag, status, scan summary, created_at, and is_current. Use the id with runway_rollback to restore any successful historical deploy.",
+    {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("How many deploys to fetch (default 20, max 100)"),
+    },
+    async ({ limit }) => {
+      const result = await client.listDeploys(limit ?? 20);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
     "runway_rollback",
-    "Roll back the Runway app to its previous successful deploy. Stops the current container and starts one with the previous image. Useful when a deploy introduced a bug. Does not affect env vars, volumes, or other config — only the container image.",
-    {},
-    async () => {
-      const result = await client.rollback();
+    "Roll back the Runway app to a previous successful deploy. By default restores the most recent successful deploy before the current one. Pass deploy_id (from runway_list_deploys) to restore a specific historical version. Does not affect env vars, volumes, or other config — only the container image.",
+    {
+      deploy_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Specific deploy id to restore (from runway_list_deploys). Omit for previous successful deploy."
+        ),
+    },
+    async ({ deploy_id }) => {
+      const result = await client.rollback(deploy_id);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -436,6 +511,7 @@ function generateDockerfile(config: AppConfig): string {
   const port = config.port;
   const templates: Record<Runtime, string> = {
     node: `FROM node:24-slim AS base
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 
 FROM base AS deps
@@ -460,6 +536,7 @@ EXPOSE ${port}
 CMD ["node", "."]`,
 
     python: `FROM python:3.12-slim
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
@@ -483,7 +560,16 @@ USER nonroot:nonroot
 ENTRYPOINT ["/server"]`,
 
     static: `FROM nginx:1.27-alpine
-COPY . /usr/share/nginx/html
+RUN apk upgrade --no-cache \\
+ && sed -i 's|pid.*nginx\\.pid;|pid /tmp/nginx.pid;|' /etc/nginx/nginx.conf \\
+ && mkdir -p /var/cache/nginx/client_temp \\
+              /var/cache/nginx/proxy_temp \\
+              /var/cache/nginx/fastcgi_temp \\
+              /var/cache/nginx/uwsgi_temp \\
+              /var/cache/nginx/scgi_temp \\
+ && chown -R nginx:nginx /var/cache/nginx /var/log/nginx /etc/nginx/conf.d
+COPY --chown=nginx:nginx . /usr/share/nginx/html
+USER nginx
 EXPOSE 80`,
   };
 

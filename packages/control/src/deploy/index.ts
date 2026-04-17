@@ -1,6 +1,11 @@
 import type { Readable } from "node:stream";
 import { updateApp, type App } from "../db/apps.js";
-import { recordDeploy, getPreviousSuccessfulDeploy } from "../db/deploys.js";
+import {
+  recordDeploy,
+  getPreviousSuccessfulDeploy,
+  getDeploy,
+  getSuccessfulImageTags,
+} from "../db/deploys.js";
 import { getEnvVars } from "../db/env.js";
 import { getVolumes } from "../db/volumes.js";
 import {
@@ -8,11 +13,13 @@ import {
   getContainerLogs,
   getContainerStatus,
   removeContainerByName,
+  removeImageByTag,
   runContainer,
 } from "./docker.js";
-import { deleteAppRoute, writeAppRoute } from "./gateway.js";
+import { appBasicAuth, deleteAppRoute, writeAppRoute } from "./gateway.js";
 import {
   buildScanResult,
+  effectiveThreshold,
   emptyCounts,
   isValidThreshold,
   scanImage,
@@ -22,6 +29,7 @@ import {
   type ScanResult,
   type Threshold,
 } from "./scan.js";
+import { getSetting } from "../db/settings.js";
 
 function dockerSafeId(appId: string): string {
   return appId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
@@ -31,8 +39,24 @@ export function appContainerName(appId: string): string {
   return `runway-app-${dockerSafeId(appId)}`;
 }
 
-export function appImageTag(appId: string): string {
-  return `runway-app-${dockerSafeId(appId)}:latest`;
+/**
+ * The base image name for an app (no tag). Each deploy produces a
+ * unique version tag (see newImageTag); the base name is shared
+ * across versions so the Docker image reference always groups them.
+ */
+export function appImageName(appId: string): string {
+  return `runway-app-${dockerSafeId(appId)}`;
+}
+
+/**
+ * Generate a fresh, unique image tag for one build. Tags are
+ * monotonically sortable (leading timestamp) so sorting by tag
+ * approximates deploy order even without the deploys table.
+ */
+export function newImageTag(appId: string): string {
+  const ts = Date.now().toString(36);
+  const rnd = Math.random().toString(36).slice(2, 8);
+  return `${appImageName(appId)}:v${ts}-${rnd}`;
 }
 
 function volumeSafeName(mountPath: string): string {
@@ -132,13 +156,43 @@ async function runScans(
   return result;
 }
 
+/**
+ * How many most-recent successful image tags to keep per app.
+ * Everything older is pruned from the Docker image cache so disk
+ * doesn't grow unbounded. The deploys row stays — only the image
+ * disappears, which means old rows can still be inspected but no
+ * longer rolled back to. Tweak via RUNWAY_IMAGE_RETENTION.
+ */
+const IMAGE_RETENTION = Math.max(
+  parseInt(process.env.RUNWAY_IMAGE_RETENTION ?? "", 10) || 10,
+  2
+);
+
+async function pruneOldImages(appId: string): Promise<void> {
+  const tags = getSuccessfulImageTags(appId);
+  const toRemove = tags.slice(IMAGE_RETENTION);
+  for (const tag of toRemove) {
+    try {
+      await removeImageByTag(tag);
+    } catch {
+      // Pruning is best-effort — never fail a deploy because cleanup
+      // tripped on something weird.
+    }
+  }
+}
+
 function resolveThreshold(app: App): Threshold {
-  return isValidThreshold(app.scan_threshold) ? app.scan_threshold : "none";
+  const appThreshold: Threshold = isValidThreshold(app.scan_threshold)
+    ? app.scan_threshold
+    : "none";
+  const serverFloor = (getSetting("min_scan_threshold") ?? "none") as Threshold;
+  const exempt = !!app.scan_floor_exempt;
+  return effectiveThreshold(appThreshold, serverFloor, exempt);
 }
 
 export async function deployApp(input: DeployInput): Promise<DeployResult> {
   const { app, tar } = input;
-  const imageTag = appImageTag(app.id);
+  const imageTag = newImageTag(app.id);
   const containerName = appContainerName(app.id);
   const threshold = resolveThreshold(app);
 
@@ -185,6 +239,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
       domain: app.domain,
       customDomain: app.custom_domain,
       port: app.port,
+      basicAuth: appBasicAuth(app),
     });
   }
 
@@ -201,6 +256,8 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     scanReport: scan,
   });
 
+  await pruneOldImages(app.id);
+
   const logTail = build.log.split("\n").slice(-20).join("\n");
 
   return {
@@ -214,11 +271,36 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   };
 }
 
-export async function rollbackApp(app: App): Promise<DeployResult> {
-  const currentTag = appImageTag(app.id);
-  const prev = getPreviousSuccessfulDeploy(app.id, currentTag);
-  if (!prev || !prev.image_tag) {
-    throw new Error("No previous successful deploy to roll back to");
+export async function rollbackApp(
+  app: App,
+  targetDeployId?: number
+): Promise<DeployResult> {
+  const currentTag = app.image_tag ?? undefined;
+
+  let prev: { id: number; image_tag: string | null; status: string } | undefined;
+  if (targetDeployId !== undefined) {
+    prev = getDeploy(app.id, targetDeployId);
+    if (!prev) {
+      throw new Error(`Deploy #${targetDeployId} not found for this app`);
+    }
+    if (prev.status !== "success") {
+      throw new Error(
+        `Deploy #${targetDeployId} has status '${prev.status}', only successful deploys can be restored`
+      );
+    }
+    if (!prev.image_tag) {
+      throw new Error(`Deploy #${targetDeployId} has no image to roll back to`);
+    }
+    if (prev.image_tag === app.image_tag) {
+      throw new Error(
+        `Deploy #${targetDeployId} is already the currently running image`
+      );
+    }
+  } else {
+    prev = getPreviousSuccessfulDeploy(app.id, currentTag);
+    if (!prev || !prev.image_tag) {
+      throw new Error("No previous successful deploy to roll back to");
+    }
   }
 
   const containerName = appContainerName(app.id);
@@ -244,6 +326,7 @@ export async function rollbackApp(app: App): Promise<DeployResult> {
       domain: app.domain,
       customDomain: app.custom_domain,
       port: app.port,
+      basicAuth: appBasicAuth(app),
     });
   }
 

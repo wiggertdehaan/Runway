@@ -26,10 +26,15 @@ import {
   deleteUser,
   getUser,
   getUserByUsername,
+  isAdmin,
   isTotpEnabled,
   listUsers,
   setPassword,
   setTotpPending,
+  setUserRole,
+  countAdmins,
+  type Role,
+  ROLES,
 } from "../db/users.js";
 import { createSession, deleteAllUserSessions, deleteSession } from "../db/sessions.js";
 import {
@@ -54,15 +59,17 @@ import {
 } from "../db/settings.js";
 import {
   SESSION_COOKIE,
+  requireAdmin,
+  requireAppAccess,
   requireSession,
   type WebEnv,
 } from "../middleware/session.js";
 import { logAudit, getRecentAuditEntries } from "../db/audit.js";
 import { updateApp } from "../db/apps.js";
-import { getLatestDeployWithScan } from "../db/deploys.js";
-import { THRESHOLDS, isValidThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
-import { writeAppRoute } from "../deploy/gateway.js";
-import { appContainerName, destroyApp } from "../deploy/index.js";
+import { getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
+import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
+import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
+import { appContainerName, destroyApp, rollbackApp } from "../deploy/index.js";
 import { docker } from "../deploy/docker.js";
 import { csrfField } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
@@ -121,23 +128,31 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function layout(title: string, body: string, opts?: { username?: string; csrf?: string }) {
+function layout(
+  title: string,
+  body: string,
+  opts?: { username?: string; csrf?: string; isAdmin?: boolean }
+) {
   const username = opts?.username;
   const csrf = opts?.csrf;
+  const admin = opts?.isAdmin ?? false;
   if (csrf) {
     body = body.replace(
       /(<form\s[^>]*method="POST"[^>]*>)/gi,
       `$1${csrf}`
     );
   }
+  const adminLinks = admin
+    ? `<a href="/users">Users</a>
+         <a href="/settings">Settings</a>
+         <a href="/audit">Audit</a>
+         <a href="/health">Health</a>`
+    : "";
   const nav = username
     ? `<nav class="nav">
          <a href="/">Apps</a>
-         <a href="/users">Users</a>
-         <a href="/settings">Settings</a>
-         <a href="/audit">Audit</a>
+         ${adminLinks}
          <a href="/account">Account</a>
-         <a href="/health">Health</a>
          <span class="meta" style="margin-left:0.25rem">v${escapeHtml(APP_VERSION)}</span>
          <a href="https://github.com/wiggertdehaan/Runway" target="_blank" rel="noopener noreferrer" style="color:#737373;font-size:0.8rem" title="Documentation">Docs</a>
          <div class="nav-spacer"></div>
@@ -312,7 +327,7 @@ webRoutes.post("/setup", async (c) => {
     return c.redirect("/setup");
   }
 
-  const user = await createUser(username, password);
+  const user = await createUser(username, password, "admin");
 
   if (baseDomainRaw && baseDomainRaw.trim()) {
     const normalized = normalizeBaseDomain(baseDomainRaw);
@@ -507,18 +522,32 @@ function getCookieValue(c: Context, name: string): string | undefined {
 webRoutes.use("/", requireSession);
 webRoutes.use("/apps", requireSession);
 webRoutes.use("/apps/*", requireSession);
+webRoutes.use("/apps/:id", requireAppAccess);
+webRoutes.use("/apps/:id/*", requireAppAccess);
 webRoutes.use("/users", requireSession);
 webRoutes.use("/users/*", requireSession);
+webRoutes.use("/users", requireAdmin);
+webRoutes.use("/users/*", requireAdmin);
 webRoutes.use("/settings", requireSession);
 webRoutes.use("/settings/*", requireSession);
+webRoutes.use("/settings", requireAdmin);
+webRoutes.use("/settings/*", requireAdmin);
 webRoutes.use("/audit", requireSession);
+webRoutes.use("/audit", requireAdmin);
 webRoutes.use("/account", requireSession);
 webRoutes.use("/account/*", requireSession);
 webRoutes.use("/health", requireSession);
+webRoutes.use("/health", requireAdmin);
 
 webRoutes.get("/", (c) => {
   const user = c.get("user");
-  const apps = listApps();
+  const admin = isAdmin(user);
+  // Admins see every app; members only see what they created. Apps
+  // created before the `created_by` column existed have a NULL
+  // creator — treat those as admin-only so nothing leaks.
+  const apps = admin
+    ? listApps()
+    : listApps().filter((a) => a.created_by === user.username);
   const baseDomain = getSetting("base_domain");
   const dashboardDomain = process.env.DASHBOARD_DOMAIN ?? "";
 
@@ -530,10 +559,24 @@ webRoutes.get("/", (c) => {
     layout(
       "Dashboard",
       `
+      ${c.req.query("forbidden") ? '<div class="card" style="border-color:#7f1d1d;color:#fca5a5;margin-bottom:1.5rem"><strong>Not allowed.</strong> That page is admin-only. Ask an administrator if you need access.</div>' : ""}
       ${c.req.query("welcome") ? `
         <div class="card" style="border-color:#14532d;color:#4ade80;margin-bottom:1.5rem">
           <strong>Welcome to Runway!</strong> Your admin account is ready.
           Create your first app below to get started.
+        </div>
+      ` : ""}
+      ${c.req.query("new") ? `
+        <div class="card" style="border-color:#1e3a8a;margin-bottom:1.5rem">
+          <strong style="color:#93c5fd">New app created.</strong>
+          <p style="margin:0.5rem 0 0;font-size:0.9rem;color:#d4d4d4">
+            Scroll down to the highlighted card, click
+            <em>Copy deploy instruction</em>, and paste it into
+            <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">Claude Code</a>
+            inside your project directory. Claude reads your Dockerfile (or generates one),
+            packages the project, uploads it, and the server builds &amp; runs the container.
+            The app's URL appears on the card once it's live.
+          </p>
         </div>
       ` : ""}
       <div class="flex between" style="margin-bottom:1.5rem">
@@ -563,19 +606,103 @@ webRoutes.get("/", (c) => {
         </div>
       ` : `<div class="app-grid">${appCards}</div>`}
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
 
 webRoutes.post("/apps", (c) => {
   const user = c.get("user");
-  createApp(user.username);
-  return c.redirect("/");
+  const app = createApp(user.username);
+  return c.redirect(`/?new=${encodeURIComponent(app.id)}`);
 });
 
-function renderScanSection(
+function renderDeployHistory(
   app: ReturnType<typeof listApps>[number]
+): string {
+  const deploys = getLatestDeploys(app.id, 7);
+  if (deploys.length === 0) {
+    return `
+      <div class="card" id="deploys">
+        <h2>Deploy history</h2>
+        <p class="meta">No deploys yet.</p>
+      </div>
+    `;
+  }
+
+  const rows = deploys
+    .map((d) => {
+      const isCurrent = !!(
+        app.image_tag &&
+        d.image_tag &&
+        d.image_tag === app.image_tag &&
+        d.status === "success"
+      );
+      const statusColor =
+        d.status === "success"
+          ? "#4ade80"
+          : d.status === "blocked"
+          ? "#fca5a5"
+          : d.status === "warned"
+          ? "#fbbf24"
+          : d.status === "failed"
+          ? "#f87171"
+          : "#a3a3a3";
+      const statusLabel = escapeHtml(d.status);
+      const when = escapeHtml(formatRelative(d.created_at));
+      const tagShort = d.image_tag
+        ? escapeHtml(d.image_tag.split(":").pop() ?? d.image_tag)
+        : '<span class="meta">—</span>';
+      const canRollback =
+        d.status === "success" && !!d.image_tag && !isCurrent;
+      const action = isCurrent
+        ? '<span class="meta" style="font-size:0.75rem">current</span>'
+        : canRollback
+        ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/rollback/${d.id}" style="margin:0" onsubmit="return confirm('Restore deploy #${d.id}? The current container will be replaced.');">
+             <button type="submit" class="ghost" style="font-size:0.75rem;padding:0.25rem 0.5rem">Restore</button>
+           </form>`
+        : "";
+      return `
+        <tr style="border-bottom:1px solid #262626">
+          <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.8rem">#${d.id}</td>
+          <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span></td>
+          <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem" title="${escapeHtml(d.image_tag ?? "")}">${tagShort}</td>
+          <td style="padding:0.4rem 0.75rem;font-size:0.8rem" class="meta">${when}</td>
+          <td style="padding:0.4rem 0.75rem;text-align:right">${action}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="card" id="deploys">
+      <h2>Deploy history</h2>
+      <p class="hint" style="margin:0.5rem 0 1rem">
+        Most recent deploys first. Restoring a previous deploy replaces the
+        running container with that image. Env vars, volumes, and domain
+        config are preserved.
+      </p>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead>
+            <tr style="text-align:left;border-bottom:1px solid #262626">
+              <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Deploy</th>
+              <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Status</th>
+              <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Image</th>
+              <th style="padding:0.5rem 0.75rem;font-size:0.8rem">When</th>
+              <th style="padding:0.5rem 0.75rem"></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderScanSection(
+  app: ReturnType<typeof listApps>[number],
+  admin: boolean
 ): string {
   const thresholdOptions = THRESHOLDS.map((t) => {
     const selected = app.scan_threshold === t ? " selected" : "";
@@ -589,6 +716,28 @@ function renderScanSection(
     return `<option value="${t}"${selected}>${escapeHtml(labels[t])}</option>`;
   }).join("");
 
+  const serverFloor = (getSetting("min_scan_threshold") ?? "none") as Threshold;
+  const exempt = !!app.scan_floor_exempt;
+  const effective = effectiveThreshold(app.scan_threshold as Threshold, serverFloor, exempt);
+  const floorApplies = effective !== app.scan_threshold && serverFloor !== "none";
+
+  const floorNote = floorApplies
+    ? `<p style="color:#fbbf24;font-size:0.8rem;margin:0.5rem 0">
+         &#9888; Server-wide floor <strong>${escapeHtml(serverFloor)}</strong> raises
+         this app's effective threshold above its per-app setting.
+       </p>`
+    : "";
+
+  const exemptToggle = admin
+    ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/scan-floor-exempt" style="margin:0.5rem 0 1rem">
+        <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem">
+          <input type="checkbox" name="exempt" value="1"${exempt ? " checked" : ""} onchange="this.form.submit()" />
+          Exempt from server-wide scan floor
+          ${exempt ? '<span class="meta">(using per-app threshold only)</span>' : ""}
+        </label>
+      </form>`
+    : "";
+
   const latest = getLatestDeployWithScan(app.id);
   let reportHtml = '<p class="meta">No scan has run yet. Deploy the app to generate a report.</p>';
   if (latest?.scan_report) {
@@ -598,11 +747,29 @@ function renderScanSection(
       if (findings.length === 0) {
         reportHtml = `<p style="color:#4ade80">&#10003; No findings in deploy #${latest.id} (image <code>${escapeHtml(latest.image_tag ?? "?")}</code>).</p>`;
       } else {
-        const rows = findings
-          .slice(0, 50)
-          .map(
-            (f: Finding) => `
-          <tr>
+        const sevRank: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
+        const threshRank: Record<string, number> = { none: -1, low: 1, medium: 2, high: 3, critical: 4 };
+        const effectiveRank = threshRank[effective] ?? -1;
+
+        const relevant = findings.filter(
+          (f) => (sevRank[f.severity] ?? 0) >= effectiveRank && effectiveRank > 0
+        );
+        const below = findings.filter(
+          (f) => effectiveRank <= 0 || (sevRank[f.severity] ?? 0) < effectiveRank
+        );
+
+        const showAll = effective === "none";
+        const visible = showAll
+          ? [...findings].sort((a, b) => (sevRank[b.severity] ?? 0) - (sevRank[a.severity] ?? 0))
+          : [...relevant].sort((a, b) => (sevRank[b.severity] ?? 0) - (sevRank[a.severity] ?? 0));
+
+        const hasImageFindings = visible.some((f) => f.source === "image");
+
+        const makeRow = (f: Finding) => {
+          const isLow = f.severity === "LOW" || f.severity === "UNKNOWN";
+          const opacity = isLow ? "opacity:0.5" : "";
+          return `
+          <tr style="${opacity}">
             <td style="padding:0.4rem 0.6rem"><span class="badge badge-${
               f.severity === "CRITICAL" || f.severity === "HIGH"
                 ? "failed"
@@ -617,15 +784,40 @@ function renderScanSection(
               f.fixedVersion ? `<code>${escapeHtml(f.fixedVersion)}</code>` : '<span class="meta">—</span>'
             }</td>
             <td style="padding:0.4rem 0.6rem;font-size:0.75rem">${escapeHtml(f.title ?? "")}</td>
-          </tr>`
-          )
-          .join("");
+          </tr>`;
+        };
+
+        const rows = visible.slice(0, 50).map(makeRow).join("");
         const more =
-          findings.length > 50
-            ? `<p class="meta" style="margin-top:0.5rem">Showing first 50 of ${findings.length} findings.</p>`
+          visible.length > 50
+            ? `<p class="meta" style="margin-top:0.5rem">Showing first 50 of ${visible.length} findings at this threshold.</p>`
             : "";
+
+        // Summarize below-threshold findings
+        const belowCounts: Record<string, number> = {};
+        for (const f of below) {
+          belowCounts[f.severity] = (belowCounts[f.severity] ?? 0) + 1;
+        }
+        const belowParts = ["HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+          .filter((s) => (belowCounts[s] ?? 0) > 0)
+          .map((s) => `${belowCounts[s]} ${s.toLowerCase()}`);
+        const belowSummary =
+          belowParts.length > 0 && !showAll
+            ? `<p class="meta" style="margin-top:0.5rem;opacity:0.7">Below threshold (not shown): ${belowParts.join(", ")}.</p>`
+            : "";
+
+        const imageHint = hasImageFindings
+          ? `<p class="hint" style="font-size:0.75rem;margin-top:0.5rem;opacity:0.7">
+              Findings with source <strong>image</strong> come from OS packages
+              in the base Docker image, not from your code. Update the base image
+              tag in your Dockerfile or add <code>RUN apk upgrade</code> /
+              <code>RUN apt-get update &amp;&amp; apt-get upgrade -y</code> to fix them.
+            </p>`
+          : "";
+
         reportHtml = `
           <p class="meta" style="margin-bottom:0.5rem">Deploy #${latest.id} — status <strong>${escapeHtml(report.status)}</strong> — ${report.counts.critical} critical, ${report.counts.high} high, ${report.counts.medium} medium, ${report.counts.low} low.</p>
+          ${visible.length > 0 ? `
           <div style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:0.8rem">
               <thead>
@@ -641,7 +833,9 @@ function renderScanSection(
               <tbody>${rows}</tbody>
             </table>
           </div>
-          ${more}
+          ${more}` : `<p style="color:#4ade80;margin-bottom:0.5rem">&#10003; No findings at or above the effective threshold.</p>`}
+          ${belowSummary}
+          ${imageHint}
         `;
       }
     } catch {
@@ -658,12 +852,14 @@ function renderScanSection(
         which a deploy should be blocked. The scan still runs when set to
         None — you'll just see findings instead of having the deploy halted.
       </p>
-      <form method="POST" action="/apps/${encodeURIComponent(app.id)}/scan-threshold" style="margin-bottom:1rem">
+      <form method="POST" action="/apps/${encodeURIComponent(app.id)}/scan-threshold" style="margin-bottom:0.5rem">
         <div class="flex">
           <select name="threshold" style="flex:1">${thresholdOptions}</select>
           <button type="submit">Save</button>
         </div>
       </form>
+      ${floorNote}
+      ${exemptToggle}
       ${reportHtml}
     </div>
   `;
@@ -684,6 +880,10 @@ function renderScanBadge(app: ReturnType<typeof listApps>[number]): string {
   const high = c.high ?? 0;
   let label: string;
   let color: string;
+  const med = c.medium ?? 0;
+  const low = (c.low ?? 0) + (c.unknown ?? 0);
+  const other = med + low;
+  const otherSuffix = other > 0 ? ` <span style="opacity:0.6">(+${other} other)</span>` : "";
   if (status === "passed") {
     label = "&#10003; secure";
     color = "#14532d;color:#4ade80";
@@ -691,8 +891,13 @@ function renderScanBadge(app: ReturnType<typeof listApps>[number]): string {
     label = `&#10007; blocked: ${crit} crit, ${high} high`;
     color = "#7f1d1d;color:#fca5a5";
   } else if (status === "warned") {
-    label = `&#9888; ${crit + high} issues`;
-    color = "#713f12;color:#fbbf24";
+    const serious = crit + high;
+    label = serious > 0
+      ? `&#9888; ${serious} issue${serious !== 1 ? "s" : ""}${otherSuffix}`
+      : `&#9888; ${other} low`;
+    color = serious > 0
+      ? "#713f12;color:#fbbf24"
+      : "#262626;color:#a3a3a3";
   } else {
     label = "scan skipped";
     color = "#262626;color:#737373";
@@ -734,8 +939,32 @@ function renderAppCard(
     ? `<span class="meta" style="font-size:0.75rem">${escapeHtml(app.created_by)}</span>`
     : "";
 
+  // Brand-new (unconfigured) apps get a full-width call-to-action that
+  // spells out the exact next step. Configured apps only need compact
+  // copy buttons with the instruction behind a tooltip.
+  const deployBlock = configured
+    ? `<div style="margin-top:auto;padding-top:0.75rem;display:flex;gap:0.5rem;align-items:center">
+        <button type="button" class="ghost" style="padding:0.2rem 0.5rem;font-size:0.75rem" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)" title="${escapeHtml(claudeInstruction)}">Copy deploy instruction</button>
+        <button type="button" class="ghost" style="padding:0.2rem 0.5rem;font-size:0.75rem" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)" title="Copy the raw API key (for manual curl / CI use)">Copy API key</button>
+        ${creator}
+      </div>`
+    : `<div style="margin-top:auto;padding-top:0.75rem;border-top:1px solid #262626">
+        <p style="font-size:0.8rem;margin:0 0 0.5rem;color:#a3a3a3">
+          <strong style="color:#e5e5e5">Next step:</strong> open your project in
+          <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">Claude Code</a>
+          and paste this instruction. Claude will fetch the API docs, package your
+          project, upload it, and deploy — no config required.
+        </p>
+        <pre style="background:#0a0a0a;border:1px solid #262626;border-radius:4px;padding:0.5rem 0.75rem;margin:0 0 0.5rem;font-size:0.7rem;white-space:pre-wrap;word-break:break-all;color:#d4d4d4;user-select:all">${escapeHtml(claudeInstruction)}</pre>
+        <div class="flex" style="gap:0.5rem;align-items:center">
+          <button type="button" style="padding:0.3rem 0.75rem;font-size:0.75rem" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)" title="Copies the full line above to your clipboard">Copy deploy instruction</button>
+          <button type="button" class="ghost" style="padding:0.3rem 0.6rem;font-size:0.75rem" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)" title="Copy just the API key (rwy_...) for manual use">Copy API key only</button>
+          ${creator}
+        </div>
+      </div>`;
+
   return `
-    <div class="card" style="display:flex;flex-direction:column">
+    <div class="card" style="display:flex;flex-direction:column${configured ? "" : ";border-color:#1e3a8a"}">
       <div class="flex between" style="margin-bottom:0.25rem">
         <div class="app-header">
           <h2 style="font-size:1rem">${title}</h2>
@@ -751,11 +980,7 @@ function renderAppCard(
       </div>
       ${domainLink}
       ${statsPlaceholder}
-      <div style="margin-top:auto;padding-top:0.75rem;display:flex;gap:0.5rem;align-items:center">
-        <button type="button" class="ghost" style="padding:0.2rem 0.5rem;font-size:0.75rem" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy deploy instruction</button>
-        <button type="button" class="ghost" style="padding:0.2rem 0.5rem;font-size:0.75rem" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)">Copy API key</button>
-        ${creator}
-      </div>
+      ${deployBlock}
     </div>
   `;
 }
@@ -803,6 +1028,7 @@ webRoutes.get("/apps/:id", (c) => {
   const env = getEnvVars(app.id);
   const volumes = getVolumes(app.id);
   const saved = c.req.query("saved");
+  const rollbackError = c.req.query("rollback_error");
 
   const envRows = Object.entries(env)
     .map(
@@ -845,6 +1071,7 @@ webRoutes.get("/apps/:id", (c) => {
       <p style="margin-bottom:1.5rem"><a href="/" style="color:#60a5fa;text-decoration:none">&larr; Back to apps</a></p>
       <h1>${escapeHtml(app.name ?? app.id)}</h1>
       ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Saved.</div>' : ""}
+      ${rollbackError ? `<div class="card" style="border-color:#7f1d1d;color:#fca5a5"><strong>Rollback failed:</strong> ${escapeHtml(rollbackError)}</div>` : ""}
 
       <div class="card">
         <h2>Custom domain</h2>
@@ -874,7 +1101,33 @@ webRoutes.get("/apps/:id", (c) => {
         </form>
       </div>
 
-      ${renderScanSection(app)}
+      <div class="card">
+        <h2>Basic auth</h2>
+        <p class="hint" style="margin:0.5rem 0 1rem">
+          Put HTTP basic auth in front of this app at the gateway. Useful for
+          quickly password-protecting an internal tool. Only one username is
+          supported per app; leave username &amp; password empty and uncheck
+          to disable.
+        </p>
+        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/basic-auth">
+          <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
+            <input type="checkbox" name="enabled" value="1"${app.basic_auth_enabled ? " checked" : ""} />
+            Require basic auth
+          </label>
+          <div class="flex" style="margin-bottom:0.5rem">
+            <input type="text" name="username" value="${escapeHtml(app.basic_auth_username ?? "")}" placeholder="username" autocomplete="off" style="flex:1" />
+            <input type="password" name="password" placeholder="${app.basic_auth_enabled ? "leave blank to keep current" : "password"}" autocomplete="new-password" style="flex:1" />
+            <button type="submit">Save</button>
+          </div>
+          <p class="meta" style="font-size:0.8rem">
+            ${app.basic_auth_enabled ? `Currently enabled for user <code>${escapeHtml(app.basic_auth_username ?? "")}</code>.` : "Currently disabled."}
+          </p>
+        </form>
+      </div>
+
+      ${renderDeployHistory(app)}
+
+      ${renderScanSection(app, isAdmin(user))}
 
       <div class="card">
         <h2>Environment variables</h2>
@@ -936,7 +1189,7 @@ webRoutes.get("/apps/:id", (c) => {
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -947,14 +1200,86 @@ webRoutes.post("/apps/:id/domain", async (c) => {
   const body = await c.req.parseBody();
   const raw = (body["custom_domain"] as string | undefined)?.trim().toLowerCase() || null;
   const customDomain = raw && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(raw) ? raw : null;
-  updateApp(app.id, { custom_domain: customDomain });
-  if (app.domain) {
+  const updated = updateApp(app.id, { custom_domain: customDomain });
+  if (updated?.domain) {
     await writeAppRoute({
-      appId: app.id,
-      containerName: appContainerName(app.id),
-      domain: app.domain,
-      customDomain,
-      port: app.port,
+      appId: updated.id,
+      containerName: appContainerName(updated.id),
+      domain: updated.domain,
+      customDomain: updated.custom_domain,
+      port: updated.port,
+      basicAuth: appBasicAuth(updated),
+    });
+  }
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1`);
+});
+
+webRoutes.post("/apps/:id/rollback/:deployId", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const deployId = parseInt(c.req.param("deployId"), 10);
+  if (Number.isNaN(deployId)) {
+    return c.redirect(`/apps/${encodeURIComponent(app.id)}?error=bad_deploy_id#deploys`);
+  }
+  try {
+    await rollbackApp(app, deployId);
+    return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#deploys`);
+  } catch (err: any) {
+    const msg = encodeURIComponent(err?.message ?? "rollback failed");
+    return c.redirect(
+      `/apps/${encodeURIComponent(app.id)}?rollback_error=${msg}#deploys`
+    );
+  }
+});
+
+webRoutes.post("/apps/:id/basic-auth", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const enabled = body["enabled"] === "1";
+  const username = ((body["username"] as string | undefined) ?? "").trim();
+  const password = (body["password"] as string | undefined) ?? "";
+
+  let patch: Parameters<typeof updateApp>[1];
+  if (!enabled) {
+    patch = {
+      basic_auth_enabled: 0,
+      basic_auth_username: null,
+      basic_auth_htpasswd: null,
+    };
+  } else {
+    if (!username || !/^[A-Za-z0-9._\-@]+$/.test(username)) {
+      return c.redirect(
+        `/apps/${encodeURIComponent(app.id)}?error=basic_auth_username#basic-auth`
+      );
+    }
+    // Empty password while already enabled keeps the existing hash
+    // (lets users rename or leave untouched without re-entering it).
+    const keepExisting =
+      password.length === 0 && app.basic_auth_enabled && app.basic_auth_htpasswd;
+    if (!keepExisting && password.length < 6) {
+      return c.redirect(
+        `/apps/${encodeURIComponent(app.id)}?error=basic_auth_password#basic-auth`
+      );
+    }
+    patch = {
+      basic_auth_enabled: 1,
+      basic_auth_username: username,
+      basic_auth_htpasswd: keepExisting
+        ? app.basic_auth_htpasswd
+        : buildHtpasswd(username, password),
+    };
+  }
+
+  const updated = updateApp(app.id, patch);
+  if (updated?.domain) {
+    await writeAppRoute({
+      appId: updated.id,
+      containerName: appContainerName(updated.id),
+      domain: updated.domain,
+      customDomain: updated.custom_domain,
+      port: updated.port,
+      basicAuth: appBasicAuth(updated),
     });
   }
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1`);
@@ -968,6 +1293,17 @@ webRoutes.post("/apps/:id/scan-threshold", async (c) => {
   if (isValidThreshold(threshold)) {
     updateApp(app.id, { scan_threshold: threshold });
   }
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+webRoutes.post("/apps/:id/scan-floor-exempt", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const exempt = body["exempt"] === "1" ? 1 : 0;
+  updateApp(app.id, { scan_floor_exempt: exempt });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 
@@ -1036,16 +1372,32 @@ webRoutes.get("/users", (c) => {
   const current = c.get("user");
   const users = listUsers();
   const error = c.req.query("error");
+  const adminCount = countAdmins();
 
   const rows = users
     .map((u) => {
       const twofa = isTotpEnabled(u)
         ? '<span class="badge badge-running">2FA on</span>'
         : '<span class="badge badge-stopped">2FA off</span>';
+      const roleBadge =
+        u.role === "admin"
+          ? '<span class="badge badge-running">admin</span>'
+          : '<span class="badge badge-stopped">member</span>';
+      // Never let the current admin demote themselves or the last
+      // remaining admin — doing so would lock user management out.
+      const isLastAdmin = u.role === "admin" && adminCount <= 1;
+      const canToggleRole = u.id !== current.id && !isLastAdmin;
+      const roleToggle = canToggleRole
+        ? `<form method="POST" action="/users/${encodeURIComponent(u.id)}/role" style="margin:0">
+             <input type="hidden" name="role" value="${u.role === "admin" ? "member" : "admin"}" />
+             <button type="submit" class="ghost">${u.role === "admin" ? "Demote to member" : "Promote to admin"}</button>
+           </form>`
+        : "";
       const actions =
         u.id === current.id
           ? '<span class="meta">you</span>'
-          : `<div class="flex" style="gap:0.5rem;margin:0">
+          : `<div class="flex" style="gap:0.5rem;margin:0;flex-wrap:wrap">
+               ${roleToggle}
                ${
                  isTotpEnabled(u)
                    ? `<form method="POST" action="/users/${encodeURIComponent(u.id)}/2fa/reset" style="margin:0" class="flex">
@@ -1062,8 +1414,9 @@ webRoutes.get("/users", (c) => {
     <div class="card">
       <div class="flex between">
         <div>
-          <div class="flex" style="gap:0.75rem">
+          <div class="flex" style="gap:0.75rem;flex-wrap:wrap">
             <h2>${escapeHtml(u.username)}</h2>
+            ${roleBadge}
             ${twofa}
           </div>
           <p class="meta" style="margin-top:0.25rem">Created ${escapeHtml(u.created_at)}</p>
@@ -1080,7 +1433,13 @@ webRoutes.get("/users", (c) => {
       "Users",
       `
       <h1>Users</h1>
-      ${error ? '<div class="error">Invalid 2FA code. Please try again.</div>' : ""}
+      ${
+        error === "last_admin"
+          ? '<div class="error">Refused: that would leave zero admins. Promote another user first.</div>'
+          : error
+            ? '<div class="error">Invalid 2FA code. Please try again.</div>'
+            : ""
+      }
       <form method="POST" action="/users">
         <div class="flex">
           <input type="text" name="username" placeholder="Username" required />
@@ -1090,7 +1449,7 @@ webRoutes.get("/users", (c) => {
       </form>
       ${rows}
     `,
-      { username: current.username, csrf: csrfField(c) }
+      { username: current.username, csrf: csrfField(c), isAdmin: isAdmin(current) }
     )
   );
 });
@@ -1123,10 +1482,41 @@ webRoutes.post("/users/:id/delete", (c) => {
   if (id === current.id) return c.redirect("/users");
   const target = getUser(id);
   if (!target) return c.redirect("/users");
+  // Refuse to delete the last remaining admin — otherwise nobody
+  // can manage users or server settings afterwards.
+  if (target.role === "admin" && countAdmins() <= 1) {
+    return c.redirect("/users?error=last_admin");
+  }
   deleteUser(id);
   logAudit(current.id, current.username, "user_deleted", {
     targetUserId: target.id,
     targetUsername: target.username,
+  });
+  return c.redirect("/users");
+});
+
+webRoutes.post("/users/:id/role", async (c) => {
+  const current = c.get("user");
+  const id = c.req.param("id");
+  if (id === current.id) return c.redirect("/users");
+  const target = getUser(id);
+  if (!target) return c.redirect("/users");
+
+  const body = await c.req.parseBody();
+  const nextRole = body["role"] as string | undefined;
+  if (nextRole !== "admin" && nextRole !== "member") {
+    return c.redirect("/users");
+  }
+  // Never demote the last admin.
+  if (target.role === "admin" && nextRole === "member" && countAdmins() <= 1) {
+    return c.redirect("/users?error=last_admin");
+  }
+
+  setUserRole(target.id, nextRole as Role);
+  logAudit(current.id, current.username, "role_changed", {
+    targetUserId: target.id,
+    targetUsername: target.username,
+    detail: `${target.role} -> ${nextRole}`,
   });
   return c.redirect("/users");
 });
@@ -1168,6 +1558,7 @@ webRoutes.get("/settings", (c) => {
   const user = c.get("user");
   const baseDomain = getSetting("base_domain") ?? "";
   const webhookUrl = getSetting("webhook_url") ?? "";
+  const minScanThreshold = getSetting("min_scan_threshold") ?? "none";
   const saved = c.req.query("saved");
   const dnsWarning = c.req.query("dns_warning");
 
@@ -1195,6 +1586,34 @@ webRoutes.get("/settings", (c) => {
       </div>
 
       <div class="card">
+        <h2>Security scan floor</h2>
+        <p class="hint" style="margin:0.5rem 0 1rem">
+          Server-wide minimum severity at which deploys are blocked. Individual
+          apps can set a stricter threshold, but cannot go below this floor.
+          Admins can exempt specific apps from the floor on the app detail page.
+          Set to None to leave blocking entirely up to per-app settings.
+        </p>
+        <form method="POST" action="/settings/scan-floor">
+          <div class="flex">
+            <select name="threshold" style="flex:1">
+              ${THRESHOLDS.map((t) => {
+                const sel = t === minScanThreshold ? " selected" : "";
+                const labels: Record<string, string> = {
+                  none: "None — no server-wide floor",
+                  low: "Low — block on any finding",
+                  medium: "Medium — block on medium+",
+                  high: "High — block on high/critical",
+                  critical: "Critical — block only on critical",
+                };
+                return `<option value="${t}"${sel}>${escapeHtml(labels[t] ?? t)}</option>`;
+              }).join("")}
+            </select>
+            <button type="submit">Save</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
         <h2>Deploy notifications</h2>
         <p class="hint" style="margin:0.5rem 0 1rem">
           Webhook URL to receive a POST request when a deploy fails. Works with
@@ -1209,7 +1628,7 @@ webRoutes.get("/settings", (c) => {
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -1232,6 +1651,15 @@ webRoutes.post("/settings", async (c) => {
   const dns = await checkWildcardDns(normalized);
   if (!dns.ok) {
     return c.redirect(`/settings?saved=1&dns_warning=${encodeURIComponent(dns.message)}`);
+  }
+  return c.redirect("/settings?saved=1");
+});
+
+webRoutes.post("/settings/scan-floor", async (c) => {
+  const body = await c.req.parseBody();
+  const threshold = body["threshold"] as string | undefined;
+  if (isValidThreshold(threshold)) {
+    setSetting("min_scan_threshold", threshold);
   }
   return c.redirect("/settings?saved=1");
 });
@@ -1288,7 +1716,7 @@ webRoutes.get("/audit", (c) => {
         </table>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -1386,7 +1814,7 @@ webRoutes.get("/health", async (c) => {
       <p class="hint">Status of core Runway components.</p>
       ${rows}
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -1480,7 +1908,7 @@ webRoutes.get("/account", (c) => {
       ${passwordCard}
       ${twofaCard}
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -1579,7 +2007,7 @@ webRoutes.get("/account/2fa/verify", async (c) => {
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -1620,7 +2048,7 @@ webRoutes.post("/account/2fa/verify", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -1679,7 +2107,7 @@ webRoutes.post("/account/2fa/regenerate", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c) }
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });

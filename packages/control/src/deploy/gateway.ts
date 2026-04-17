@@ -1,6 +1,8 @@
 import { mkdir, writeFile, unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import yaml from "js-yaml";
+import type { App } from "../db/apps.js";
 
 const GATEWAY_CONFIG_DIR =
   process.env.GATEWAY_CONFIG_DIR || "/gateway-config";
@@ -43,6 +45,29 @@ export interface AppRouteConfig {
   domain: string;
   customDomain?: string | null;
   port: number;
+  basicAuth?: { htpasswd: string } | null;
+}
+
+/**
+ * Build a Traefik-compatible htpasswd line for a single user. Uses
+ * `{SHA}` format: supported by Traefik natively and derivable with
+ * only node:crypto. The gateway-config volume is only readable by
+ * root on the host, so an offline attack on the hash requires host
+ * compromise — in which case the attacker already has the app DB.
+ */
+export function buildHtpasswd(username: string, password: string): string {
+  const digest = createHash("sha1").update(password).digest("base64");
+  return `${username}:{SHA}${digest}`;
+}
+
+/**
+ * Read the basicAuth block for an app from the DB record, or null if
+ * disabled or not configured. Keeps gateway call sites from having to
+ * know about column names.
+ */
+export function appBasicAuth(app: App): { htpasswd: string } | null {
+  if (!app.basic_auth_enabled || !app.basic_auth_htpasswd) return null;
+  return { htpasswd: app.basic_auth_htpasswd };
 }
 
 /**
@@ -58,22 +83,28 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
   if (cfg.customDomain) domains.push(cfg.customDomain);
   const hostRule = domains.map((d) => `Host(\`${d}\`)`).join(" || ");
 
-  const doc = {
+  const middlewareKey = `${routerKey}-basicauth`;
+  const useBasicAuth = !!cfg.basicAuth?.htpasswd;
+
+  const router: Record<string, unknown> = {
+    rule: hostRule,
+    entryPoints: ["websecure"],
+    service: routerKey,
+    tls: {
+      certResolver: "letsencrypt",
+      ...(cfg.customDomain
+        ? {
+            domains: domains.map((d) => ({ main: d })),
+          }
+        : {}),
+    },
+  };
+  if (useBasicAuth) router.middlewares = [middlewareKey];
+
+  const doc: Record<string, unknown> = {
     http: {
       routers: {
-        [routerKey]: {
-          rule: hostRule,
-          entryPoints: ["websecure"],
-          service: routerKey,
-          tls: {
-            certResolver: "letsencrypt",
-            ...(cfg.customDomain
-              ? {
-                  domains: domains.map((d) => ({ main: d })),
-                }
-              : {}),
-          },
-        },
+        [routerKey]: router,
       },
       services: {
         [routerKey]: {
@@ -82,6 +113,17 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
           },
         },
       },
+      ...(useBasicAuth
+        ? {
+            middlewares: {
+              [middlewareKey]: {
+                basicAuth: {
+                  users: [cfg.basicAuth!.htpasswd],
+                },
+              },
+            },
+          }
+        : {}),
     },
   };
 

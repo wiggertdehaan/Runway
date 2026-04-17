@@ -81,6 +81,22 @@ export function getPreviousSuccessfulDeploy(
     .get(appId) as unknown as Deploy | undefined;
 }
 
+/**
+ * Unique successful image tags for an app, most recent first. Used
+ * for retention — anything after the keep-window is a candidate for
+ * image pruning.
+ */
+export function getSuccessfulImageTags(appId: string): string[] {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT image_tag FROM deploys
+       WHERE app_id = ? AND status = 'success' AND image_tag IS NOT NULL
+       ORDER BY id DESC`
+    )
+    .all(appId) as Array<{ image_tag: string }>;
+  return rows.map((r) => r.image_tag);
+}
+
 export function getLatestDeploys(appId: string, limit = 5): Deploy[] {
   return db
     .prepare(
