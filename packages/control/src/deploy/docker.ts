@@ -1,7 +1,13 @@
 import Docker from "dockerode";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile, unlink } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Readable } from "node:stream";
 
 const RUNWAY_NETWORK = process.env.RUNWAY_NETWORK || "runway-internal";
+const BUILDKIT_CONTAINER = process.env.BUILDKIT_CONTAINER || "runway-buildkit";
 
 export const docker = new Docker({ socketPath: "/var/run/docker.sock" });
 
@@ -16,58 +22,121 @@ export interface BuildResult {
 }
 
 /**
- * Build a Docker image from a tar stream. Returns when the build
- * finishes (success or failure). Throws on build failure with the
- * combined build log attached.
+ * Build a Docker image via the isolated BuildKit service. The build
+ * context (tar) is extracted to a temp directory, buildctl sends it
+ * to BuildKit over TCP, and the resulting image is exported as a
+ * Docker tarball which we load into the local Docker daemon.
+ *
+ * RUN steps in user Dockerfiles execute inside BuildKit's containerd
+ * sandbox — they have no access to the Docker socket or the host.
+ */
+/**
+ * Build a Docker image via the isolated BuildKit container. The build
+ * context (tar) is written to a shared volume (/exchange), then
+ * buildctl is invoked inside the BuildKit container via docker exec.
+ * The resulting image tarball is written back to /exchange and loaded
+ * into the local Docker daemon.
+ *
+ * RUN steps in user Dockerfiles execute inside BuildKit's containerd
+ * sandbox — they have no access to the Docker socket or the host.
  */
 export async function buildImageFromTar(
   tarStream: Readable | Buffer,
   opts: BuildOptions
 ): Promise<BuildResult> {
-  const stream = (await docker.buildImage(tarStream as any, {
-    t: opts.imageTag,
-    dockerfile: opts.dockerfile ?? "Dockerfile",
-    rm: true,
-    forcerm: true,
-  })) as NodeJS.ReadableStream;
+  const contextBuf = Buffer.isBuffer(tarStream)
+    ? tarStream
+    : await streamToBuffer(tarStream);
+
+  const buildId = `build-${Date.now()}`;
+  const exchangeCtx = `/exchange/${buildId}-ctx`;
+  const exchangeOut = `/exchange/${buildId}-out.tar`;
+  const localOut = `/exchange/${buildId}-out.tar`;
+
+  try {
+    // Write tar to shared volume and extract
+    const localCtxTar = `/exchange/${buildId}-ctx.tar`;
+    await writeFile(localCtxTar, contextBuf);
+    execFileSync("sh", ["-c", `mkdir -p ${exchangeCtx} && tar xf ${localCtxTar} -C ${exchangeCtx}`]);
+    await unlink(localCtxTar);
+
+    const log = await runBuildctlViaExec(opts.imageTag, exchangeCtx, exchangeOut, opts.dockerfile);
+
+    await loadImage(localOut);
+
+    return { imageTag: opts.imageTag, log };
+  } finally {
+    execFileSync("sh", ["-c", `rm -rf ${exchangeCtx} ${exchangeOut}`], { stdio: "ignore" });
+  }
+}
+
+async function runBuildctlViaExec(
+  imageTag: string,
+  contextDir: string,
+  outputPath: string,
+  dockerfile?: string
+): Promise<string> {
+  const cmd = [
+    "buildctl", "build",
+    "--frontend", "dockerfile.v0",
+    "--local", `context=${contextDir}`,
+    "--local", `dockerfile=${contextDir}`,
+    ...(dockerfile ? ["--opt", `filename=${dockerfile}`] : []),
+    "--output", `type=docker,name=${imageTag},dest=${outputPath}`,
+  ];
+
+  const container = docker.getContainer(BUILDKIT_CONTAINER);
+  const exec = await container.exec({
+    Cmd: cmd,
+    AttachStdout: true,
+    AttachStderr: true,
+  });
 
   return new Promise((resolve, reject) => {
-    const logLines: string[] = [];
+    exec.start({ hijack: true }, (err: any, stream: any) => {
+      if (err) return reject(new Error(`Build exec failed: ${err.message}`));
 
-    docker.modem.followProgress(
-      stream,
-      (err, output) => {
-        if (err) {
+      const chunks: Buffer[] = [];
+      stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+      stream.on("end", async () => {
+        const raw = Buffer.concat(chunks);
+        const log = stripDockerLogHeaders(raw);
+
+        const info = await exec.inspect();
+        if (info.ExitCode !== 0) {
           return reject(
-            Object.assign(new Error(`Build failed: ${err.message}`), {
-              log: logLines.join("\n"),
-            })
+            Object.assign(new Error(`Build failed (exit ${info.ExitCode})`), { log })
           );
         }
+        resolve(log);
+      });
+      stream.on("error", (e: Error) => reject(e));
+    });
+  });
+}
 
-        // Look for explicit error events in the output
-        const lastError = output?.find((line: any) => line?.errorDetail);
-        if (lastError) {
-          return reject(
-            Object.assign(
-              new Error(
-                `Build failed: ${lastError.errorDetail?.message ?? lastError.error}`
-              ),
-              { log: logLines.join("\n") }
-            )
-          );
-        }
-
-        resolve({ imageTag: opts.imageTag, log: logLines.join("\n") });
-      },
-      (event: any) => {
-        if (event?.stream) {
-          logLines.push(String(event.stream).replace(/\n$/, ""));
-        } else if (event?.error) {
-          logLines.push(`ERROR: ${event.error}`);
-        }
+function loadImage(tarPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const stream = createReadStream(tarPath);
+    docker.loadImage(stream, {}, (err: any, output: any) => {
+      if (err) return reject(new Error(`Failed to load image: ${err.message}`));
+      if (output) {
+        output.on("data", () => {});
+        output.on("end", () => resolve());
+        output.on("error", (e: Error) => reject(e));
+      } else {
+        resolve();
       }
-    );
+    });
+  });
+}
+
+function streamToBuffer(stream: Readable): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    stream.on("error", reject);
   });
 }
 
@@ -76,8 +145,10 @@ export interface RunOptions {
   imageTag: string;
   port: number;
   env?: Record<string, string>;
+  volumes?: string[];
   cpuLimit?: string;
   memoryLimit?: string;
+  healthCheckPath?: string | null;
 }
 
 export interface RunResult {
@@ -98,14 +169,33 @@ export async function runContainer(opts: RunOptions): Promise<RunResult> {
   const memory = parseMemoryLimit(opts.memoryLimit);
   const nanoCpus = parseCpuLimit(opts.cpuLimit);
 
+  const healthcheck = opts.healthCheckPath
+    ? {
+        Healthcheck: {
+          Test: [
+            "CMD",
+            "wget",
+            "-qO-",
+            `http://localhost:${opts.port}${opts.healthCheckPath}`,
+          ],
+          Interval: 30_000_000_000,
+          Timeout: 5_000_000_000,
+          Retries: 3,
+          StartPeriod: 10_000_000_000,
+        },
+      }
+    : {};
+
   const container = await docker.createContainer({
     name: opts.containerName,
     Image: opts.imageTag,
     Env: envList,
     ExposedPorts: { [`${opts.port}/tcp`]: {} },
+    ...healthcheck,
     HostConfig: {
       RestartPolicy: { Name: "unless-stopped" },
       NetworkMode: RUNWAY_NETWORK,
+      ...(opts.volumes?.length ? { Binds: opts.volumes } : {}),
       ...(memory ? { Memory: memory } : {}),
       ...(nanoCpus ? { NanoCpus: nanoCpus } : {}),
     },
@@ -134,6 +224,7 @@ export interface ContainerStatus {
   exists: boolean;
   state?: string;
   status?: string;
+  health?: string;
   started_at?: string;
   finished_at?: string;
   exit_code?: number;
@@ -148,6 +239,7 @@ export async function getContainerStatus(
       exists: true,
       state: info.State.Status,
       status: info.State.Status,
+      health: (info.State as any).Health?.Status ?? undefined,
       started_at: info.State.StartedAt,
       finished_at: info.State.FinishedAt,
       exit_code: info.State.ExitCode,

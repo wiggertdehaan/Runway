@@ -146,6 +146,154 @@ export function registerTools(server: McpServer, client: RunwayClient) {
   );
 
   server.tool(
+    "runway_get_env",
+    "Fetch environment variables configured for the Runway app. These are injected into the container at runtime.",
+    {},
+    async () => {
+      const result = await client.getEnv();
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_set_env",
+    "Set environment variables for the Runway app. Variables are merged with existing ones — pass only the keys you want to add or update. Values are injected into the container on the next deploy. Do not store secrets in code; use this endpoint instead.",
+    {
+      env: z
+        .record(z.string())
+        .describe(
+          'Key-value pairs to set, e.g. {"DATABASE_URL": "postgres://...", "NODE_ENV": "production"}'
+        ),
+    },
+    async ({ env }) => {
+      const result = await client.setEnv(env);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Set ${Object.keys(env).length} env var(s).\n\n${JSON.stringify(result, null, 2)}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_delete_env",
+    "Delete a single environment variable from the Runway app.",
+    {
+      key: z.string().describe("The env var name to remove"),
+    },
+    async ({ key }) => {
+      const result = await client.deleteEnvVar(key);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_get_volumes",
+    "Fetch the persistent volume mounts configured for the Runway app. Volumes survive container rebuilds and redeploys.",
+    {},
+    async () => {
+      const result = await client.getVolumes();
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_set_volumes",
+    "Set persistent volume mount paths for the Runway app. Each path is an absolute path inside the container that will be backed by a named Docker volume. Data in these paths persists across redeploys. This replaces the full list of mounts — include all paths you want.",
+    {
+      mount_paths: z
+        .array(z.string())
+        .describe(
+          'Absolute container paths to persist, e.g. ["/app/data", "/app/uploads"]'
+        ),
+    },
+    async ({ mount_paths }) => {
+      const result = await client.setVolumes(mount_paths);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Configured ${mount_paths.length} volume mount(s).\n\n${JSON.stringify(result, null, 2)}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_set_domain",
+    "Set a custom domain for the Runway app. The domain must have a DNS record (CNAME or A) pointing to the Runway server. Traefik will automatically issue a Let's Encrypt TLS certificate for it. Set to null to remove the custom domain.",
+    {
+      custom_domain: z
+        .string()
+        .nullable()
+        .describe(
+          'The custom domain, e.g. "app.example.com". Pass null to remove.'
+        ),
+    },
+    async ({ custom_domain }) => {
+      const result = await client.setCustomDomain(custom_domain);
+      return {
+        content: [
+          {
+            type: "text",
+            text: custom_domain
+              ? `Custom domain set to ${custom_domain}. Make sure DNS points to the Runway server.\n\n${JSON.stringify(result, null, 2)}`
+              : `Custom domain removed.\n\n${JSON.stringify(result, null, 2)}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_set_healthcheck",
+    "Configure a health check path for the Runway app. The server will periodically GET this path inside the container. If it returns a non-2xx status, the container is marked unhealthy. Set to null to disable health checks.",
+    {
+      path: z
+        .string()
+        .nullable()
+        .describe(
+          'HTTP path to check, e.g. "/health" or "/api/ping". Pass null to disable.'
+        ),
+    },
+    async ({ path }) => {
+      const result = await client.setHealthCheck(path);
+      return {
+        content: [
+          {
+            type: "text",
+            text: path
+              ? `Health check configured: GET ${path}\n\n${JSON.stringify(result, null, 2)}`
+              : `Health check disabled.\n\n${JSON.stringify(result, null, 2)}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "runway_rollback",
+    "Roll back the Runway app to its previous successful deploy. Stops the current container and starts one with the previous image. Useful when a deploy introduced a bug. Does not affect env vars, volumes, or other config — only the container image.",
+    {},
+    async () => {
+      const result = await client.rollback();
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
     "runway_package",
     "Generate an optimized Dockerfile and .dockerignore tailored to the Runway app's configured runtime. Requires runway_configure to have been called first.",
     {},

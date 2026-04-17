@@ -34,14 +34,9 @@ ENV DB_PATH=/data/runway.db
 # is needed for module resolution at runtime.
 COPY --from=build /app /app
 
-# NOTE: control runs as root because it talks to the host Docker
-# socket mounted at /var/run/docker.sock to build and run app
-# containers. A non-root user inside the container would need to
-# match the host's docker group GID, which varies by host. Since
-# write access to the Docker socket is already equivalent to root
-# on the host, running the node process as root inside the
-# container doesn't meaningfully widen the blast radius. This
-# changes when we move builds into an isolated builder service.
+# NOTE: control still runs as root because it talks to the host
+# Docker socket for container lifecycle (run/stop/logs/stats).
+# Builds are now isolated in a separate BuildKit service.
 RUN mkdir -p /data
 EXPOSE 3000
 WORKDIR /app/packages/control

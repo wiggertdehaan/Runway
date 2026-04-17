@@ -1,183 +1,187 @@
-# Runway
+<p align="center">
+  <h1 align="center">Runway</h1>
+  <p align="center">
+    <strong>Deploy AI apps to your own server with one prompt.</strong>
+  </p>
+  <p align="center">
+    <a href="#install">Install</a> &middot;
+    <a href="#how-it-works">How it works</a> &middot;
+    <a href="#deploying-an-app">Deploy an app</a> &middot;
+    <a href="#features">Features</a> &middot;
+    <a href="#development">Development</a>
+  </p>
+</p>
 
-> Deploy AI applications safely on your own server.
+---
 
-Runway is an open-source platform that makes it easy to run AI applications
-on a self-hosted server (Hetzner, Hostinger, your own VPS). You install
-Runway with one command, generate an API key in the dashboard, and hand
-that key plus your Runway URL to Claude Code. Claude reads the API docs
-directly from your Runway server and deploys your project as a Docker
-container behind Traefik with a per-app Let's Encrypt certificate.
+Runway is an open-source platform that turns any Linux server into a
+deployment target for AI applications. Install it with one command,
+generate an API key, and tell Claude Code to deploy — it handles
+Dockerfiles, builds, TLS certificates, and routing automatically.
 
-> **Status:** early work in progress. The control plane, the deploy
-> pipeline (tarball upload → Docker build → run → Traefik routing), the
-> LLM-agent discovery endpoint (`/llms.txt`), and the MCP server for
-> Claude Code are all working end-to-end. Security scanning, an isolated
-> builder service, login rate limiting, and CSRF tokens are still on the
-> roadmap. Contributions welcome.
+No CI/CD pipelines to configure. No Kubernetes. Just your code and a
+server.
+
+![Runway Dashboard](docs/dashboard.png)
+
+## Why Runway?
+
+- **One-prompt deploys** — tell Claude Code *"deploy this to Runway"*
+  and it reads the API docs from your server, builds a Docker image,
+  and puts it online with HTTPS.
+- **Your server, your data** — runs on any VPS (Hetzner, DigitalOcean,
+  your own hardware). Nothing leaves your infrastructure.
+- **Zero config for simple apps** — Runway generates Dockerfiles for
+  Node.js, Python, Go, and static sites. Bring your own Dockerfile for
+  full control.
+- **Production features built in** — environment variables, persistent
+  volumes, custom domains, health checks, deploy rollback, 2FA, and
+  audit logging.
 
 ## How it works
 
 ```
-Developer's machine                       Your server
-┌──────────────────┐                     ┌─────────────────────────────┐
-│  Claude Code     │  GET /llms.txt ───► │  Runway stack (Docker)      │
-│                  │                     │  ├─ control (web UI + API)  │
-│                  │  API key + URL ───► │  └─ gateway (Traefik + TLS) │
-│                  │  tar upload   ───►  │                             │
-│                  │                     │  Your app containers        │
-└──────────────────┘                     │  └─ built by control        │
-                                          └─────────────────────────────┘
+Your machine                            Your server
+┌──────────────────┐                   ┌──────────────────────────────┐
+│                  │                   │  Runway                      │
+│  Claude Code     │── GET /llms.txt ─>│  ├─ Dashboard (web UI + API) │
+│                  │── tar upload ────>│  ├─ BuildKit (isolated builds)│
+│  "deploy this    │                   │  ├─ Traefik (TLS + routing)  │
+│   to Runway"     │<── https://app ──│  └─ Your app containers      │
+│                  │                   │                              │
+└──────────────────┘                   └──────────────────────────────┘
 ```
 
-1. Run the installer on your server. It installs Docker (if needed) and
-   starts the Runway stack behind Traefik with automatic HTTPS.
-2. Open the dashboard, create your admin account through the setup wizard,
-   and configure your base (wildcard) domain (e.g. `runway.example.com`).
-3. Click **Generate new API key** in the dashboard. The key is the only
-   thing you need to copy — the app's name, runtime, and subdomain are
-   set later, on first deploy.
-4. Tell Claude Code *"deploy this project to `https://runway.example.com`,
-   my key is `rwy_…`, the instructions are at
-   `https://runway.example.com/llms.txt`"*. Claude fetches the
-   instructions, asks you for a name and runtime if needed, and pushes
-   your project as a Docker container.
-
-## Requirements
-
-- Linux server (Ubuntu, Debian, CentOS, RHEL, Fedora, Rocky, Alma)
-- A domain name for the dashboard (e.g. `runway.example.com`) with a DNS
-  A record pointing at the server
-- A wildcard DNS record (`*.runway.example.com`) if you want apps to get
-  automatic subdomains
-- Ports 80 and 443 open to the public internet (for Let's Encrypt)
+1. **Install Runway** on your server with one command.
+2. **Create an app** in the dashboard — you get an API key.
+3. **Tell Claude Code** to deploy your project with that key.
+4. **Your app is live** at `https://your-app.your-domain.com` with a
+   Let's Encrypt certificate.
 
 ## Install
 
-On a fresh server:
+On a fresh Linux server (Ubuntu, Debian, CentOS, RHEL, Fedora, Rocky,
+Alma):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wiggertdehaan/Runway/main/install.sh \
   | sudo DASHBOARD_DOMAIN=runway.example.com ACME_EMAIL=you@example.com bash
 ```
 
-The installer will:
+**Requirements:**
+- A domain name with a DNS A record pointing to the server
+- A wildcard DNS record (`*.runway.example.com`) for automatic app subdomains
+- Ports 80 and 443 open
 
-- Install Docker and Docker Compose (if missing)
-- Configure the firewall (SSH, HTTP, HTTPS)
-- Clone Runway to `/opt/runway`
-- Write `/opt/runway/.env` with your dashboard domain and ACME email
-- Start the stack with `docker compose up -d --build`
-- Traefik requests a Let's Encrypt certificate on first access
+The installer sets up Docker, configures the firewall, and starts the
+Runway stack. Open `https://runway.example.com` to create your admin
+account.
 
-Once it finishes, open `https://runway.example.com` in your browser. You'll
-see the setup wizard where you create your first admin user and configure
-the base (wildcard) domain for your apps.
-
-## Deploying an app from Claude Code
-
-There are two ways to connect Claude Code to Runway. Most users want the
-first one.
+## Deploying an app
 
 ### Option A — zero install (recommended)
 
-Your Runway server exposes a Markdown document at `/llms.txt` that
-describes its full API: authentication, configure flow, Dockerfile
-conventions, tar upload, status, and logs, all with concrete `curl`
-examples. Claude Code can fetch that document with its built-in
-`WebFetch` tool and follow it using its `Bash` tool — no MCP server
-to install, nothing to register.
+Your Runway server publishes its full API documentation at `/llms.txt`.
+Claude Code fetches it and follows the instructions — no plugins or MCP
+servers needed.
 
-1. Generate an API key in the dashboard (**Generate new API key**).
-2. Open your project in a new Claude Code session. The project needs a
-   `Dockerfile` in the root. If you don't have one, ask Claude to
-   create one — `/llms.txt` contains minimal templates per runtime.
-3. Tell Claude:
+1. Create an app in the dashboard and copy the deploy instruction.
+2. Open your project in Claude Code and paste it.
+3. Done. Claude handles the Dockerfile, build, and deploy.
 
-   > Deploy this project to `https://runway.example.com`. My key is
-   > `rwy_...`. The instructions are at
-   > `https://runway.example.com/llms.txt` — fetch them and follow
-   > them.
+### Option B — MCP server
 
-Claude will fetch `/llms.txt`, walk through the steps, ask you for a
-name and runtime the first time, and report the live URL when the
-deploy succeeds.
-
-### Option B — MCP server (structured tool calls)
-
-For power users who deploy often and want deterministic tool calls
-with schemas instead of free-form `curl`, Runway ships an MCP server
-that wraps the same REST API.
-
-**Build the MCP server once:**
+For power users who want structured tool calls instead of `curl`:
 
 ```bash
 git clone https://github.com/wiggertdehaan/Runway.git
-cd Runway
-pnpm install
-pnpm mcp:build
-pnpm mcp:path    # prints the absolute path to the built entry point
-```
+cd Runway && pnpm install && pnpm mcp:build
 
-**Register it with Claude Code** from the project directory you want
-to deploy:
-
-```bash
 claude mcp add runway \
   -s project \
   -e RUNWAY_URL=https://runway.example.com \
   -e RUNWAY_APP_KEY=rwy_... \
-  -- node /absolute/path/to/Runway/packages/mcp/dist/index.js
+  -- node $(pnpm mcp:path)
 ```
 
-On Windows the path looks like
-`C:/Users/you/dev/Runway/packages/mcp/dist/index.js`. Use `pnpm mcp:path`
-to print it.
+Then just say *"deploy this to Runway"* in any Claude Code session.
 
-**Open a new Claude Code session** in that project and say *"deploy
-this to Runway"*. Claude calls `runway_get_config`, asks you for a
-name and runtime if the app isn't configured yet, calls
-`runway_configure`, then `runway_deploy` — which tars your working
-directory (honoring `.dockerignore` and `.gitignore`), uploads it, and
-the control plane builds and runs it behind Traefik with a per-app
-Let's Encrypt certificate.
+## Features
 
-The MCP server also exposes `runway_status`, `runway_logs`,
-`runway_package` (generate a Dockerfile), and `runway_preflight`.
+### Environment variables
+
+Store secrets and configuration on the server — never bake them into
+your Docker image. Set them via the dashboard, API, or MCP tools.
+Changes take effect on the next deploy.
+
+
+### Persistent volumes
+
+Mount paths inside your container that survive redeploys. Backed by
+named Docker volumes — perfect for SQLite databases, file uploads, or
+caches.
+
+### Custom domains
+
+Point your own domain at any app. Traefik issues a Let's Encrypt
+certificate automatically. Just add a DNS record and configure the
+domain in the app settings.
+
+### Health checks
+
+Configure an HTTP endpoint to probe. Docker checks it every 30 seconds
+and marks the container unhealthy after 3 failures — so you know when
+something is actually broken, not just running.
+
+### Deploy rollback
+
+Bad deploy? Roll back to the previous working version with one API
+call. Your env vars, volumes, and domain config stay untouched — only
+the container image changes.
+
+### Security
+
+- Passwords hashed with scrypt, constant-time comparison
+- CSRF protection (double-submit cookie with timing-safe comparison)
+- Optional TOTP two-factor authentication with backup codes
+- Login rate limiting (5 attempts / 15 minutes per IP), persisted in SQLite
+- API rate limiting (60 requests / minute per IP)
+- Per-app API keys, independent from dashboard sessions
+- Audit log for all admin actions
+- Content Security Policy headers
+- Isolated builds via BuildKit (user code never touches the Docker socket)
+- Traefik has zero Docker socket access
+
+## Dashboard
+
+The web dashboard lets you manage apps, users, and settings.
+
+![App settings](docs/settings.png)
+
+## Tech stack
+
+| Component | Technology |
+|-----------|-----------|
+| Language | TypeScript |
+| Runtime | Node.js 24 (`node:sqlite`) |
+| Web framework | [Hono](https://hono.dev/) + [htmx](https://htmx.org/) |
+| Containers | [dockerode](https://github.com/apocas/dockerode) + [BuildKit](https://github.com/moby/buildkit) |
+| Reverse proxy | [Traefik](https://traefik.io/) (file provider) |
+| TLS | Let's Encrypt (HTTP-01) |
+| Agent protocol | [MCP](https://github.com/modelcontextprotocol/typescript-sdk) |
+| Agent discovery | `/llms.txt` (plain Markdown) |
 
 ## Repository layout
 
 ```
 runway/
-├── install.sh             # Bootstrap installer for a fresh Linux server
-├── docker-compose.yml     # Traefik gateway + control plane stack
-├── .env.example           # Reference env (DASHBOARD_DOMAIN, ACME_EMAIL)
+├── install.sh             # One-command server bootstrap
+├── docker-compose.yml     # Traefik + control plane + BuildKit
 ├── packages/
-│   ├── control/           # Web UI + REST API + deploy pipeline
-│   │                      # (Hono + node:sqlite + dockerode)
-│   │                      # Serves /llms.txt for LLM agents
-│   └── mcp/               # Optional MCP server for Claude Code
+│   ├── control/           # Dashboard, REST API, deploy pipeline
+│   └── mcp/               # MCP server for Claude Code
 └── LICENSE
 ```
-
-On startup, the control container writes Traefik dynamic config
-files for the dashboard and for each deployed app into a Docker
-volume shared with the gateway. Traefik reads the directory and
-picks up changes automatically, so there is no separate gateway
-source directory.
-
-## Tech stack
-
-- **Language:** TypeScript across the board
-- **Runtime:** Node.js 24 with the built-in `node:sqlite` module
-- **Control plane:** [Hono](https://hono.dev/) + [htmx](https://htmx.org/),
-  tarball deploys via [`dockerode`](https://github.com/apocas/dockerode)
-- **Auth:** scrypt via `node:crypto`, session cookies in SQLite,
-  HttpOnly + SameSite=Lax
-- **Agent discovery:** plain Markdown served at `/llms.txt`
-- **MCP server:** [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk)
-- **Reverse proxy:** [Traefik](https://traefik.io/) with the file
-  provider and Let's Encrypt HTTP-01 challenges
 
 ## Development
 
@@ -186,39 +190,66 @@ Requires Node.js 24+ and pnpm.
 ```bash
 pnpm install
 pnpm typecheck
-
-cd packages/control
-pnpm dev     # Starts the dashboard on http://localhost:3000
+pnpm --filter @runway/control dev   # Dashboard on http://localhost:3000
 ```
-
-On first run, visit `http://localhost:3000` and the setup wizard will ask
-you to create an admin account and (optionally) configure a base domain.
 
 ## Security notes
 
 - **Passwords** are hashed with scrypt (via `node:crypto`), salted per user,
   and compared in constant time. Unknown usernames still run through the KDF
   to avoid leaking user existence via timing.
+- **Two-factor authentication** is available via TOTP (any authenticator app).
+  Ten single-use backup codes are generated when 2FA is enabled. Admins can
+  reset another user's 2FA from the Users page (requires their own TOTP code).
+- **CSRF protection** uses the double-submit cookie pattern with timing-safe
+  comparison on all POST forms.
 - **Sessions** are random 32-byte tokens stored in SQLite with a 30-day TTL.
-  Cookies are `HttpOnly` and `SameSite=Lax`, which blocks cross-site POST CSRF
-  on modern browsers. An explicit CSRF token is not yet implemented.
-- **Login rate limiting** is not yet implemented — a brute-force attacker with
-  direct network access could guess passwords. If you expose Runway publicly
-  before this lands, enforce strong admin passwords or put it behind a VPN.
+  Cookies are `HttpOnly` and `SameSite=Lax`. Expired sessions are cleaned
+  up hourly.
+- **Login rate limiting** — after 5 failed password or 2FA attempts from the
+  same IP within 15 minutes, further login attempts are blocked until the
+  window expires. Rate limits are persisted in SQLite and survive restarts.
+  Failed attempts are logged in the audit log with the source IP.
+- **API rate limiting** — 60 requests per minute per IP on all `/api/v1/*`
+  endpoints.
 - **Traefik** is configured with the dashboard disabled. Do not add
   `--api.insecure=true` on a public server. Traefik does not have access
   to the Docker socket at all — routing is driven by YAML files in a
   shared volume managed by the control plane.
-- The **control container** mounts `/var/run/docker.sock` so it can build
-  images and launch containers via the Docker API. Write access to the
-  Docker socket is effectively root on the host, so compromising the
-  control plane compromises the host. Moving builds into an isolated
-  builder container is on the roadmap.
+- **Builds are isolated** in a separate BuildKit container. User
+  Dockerfiles execute inside BuildKit's containerd sandbox with zero
+  access to the Docker socket. The control container still mounts the
+  socket for container lifecycle (run/stop/logs).
 - The **REST API** (`/api/v1/*`) uses Bearer-token auth with per-app keys,
   independent from the session cookie used by the web UI.
 - The **deploy endpoint** accepts up to 100 MB of `application/x-tar` per
   request. The uploaded code is built as root inside Docker build, so
   treat API key holders as trusted.
+- **Environment variables** are stored in SQLite and injected at container
+  start. They are visible to authenticated dashboard users and API key
+  holders; treat the dashboard and API keys as privileged access.
+- **Health check paths** and **volume mount paths** are validated against
+  strict character allowlists to prevent command injection and path
+  traversal respectively.
+
+## Roadmap
+
+Planned improvements — contributions welcome:
+
+- **Multiple custom domains per app** — currently limited to one custom domain plus the auto-generated subdomain
+- **Security scanning on deploy** — scan uploaded code and images for vulnerabilities before going live
+- **Deploy version history UI** — dashboard view of all deployed versions with one-click rollback to any point
+- **Activity feed** — show recent deploys, status changes, and events on the dashboard
+- **Faster dashboard loading** — lazy-load Docker stats via htmx instead of blocking the page render
+- **Mask API tokens in dashboard** — hide keys by default with a copy button, similar to how env var values are masked
+- **Track app creator** — store which user created each app so ownership is visible in the dashboard
+- **Multiple deploy targets** — support deploying to multiple servers from a single dashboard
+- **Wildcard DNS check at setup** — verify that `*.base_domain` resolves to the server before accepting the config
+- **System health check page** — dashboard view showing DNS, BuildKit, Docker, and Let's Encrypt status at a glance
+- **First-app tutorial** — guided "what's next" flow after the setup wizard instead of an empty dashboard
+- **Better empty state** — prominent getting-started instructions when no apps exist yet
+- **Email notifications** — optional alerts when a deploy fails
+- **Help link in UI** — link to documentation from the nav bar
 
 ## License
 

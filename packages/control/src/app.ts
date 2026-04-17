@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import { logger } from "hono/logger";
+import { securityHeaders } from "./middleware/security.js";
+import { verifyCsrf } from "./middleware/csrf.js";
+import { apiRateLimit } from "./middleware/rate-limit.js";
 import { apiRoutes } from "./routes/api.js";
 import { llmsRoutes } from "./routes/llms.js";
 import { webRoutes } from "./routes/web.js";
@@ -7,6 +10,9 @@ import { webRoutes } from "./routes/web.js";
 export const app = new Hono();
 
 app.use(logger());
+app.use(securityHeaders);
+app.use(verifyCsrf);
+app.use(apiRateLimit);
 
 // API routes (used by MCP server and direct HTTP callers)
 app.route("/api/v1", apiRoutes);

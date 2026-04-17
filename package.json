@@ -16,6 +16,8 @@
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "mcp:build": "pnpm --filter @runway/mcp build",
-    "mcp:path": "node -e \"console.log(require('path').resolve('packages/mcp/dist/index.js'))\""
+    "mcp:path": "node -e \"console.log(require('path').resolve('packages/mcp/dist/index.js'))\"",
+    "audit": "pnpm -r audit",
+    "backup": "bash scripts/backup-db.sh"
   }
 }

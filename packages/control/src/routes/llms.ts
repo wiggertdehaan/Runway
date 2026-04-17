@@ -135,9 +135,14 @@ On success the response is JSON like:
 }
 \`\`\`
 
-Tell the user the app is live at \`https://\${domain}\`. The certificate
-is issued on demand by Let's Encrypt and may take a few seconds to
-arrive on the first request.
+Tell the user the app is live at \`https://\${domain}\`.
+
+**Important:** the TLS certificate is issued on demand by Let's Encrypt
+on the first HTTPS request. This takes 5–15 seconds. Wait before
+verifying the URL — if you \`curl\` immediately you will get a
+certificate error. Either wait 15 seconds, or use \`curl -k\` (ignore
+cert) for the first check, or use the \`/app/status\` endpoint instead
+(which does not go through TLS).
 
 On failure (HTTP 5xx) the body still contains a \`log_tail\` with the
 last lines of the build output — surface that to the user so they can
@@ -155,6 +160,138 @@ curl -sS "${base}/api/v1/app/logs?tail=200" \\
 
 \`/status\` reports the container state (\`running\`, \`exited\`, etc.) and
 the exit code. \`/logs\` returns the most recent stdout/stderr lines.
+
+## Environment variables
+
+Set environment variables **before** deploying so the container picks them
+up on start. Variables are persisted on the server and injected on every
+(re)deploy. Use this for secrets, database URLs, API keys — anything that
+should not be baked into the image.
+
+### Read current env vars
+
+\`\`\`bash
+curl -sS ${base}/api/v1/app/env \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
+
+### Set or update env vars
+
+Send a JSON object with an \`env\` key. Keys are merged — existing keys not
+included in the request are left unchanged.
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/env \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"env":{"DATABASE_URL":"postgres://...","NODE_ENV":"production"}}'
+\`\`\`
+
+### Delete a single env var
+
+\`\`\`bash
+curl -sS -X DELETE ${base}/api/v1/app/env/DATABASE_URL \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
+
+Env var names must match \`[A-Za-z_][A-Za-z0-9_]*\`.
+
+After changing env vars, redeploy the app (step 5) so the container
+restarts with the new values.
+
+## Persistent volumes
+
+Configure mount paths inside the container that should survive redeploys.
+Each path is backed by a named Docker volume. Use this for databases,
+file uploads, caches, or any data that must persist across container
+rebuilds.
+
+### Read current volumes
+
+\`\`\`bash
+curl -sS ${base}/api/v1/app/volumes \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
+
+### Set volume mounts
+
+Send the full list of absolute container paths. This **replaces** all
+existing mounts — include every path you want.
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/volumes \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"mount_paths":["/app/data","/app/uploads"]}'
+\`\`\`
+
+### Delete a single volume mount
+
+\`\`\`bash
+curl -sS -X DELETE ${base}/api/v1/app/volumes/app/data \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
+
+Configure volumes **before** deploying. Data written to these paths will
+persist across redeploys. Removing a mount path from the config does
+**not** delete the underlying Docker volume — the data is still
+recoverable.
+
+## Custom domain
+
+By default each app gets a subdomain under the server's base domain.
+You can also point a custom domain at the app. Before calling this
+endpoint, have the user add a DNS record (CNAME to the base domain, or
+A record to the server IP). Traefik will automatically issue a TLS
+certificate via Let's Encrypt.
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/domain \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"custom_domain":"app.example.com"}'
+\`\`\`
+
+To remove the custom domain, pass \`null\`:
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/domain \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"custom_domain":null}'
+\`\`\`
+
+The custom domain takes effect immediately — Traefik updates its
+routing configuration on the fly, no redeploy required.
+
+## Health check
+
+Configure an HTTP health check path so Docker monitors whether the app
+is actually responding, not just whether the process is alive.
+
+\`\`\`bash
+curl -sS -X PUT ${base}/api/v1/app/healthcheck \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"path":"/health"}'
+\`\`\`
+
+The container will be probed every 30 seconds. If three consecutive
+checks fail, the container is marked unhealthy. Pass \`null\` to disable.
+Takes effect on the next deploy.
+
+## Rollback
+
+If a deploy breaks the app, roll back to the previous successful image:
+
+\`\`\`bash
+curl -sS -X POST ${base}/api/v1/app/rollback \\
+  -H "Authorization: Bearer rwy_YOUR_KEY"
+\`\`\`
+
+This restarts the container with the previous image. Env vars, volumes,
+and other configuration are preserved. Returns an error if there is no
+previous successful deploy to roll back to.
 
 ## Error handling
 

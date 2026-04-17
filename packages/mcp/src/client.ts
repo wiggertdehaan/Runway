@@ -9,10 +9,12 @@ export interface AppConfig {
   name: string | null;
   runtime: Runtime | null;
   domain: string | null;
+  custom_domain: string | null;
   port: number;
   cpu_limit: string;
   memory_limit: string;
   status: string;
+  health_check_path: string | null;
   configured: boolean;
 }
 
@@ -91,5 +93,61 @@ export class RunwayClient {
 
   async getLogs() {
     return this.request("/app/logs");
+  }
+
+  async getEnv(): Promise<{ app_id: string; env: Record<string, string> }> {
+    return this.request("/app/env");
+  }
+
+  async setEnv(
+    env: Record<string, string>
+  ): Promise<{ app_id: string; env: Record<string, string> }> {
+    return this.request("/app/env", {
+      method: "PUT",
+      body: JSON.stringify({ env }),
+    });
+  }
+
+  async deleteEnvVar(key: string): Promise<unknown> {
+    return this.request(`/app/env/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    });
+  }
+
+  async getVolumes(): Promise<{
+    app_id: string;
+    volumes: Array<{ mount_path: string; created_at: string }>;
+  }> {
+    return this.request("/app/volumes");
+  }
+
+  async setVolumes(
+    mountPaths: string[]
+  ): Promise<{
+    app_id: string;
+    volumes: Array<{ mount_path: string; created_at: string }>;
+  }> {
+    return this.request("/app/volumes", {
+      method: "PUT",
+      body: JSON.stringify({ mount_paths: mountPaths }),
+    });
+  }
+
+  async setCustomDomain(customDomain: string | null): Promise<AppConfig> {
+    return this.request("/app/domain", {
+      method: "PUT",
+      body: JSON.stringify({ custom_domain: customDomain }),
+    });
+  }
+
+  async setHealthCheck(path: string | null): Promise<AppConfig> {
+    return this.request("/app/healthcheck", {
+      method: "PUT",
+      body: JSON.stringify({ path }),
+    });
+  }
+
+  async rollback(): Promise<unknown> {
+    return this.request("/app/rollback", { method: "POST" });
   }
 }

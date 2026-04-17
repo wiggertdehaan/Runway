@@ -41,6 +41,7 @@ export interface AppRouteConfig {
   appId: string;
   containerName: string;
   domain: string;
+  customDomain?: string | null;
   port: number;
 }
 
@@ -53,15 +54,24 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
   await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
 
   const routerKey = `app-${cfg.appId}`;
+  const domains = [cfg.domain];
+  if (cfg.customDomain) domains.push(cfg.customDomain);
+  const hostRule = domains.map((d) => `Host(\`${d}\`)`).join(" || ");
+
   const doc = {
     http: {
       routers: {
         [routerKey]: {
-          rule: `Host(\`${cfg.domain}\`)`,
+          rule: hostRule,
           entryPoints: ["websecure"],
           service: routerKey,
           tls: {
             certResolver: "letsencrypt",
+            ...(cfg.customDomain
+              ? {
+                  domains: domains.map((d) => ({ main: d })),
+                }
+              : {}),
           },
         },
       },

@@ -28,9 +28,13 @@ export interface App {
   runtime: Runtime | null;
   port: number;
   domain: string | null;
+  custom_domain: string | null;
   cpu_limit: string;
   memory_limit: string;
   status: string;
+  health_check_path: string | null;
+  image_tag: string | null;
+  container_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -78,9 +82,13 @@ type UpdatableAppFields = Partial<
     | "runtime"
     | "port"
     | "domain"
+    | "custom_domain"
     | "cpu_limit"
     | "memory_limit"
     | "status"
+    | "health_check_path"
+    | "image_tag"
+    | "container_id"
   >
 >;
 

@@ -15,6 +15,8 @@ export function migrate() {
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
+      totp_secret TEXT,
+      totp_enabled INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -26,6 +28,24 @@ export function migrate() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+    CREATE TABLE IF NOT EXISTS preauth_sessions (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS user_backup_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      code_hash TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_backup_codes_user
+      ON user_backup_codes(user_id) WHERE used_at IS NULL;
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -58,6 +78,14 @@ export function migrate() {
       UNIQUE(app_id, key)
     );
 
+    CREATE TABLE IF NOT EXISTS volumes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      mount_path TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(app_id, mount_path)
+    );
+
     CREATE TABLE IF NOT EXISTS deploys (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
@@ -67,7 +95,32 @@ export function migrate() {
       log TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target_user_id TEXT,
+      target_username TEXT,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
+
+  // Upgrade legacy users tables so existing installations pick up
+  // the totp columns. ADD COLUMN is supported by SQLite.
+  const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{
+    name: string;
+  }>;
+  if (!userColumns.some((c) => c.name === "totp_secret")) {
+    db.exec(`ALTER TABLE users ADD COLUMN totp_secret TEXT`);
+  }
+  if (!userColumns.some((c) => c.name === "totp_enabled")) {
+    db.exec(
+      `ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0`
+    );
+  }
 
   // Upgrade legacy apps tables created before the MCP-driven
   // configure flow: name and runtime were NOT NULL and the
@@ -119,5 +172,16 @@ export function migrate() {
 
       COMMIT;
     `);
+  }
+
+  // Add custom_domain and health_check_path columns for existing installs.
+  const appCols = db.prepare("PRAGMA table_info(apps)").all() as Array<{
+    name: string;
+  }>;
+  if (!appCols.some((c) => c.name === "custom_domain")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN custom_domain TEXT`);
+  }
+  if (!appCols.some((c) => c.name === "health_check_path")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN health_check_path TEXT`);
   }
 }

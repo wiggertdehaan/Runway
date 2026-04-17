@@ -6,7 +6,29 @@ export interface User {
   id: string;
   username: string;
   password_hash: string;
+  totp_secret: string | null;
+  totp_enabled: number; // 0 | 1 from SQLite
   created_at: string;
+}
+
+export function isTotpEnabled(user: User): boolean {
+  return user.totp_enabled === 1 && !!user.totp_secret;
+}
+
+export function setTotpPending(userId: string, secret: string): void {
+  db.prepare(
+    `UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?`
+  ).run(secret, userId);
+}
+
+export function commitTotp(userId: string): void {
+  db.prepare(`UPDATE users SET totp_enabled = 1 WHERE id = ?`).run(userId);
+}
+
+export function clearTotp(userId: string): void {
+  db.prepare(
+    `UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?`
+  ).run(userId);
 }
 
 export async function createUser(

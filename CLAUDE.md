@@ -72,15 +72,16 @@ without knowing why.
 - Traefik has **zero** Docker socket access. Do not reintroduce the
   docker provider.
 
-### Control runs as root, mounts the Docker socket
-- The deploy pipeline needs `docker build` + `docker run`, which
-  means talking to `/var/run/docker.sock`.
+### Builds run in isolated BuildKit, control still mounts the socket
+- Image builds go to a separate BuildKit container via `buildctl`
+  over TCP. `RUN` steps in user Dockerfiles execute inside
+  BuildKit's containerd sandbox with no Docker socket access.
+- The control container still mounts `/var/run/docker.sock` for
+  container lifecycle (run, stop, logs, stats).
 - Running control as a non-root user requires matching the host's
   docker GID, which varies. Write access to the socket is already
   root-on-host, so running node as root inside the container does
   not widen the blast radius.
-- This is an MVP tradeoff; an isolated builder service is on the
-  roadmap.
 
 ### App IDs are lowercase
 - Docker image names must be lowercase. The original nanoid

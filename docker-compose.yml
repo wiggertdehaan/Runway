@@ -37,6 +37,25 @@ services:
     networks:
       - runway-internal
 
+  # ── Builder (BuildKit) ─────────────────────────────────
+  # Isolated image builder. The control plane sends build contexts
+  # here via buildctl over TCP. BuildKit runs its own containerd
+  # sandbox — RUN steps in user Dockerfiles cannot reach the Docker
+  # socket or any other host resource.
+  buildkit:
+    image: moby/buildkit:latest
+    container_name: runway-buildkit
+    restart: unless-stopped
+    privileged: true
+    command:
+      - "--addr"
+      - "unix:///run/buildkit/buildkitd.sock"
+    volumes:
+      - buildkit-cache:/var/lib/buildkit
+      - build-exchange:/exchange
+    networks:
+      - runway-internal
+
   # ── Control Plane ──────────────────────────────────────
   # Web dashboard + REST API backing the MCP server.
   control:
@@ -47,6 +66,7 @@ services:
     restart: unless-stopped
     depends_on:
       - gateway
+      - buildkit
     volumes:
       - control-data:/data
       - gateway-config:/gateway-config
@@ -56,12 +76,18 @@ services:
       # means root on the host. Moving to an isolated builder container
       # is tracked in the roadmap.
       - /var/run/docker.sock:/var/run/docker.sock
+      - build-exchange:/exchange
     environment:
       - DB_PATH=/data/runway.db
       - PORT=3000
       - GATEWAY_CONFIG_DIR=/gateway-config
       - RUNWAY_NETWORK=runway-internal
+      - BUILDKIT_CONTAINER=runway-buildkit
       - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN must be set in .env}
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:nosuid
     networks:
       - runway-internal
 
@@ -69,6 +95,8 @@ volumes:
   control-data:
   gateway-data:
   gateway-config:
+  buildkit-cache:
+  build-exchange:
 
 networks:
   runway-internal:
