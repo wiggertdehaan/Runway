@@ -30,6 +30,8 @@ import {
   type Threshold,
 } from "./scan.js";
 import { getSetting } from "../db/settings.js";
+import { preflightCheckTar, PreflightRejectedError } from "./preflight.js";
+export { PreflightRejectedError } from "./preflight.js";
 
 function dockerSafeId(appId: string): string {
   return appId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
@@ -197,6 +199,12 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   const threshold = resolveThreshold(app);
 
   const tarBuffer = Buffer.isBuffer(tar) ? tar : null;
+
+  // Block obvious cloud-metadata probes in the build context before we
+  // hand it to BuildKit. Network isolation stops control-plane access
+  // from build sandboxes; this catches the remaining link-local /
+  // cloud-metadata reach-out with minimal false-positive risk.
+  if (tarBuffer) preflightCheckTar(tarBuffer);
 
   updateApp(app.id, { status: "building" });
 

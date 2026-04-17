@@ -75,6 +75,8 @@ import { appContainerName, destroyApp, rollbackApp } from "../deploy/index.js";
 import { docker } from "../deploy/docker.js";
 import { csrfField } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
+import { validateCustomDomain } from "../util/domain.js";
+import { assertSafeOutboundUrl } from "../util/ssrf-guard.js";
 import {
   clearAttempts,
   getClientIp,
@@ -1159,6 +1161,15 @@ webRoutes.get("/apps/:id", (c) => {
   const volumes = getVolumes(app.id);
   const saved = c.req.query("saved");
   const rollbackError = c.req.query("rollback_error");
+  const domainError = c.req.query("domain_error");
+  const domainErrorMessage =
+    domainError === "conflict"
+      ? "That domain is already used by another app."
+      : domainError === "reserved"
+        ? "That domain is reserved for the control plane or for automatic subdomains."
+        : domainError === "format"
+          ? "That isn't a valid domain name."
+          : null;
 
   const envRows = Object.entries(env)
     .map(
@@ -1226,6 +1237,7 @@ webRoutes.get("/apps/:id", (c) => {
                 Point a CNAME or A record to the Runway server, then enter the domain here.
                 Traefik will issue a Let's Encrypt certificate automatically.
               </p>
+              ${domainErrorMessage ? `<div class="error" style="margin-bottom:0.75rem">${escapeHtml(domainErrorMessage)}</div>` : ""}
               <form method="POST" action="/apps/${encodeURIComponent(app.id)}/domain">
                 <div class="flex">
                   <input type="text" name="custom_domain" value="${escapeHtml(app.custom_domain ?? "")}" placeholder="app.example.com" style="flex:1" />
@@ -1374,9 +1386,14 @@ webRoutes.post("/apps/:id/domain", async (c) => {
   const app = getApp(c.req.param("id"));
   if (!app) return c.redirect("/");
   const body = await c.req.parseBody();
-  const raw = (body["custom_domain"] as string | undefined)?.trim().toLowerCase() || null;
-  const customDomain = raw && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(raw) ? raw : null;
-  const updated = updateApp(app.id, { custom_domain: customDomain });
+  const raw = (body["custom_domain"] as string | undefined) ?? "";
+  const validation = validateCustomDomain(raw, app.id);
+  if (!validation.ok) {
+    return c.redirect(
+      `/apps/${encodeURIComponent(app.id)}?domain_error=${validation.error}`
+    );
+  }
+  const updated = updateApp(app.id, { custom_domain: validation.domain });
   if (updated?.domain) {
     await writeAppRoute({
       appId: updated.id,
@@ -1615,7 +1632,7 @@ webRoutes.get("/users", (c) => {
                ${
                  isTotpEnabled(u)
                    ? `<form method="POST" action="/users/${encodeURIComponent(u.id)}/2fa/reset" style="margin:0" class="flex">
-                        <input type="text" name="code" inputmode="numeric" placeholder="Your code" style="width:9rem" ${isTotpEnabled(current) ? "required" : ""} />
+                        <input type="text" name="code" inputmode="numeric" placeholder="Your code" style="width:9rem" required />
                         <button type="submit" class="ghost">Reset 2FA</button>
                       </form>`
                    : ""
@@ -1650,9 +1667,11 @@ webRoutes.get("/users", (c) => {
       ${
         error === "last_admin"
           ? '<div class="error">Refused: that would leave zero admins. Promote another user first.</div>'
-          : error
-            ? '<div class="error">Invalid 2FA code. Please try again.</div>'
-            : ""
+          : error === "needs_2fa"
+            ? '<div class="error">Enable 2FA on your own account before resetting it for others.</div>'
+            : error
+              ? '<div class="error">Invalid 2FA code. Please try again.</div>'
+              : ""
       }
       <form method="POST" action="/users">
         <div class="flex">
@@ -1749,16 +1768,24 @@ webRoutes.post("/users/:id/2fa/reset", async (c) => {
   const target = getUser(id);
   if (!target) return c.redirect("/users");
 
-  if (isTotpEnabled(current)) {
-    const body = await c.req.parseBody();
-    const code = ((body["code"] as string | undefined) ?? "").trim();
-    if (!verifyTotp(current.totp_secret!, code)) {
-      return c.redirect("/users?error=1");
-    }
+  // Resetting another user's 2FA is a privileged destructive action: it
+  // downgrades that user back to password-only. Require the acting admin
+  // to have their own 2FA enabled AND provide a current code, so a freshly
+  // created admin account cannot be used to strip 2FA from existing users.
+  if (!isTotpEnabled(current)) {
+    return c.redirect("/users?error=needs_2fa");
+  }
+  const body = await c.req.parseBody();
+  const code = ((body["code"] as string | undefined) ?? "").trim();
+  if (!verifyTotp(current.totp_secret!, code)) {
+    return c.redirect("/users?error=1");
   }
 
   clearTotp(target.id);
   deleteBackupCodes(target.id);
+  // Invalidate any active sessions for the target so a stale session
+  // cannot continue to act with the pre-reset 2FA trust level.
+  deleteAllUserSessions(target.id);
   logAudit(current.id, current.username, "2fa_reset", {
     targetUserId: target.id,
     targetUsername: target.username,
@@ -1777,6 +1804,17 @@ webRoutes.get("/settings", (c) => {
   const microsoftClientId = getSetting("oauth_microsoft_client_id") ?? "";
   const saved = c.req.query("saved");
   const dnsWarning = c.req.query("dns_warning");
+  const error = c.req.query("error");
+  const webhookError =
+    error === "webhook_bad_scheme"
+      ? "Webhook URL must use https://."
+      : error === "webhook_private"
+        ? "Webhook hostname resolves to an internal or loopback address and was rejected."
+        : error === "webhook_dns"
+          ? "Could not resolve webhook hostname via DNS."
+          : error === "webhook_invalid"
+            ? "Webhook URL is not valid."
+            : null;
 
   return c.html(
     layout(
@@ -1785,6 +1823,7 @@ webRoutes.get("/settings", (c) => {
       <h1>Settings</h1>
       ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Settings saved.</div>' : ""}
       ${dnsWarning ? `<div class="error">${escapeHtml(dnsWarning)}</div>` : ""}
+      ${webhookError ? `<div class="error">${escapeHtml(webhookError)}</div>` : ""}
 
       <div class="settings-layout">
         <nav class="settings-nav">
@@ -1955,8 +1994,24 @@ webRoutes.post("/settings/oauth/microsoft", async (c) => {
 webRoutes.post("/settings/webhook", async (c) => {
   const body = await c.req.parseBody();
   const url = ((body["webhook_url"] as string | undefined) ?? "").trim();
+  if (!url) {
+    setSetting("webhook_url", "");
+    return c.redirect("/settings?saved=1#notifications");
+  }
+  const check = await assertSafeOutboundUrl(url);
+  if (!check.ok) {
+    const reason =
+      check.error === "bad_scheme"
+        ? "webhook_bad_scheme"
+        : check.error === "private_target"
+          ? "webhook_private"
+          : check.error === "dns_failure"
+            ? "webhook_dns"
+            : "webhook_invalid";
+    return c.redirect(`/settings?error=${reason}#notifications`);
+  }
   setSetting("webhook_url", url);
-  return c.redirect("/settings?saved=1");
+  return c.redirect("/settings?saved=1#notifications");
 });
 
 // ── Audit log ───────────────────────────────────────────

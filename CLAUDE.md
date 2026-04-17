@@ -73,8 +73,10 @@ without knowing why.
   docker provider.
 
 ### Builds run in isolated BuildKit, control still mounts the socket
-- Image builds go to a separate BuildKit container via `buildctl`
-  over TCP. `RUN` steps in user Dockerfiles execute inside
+- Image builds go to a separate BuildKit container, invoked via
+  `docker exec` of `buildctl` inside that container (no TCP —
+  control reaches buildkit through the Docker socket, not over the
+  network). `RUN` steps in user Dockerfiles execute inside
   BuildKit's containerd sandbox with no Docker socket access.
 - The control container still mounts `/var/run/docker.sock` for
   container lifecycle (run, stop, logs, stats).
@@ -82,6 +84,32 @@ without knowing why.
   docker GID, which varies. Write access to the socket is already
   root-on-host, so running node as root inside the container does
   not widen the blast radius.
+
+### Three Docker networks, not one
+- `runway-internal` — control + gateway only.
+- `runway-apps` — gateway + every deployed app container. Traefik
+  straddles both networks so it can keep serving the dashboard and
+  still route edge traffic to apps.
+- `runway-build` — buildkit only. Isolates `RUN` steps from the
+  control plane and other apps.
+- An earlier topology put control, gateway, buildkit, and all apps
+  on a single `runway-internal` network. That allowed a deployed
+  container (or a malicious `RUN` step) to reach
+  `http://control:3000/` and probe other app containers by name,
+  bypassing Traefik entirely. Do not collapse the networks back
+  into one.
+- Existing app containers created before the split keep running on
+  `runway-internal` until they are redeployed; a fresh deploy
+  recreates the container on `runway-apps`. After upgrading the
+  platform, redeploy each app once to complete the migration.
+- Cloud metadata (`169.254.169.254` and friends) is still reachable
+  from build sandboxes via the host network namespace — blocking
+  it fully needs host iptables or custom CNI for buildkit. As a
+  pragmatic defense, `packages/control/src/deploy/preflight.ts`
+  scans the uploaded tar and rejects build contexts that reference
+  well-known metadata hostnames/IPs. The optional host-level
+  hardening is a single `iptables -I DOCKER-USER -d 169.254.169.254
+  -j DROP` rule on the host.
 
 ### App IDs are lowercase
 - Docker image names must be lowercase. The original nanoid

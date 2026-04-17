@@ -15,6 +15,18 @@ export async function securityHeaders(c: Context, next: Next) {
   // deployed under the same base domain may still be bootstrapping.
   c.header("Strict-Transport-Security", "max-age=31536000");
 
+  // Prevent authenticated HTML/JSON responses (which include API keys,
+  // OAuth client secrets, TOTP secrets, backup codes) from being
+  // written to disk by browsers or shared proxy caches. Session-bearing
+  // requests are identified by the presence of the session cookie —
+  // this is intentionally coarser than "c.get('user')" because error
+  // responses short-circuit before the user is loaded.
+  const hasSessionCookie =
+    c.req.header("cookie")?.includes("runway_session=") ?? false;
+  if (hasSessionCookie) {
+    c.header("Cache-Control", "no-store");
+  }
+
   // Block MIME sniffing so an HTML-looking response served with a
   // different content-type cannot be reinterpreted.
   c.header("X-Content-Type-Options", "nosniff");

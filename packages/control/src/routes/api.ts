@@ -15,6 +15,7 @@ import {
   getAppStatus,
   rollbackApp,
   ScanBlockedError,
+  PreflightRejectedError,
 } from "../deploy/index.js";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, type Threshold } from "../deploy/scan.js";
 import { getDeploy, getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
@@ -24,6 +25,7 @@ import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { notifyDeployFailure } from "../util/webhook.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import { getAppAllowedEmails, setAppAllowedEmails } from "../db/app-emails.js";
+import { validateCustomDomain } from "../util/domain.js";
 
 type Env = { Variables: { app: App } };
 
@@ -241,6 +243,17 @@ apiRoutes.post("/app/deploy", async (c) => {
         409
       );
     }
+    if (err instanceof PreflightRejectedError) {
+      return c.json(
+        {
+          status: "rejected",
+          error: err.message,
+          pattern: err.pattern,
+          hint: "Remove references to cloud metadata endpoints from your build context.",
+        },
+        400
+      );
+    }
     updateApp(app.id, { status: "failed" });
     notifyDeployFailure(app.name ?? app.id, app.id, err?.message ?? "Deploy failed");
     return c.json(
@@ -423,17 +436,22 @@ apiRoutes.put("/app/domain", async (c) => {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const customDomain =
-    typeof body.custom_domain === "string"
-      ? body.custom_domain.trim().toLowerCase()
-      : null;
+  const customDomainRaw =
+    typeof body.custom_domain === "string" ? body.custom_domain : "";
 
-  if (customDomain && !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(customDomain)) {
-    return c.json({ error: "Invalid domain name" }, 400);
+  const validation = validateCustomDomain(customDomainRaw, app.id);
+  if (!validation.ok) {
+    const message =
+      validation.error === "conflict"
+        ? "Domain already in use by another app"
+        : validation.error === "reserved"
+          ? "Domain is reserved (dashboard or base-domain subdomain)"
+          : "Invalid domain name";
+    return c.json({ error: message }, 400);
   }
 
   const updated = updateApp(app.id, {
-    custom_domain: customDomain || null,
+    custom_domain: validation.domain,
   });
   if (!updated) return c.json({ error: "App not found" }, 404);
 

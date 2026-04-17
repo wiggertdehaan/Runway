@@ -6,7 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 
-const RUNWAY_NETWORK = process.env.RUNWAY_NETWORK || "runway-internal";
+// Network that deployed user containers join. Traefik straddles this
+// network + runway-internal so it can route edge traffic to apps, but
+// apps themselves do NOT share a network with the control plane —
+// otherwise a malicious container could reach http://control:3000
+// directly, bypassing Traefik and any edge-level protection.
+const RUNWAY_NETWORK = process.env.RUNWAY_NETWORK || "runway-apps";
 const BUILDKIT_CONTAINER = process.env.BUILDKIT_CONTAINER || "runway-buildkit";
 
 export const docker = new Docker({ socketPath: "/var/run/docker.sock" });
@@ -157,8 +162,8 @@ export interface RunResult {
 
 /**
  * Create and start a container, replacing any existing container with
- * the same name. Joins the runway-internal network so Traefik can
- * reach it by name.
+ * the same name. Joins the runway-apps network so Traefik (which also
+ * sits on runway-apps) can reach it by container name.
  */
 export async function runContainer(opts: RunOptions): Promise<RunResult> {
   // Stop + remove any existing container with this name

@@ -1,4 +1,5 @@
 import { getSetting } from "../db/settings.js";
+import { assertSafeOutboundUrl } from "./ssrf-guard.js";
 
 export async function notifyDeployFailure(
   appName: string,
@@ -7,6 +8,12 @@ export async function notifyDeployFailure(
 ): Promise<void> {
   const url = getSetting("webhook_url");
   if (!url) return;
+
+  // Re-validate just before fetch to defeat DNS rebinding — a hostname
+  // that passed validation at save time could now resolve to an
+  // internal IP.
+  const check = await assertSafeOutboundUrl(url);
+  if (!check.ok) return;
 
   try {
     await fetch(url, {

@@ -10,6 +10,10 @@ services:
   # proxies HTTP to named services resolved through the internal
   # Docker DNS (e.g. http://control:3000).
   #
+  # Joins two networks: `runway-internal` so it can reach the
+  # control plane (for the dashboard and forward-auth), and
+  # `runway-apps` so it can route to deployed app containers.
+  #
   # The dashboard/insecure API is intentionally disabled.
   gateway:
     image: traefik:v3.5
@@ -36,12 +40,14 @@ services:
       - gateway-data:/data
     networks:
       - runway-internal
+      - runway-apps
 
   # ── Builder (BuildKit) ─────────────────────────────────
-  # Isolated image builder. The control plane sends build contexts
-  # here via buildctl over TCP. BuildKit runs its own containerd
-  # sandbox — RUN steps in user Dockerfiles cannot reach the Docker
-  # socket or any other host resource.
+  # Isolated image builder. Control reaches buildkit via the Docker
+  # socket (`docker exec`), not over TCP, so buildkit does NOT share
+  # a network with control or with deployed apps. This prevents
+  # malicious RUN steps in a user Dockerfile from reaching the
+  # control plane or other apps at build time.
   buildkit:
     image: moby/buildkit:latest
     container_name: runway-buildkit
@@ -54,10 +60,14 @@ services:
       - buildkit-cache:/var/lib/buildkit
       - build-exchange:/exchange
     networks:
-      - runway-internal
+      - runway-build
 
   # ── Control Plane ──────────────────────────────────────
   # Web dashboard + REST API backing the MCP server.
+  #
+  # Lives on `runway-internal` only. Deployed app containers live
+  # on `runway-apps` and therefore cannot reach `control:3000`
+  # directly. Gateway straddles both networks to route traffic.
   control:
     build:
       context: .
@@ -84,7 +94,7 @@ services:
       - DB_PATH=/data/runway.db
       - PORT=3000
       - GATEWAY_CONFIG_DIR=/gateway-config
-      - RUNWAY_NETWORK=runway-internal
+      - RUNWAY_NETWORK=runway-apps
       - BUILDKIT_CONTAINER=runway-buildkit
       - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN must be set in .env}
     security_opt:
@@ -103,5 +113,14 @@ volumes:
   trivy-cache:
 
 networks:
+  # Control plane ↔ gateway. Not reachable by deployed apps or by
+  # build sandboxes.
   runway-internal:
     name: runway-internal
+  # Deployed app containers ↔ gateway. No control-plane reachability.
+  runway-apps:
+    name: runway-apps
+  # BuildKit only. Isolated so build-time RUN steps cannot reach
+  # control, gateway, or other apps over the internal Docker DNS.
+  runway-build:
+    name: runway-build
