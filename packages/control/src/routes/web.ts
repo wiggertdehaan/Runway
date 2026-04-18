@@ -34,6 +34,7 @@ import {
   setUserRole,
   countAdmins,
   type Role,
+  type User,
   ROLES,
 } from "../db/users.js";
 import { createSession, deleteAllUserSessions, deleteSession } from "../db/sessions.js";
@@ -333,6 +334,13 @@ function layout(
             var empty = document.getElementById('no-match');
             if (empty) empty.style.display = shown === 0 && q ? '' : 'none';
           }
+          document.body.addEventListener('htmx:afterSwap', function(e) {
+            // After the live-apps swap reinserts fresh cards, re-apply
+            // the current search filter so the user's query keeps
+            // hiding non-matching cards.
+            var target = e && e.detail && e.detail.target;
+            if (target && target.id === 'apps-live') filterApps();
+          });
           document.addEventListener('click', function(e) {
             document.querySelectorAll('.overflow-menu[open]').forEach(function(m) {
               if (!m.contains(e.target)) m.removeAttribute('open');
@@ -641,6 +649,7 @@ function getCookieValue(c: Context, name: string): string | undefined {
 // ── Protected routes ─────────────────────────────────────
 
 webRoutes.use("/", requireSession);
+webRoutes.use("/partials/*", requireSession);
 webRoutes.use("/apps", requireSession);
 webRoutes.use("/apps/*", requireSession);
 webRoutes.use("/apps/:id", requireAppAccess);
@@ -660,21 +669,89 @@ webRoutes.use("/account/*", requireSession);
 webRoutes.use("/health", requireSession);
 webRoutes.use("/health", requireAdmin);
 
-webRoutes.get("/", (c) => {
-  const user = c.get("user");
+/**
+ * HTML for the apps area of the dashboard. Rendered inline on first
+ * page load and swapped in every few seconds via
+ * `GET /partials/apps` so new deploys, status transitions, and
+ * memory/cpu changes surface without a manual refresh.
+ *
+ * The search input is marked with `hx-preserve` so its value and
+ * focus survive every swap. After each swap the dashboard script
+ * re-runs `filterApps()` against the fresh cards.
+ */
+function renderAppsLive(user: User, dashboardDomain: string): string {
   const admin = isAdmin(user);
-  // Admins see every app; members only see what they created. Apps
-  // created before the `created_by` column existed have a NULL
-  // creator — treat those as admin-only so nothing leaks.
   const apps = admin
     ? listApps()
     : listApps().filter((a) => a.created_by === user.username);
-  const baseDomain = getSetting("base_domain");
-  const dashboardDomain = process.env.DASHBOARD_DOMAIN ?? "";
-
   const appCards = apps
     .map((app) => renderAppCard(app, dashboardDomain))
     .join("");
+
+  const running = apps.filter((a) => a.status === "running").length;
+  const failing = apps.filter((a) =>
+    ["failed", "exited"].includes(a.status)
+  ).length;
+  const parts: string[] = [];
+  if (apps.length > 0) {
+    parts.push(`${apps.length} app${apps.length !== 1 ? "s" : ""}`);
+    if (running)
+      parts.push(
+        `<span style="color:var(--status-success)">${running} running</span>`
+      );
+    if (failing)
+      parts.push(
+        `<span style="color:var(--status-error)">${failing} failing</span>`
+      );
+  }
+
+  // The search input is rendered (and preserved) whenever there are
+  // any apps, not only past the old >=4 threshold, so its value
+  // survives live updates even if the app count briefly dips.
+  const filterBlock =
+    apps.length > 0
+      ? `<div class="dashboard-filter" id="app-search-wrap" hx-preserve="true" style="margin-top:0.75rem">
+          <input type="search" id="app-search" placeholder="Search apps..." oninput="filterApps()" style="font-size:0.85rem" />
+        </div>`
+      : "";
+
+  const header =
+    apps.length > 0
+      ? `<div style="margin-bottom:1rem">
+          <p class="meta">${parts.join(" &middot; ")}</p>
+          ${filterBlock}
+        </div>`
+      : "";
+
+  const body =
+    apps.length === 0
+      ? `<div class="card" style="text-align:center;padding:3rem 2rem">
+          <h2 style="margin-bottom:1rem">Get started</h2>
+          <p class="hint" style="max-width:500px;margin:0 auto 1.5rem">
+            Create your first app to get an API key. Then open your project in
+            <a href="https://claude.ai/code" target="_blank" style="color:#60a5fa">Claude Code</a>
+            and paste the deploy instruction — Runway handles the rest.
+          </p>
+          <p style="margin-bottom:1.5rem">
+            <strong>1.</strong> Click <em>"+ New app"</em> above<br/>
+            <strong>2.</strong> Copy the deploy instruction<br/>
+            <strong>3.</strong> Paste it in Claude Code
+          </p>
+          <p class="meta">
+            Need help? Check the <a href="https://github.com/wiggertdehaan/Runway#deploying-an-app" target="_blank" style="color:#60a5fa">deploy guide</a>
+            or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:#60a5fa">API docs</a>.
+          </p>
+        </div>`
+      : `<div class="app-grid">${appCards}</div>
+         <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your search.</p>`;
+
+  return `${header}${body}`;
+}
+
+webRoutes.get("/", (c) => {
+  const user = c.get("user");
+  const baseDomain = getSetting("base_domain");
+  const dashboardDomain = process.env.DASHBOARD_DOMAIN ?? "";
 
   return c.html(
     layout(
@@ -706,44 +783,20 @@ webRoutes.get("/", (c) => {
           <button type="submit" style="width:auto">+ New app</button>
         </form>
       </div>
-      ${apps.length > 0 ? (() => {
-        const running = apps.filter((a) => a.status === "running").length;
-        const failing = apps.filter((a) => ["failed", "exited"].includes(a.status)).length;
-        const parts = [`${apps.length} app${apps.length !== 1 ? "s" : ""}`];
-        if (running) parts.push(`<span style="color:var(--status-success)">${running} running</span>`);
-        if (failing) parts.push(`<span style="color:var(--status-error)">${failing} failing</span>`);
-        return `<div style="margin-bottom:1rem">
-          <p class="meta">${parts.join(" &middot; ")}</p>
-          ${apps.length >= 4 ? `<div class="dashboard-filter" style="margin-top:0.75rem">
-            <input type="search" id="app-search" placeholder="Search apps..." oninput="filterApps()" style="font-size:0.85rem" />
-          </div>` : ""}
-        </div>`;
-      })() : ""}
       ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
-      ${apps.length === 0 ? `
-        <div class="card" style="text-align:center;padding:3rem 2rem">
-          <h2 style="margin-bottom:1rem">Get started</h2>
-          <p class="hint" style="max-width:500px;margin:0 auto 1.5rem">
-            Create your first app to get an API key. Then open your project in
-            <a href="https://claude.ai/code" target="_blank" style="color:#60a5fa">Claude Code</a>
-            and paste the deploy instruction — Runway handles the rest.
-          </p>
-          <p style="margin-bottom:1.5rem">
-            <strong>1.</strong> Click <em>"+ New app"</em> above<br/>
-            <strong>2.</strong> Copy the deploy instruction<br/>
-            <strong>3.</strong> Paste it in Claude Code
-          </p>
-          <p class="meta">
-            Need help? Check the <a href="https://github.com/wiggertdehaan/Runway#deploying-an-app" target="_blank" style="color:#60a5fa">deploy guide</a>
-            or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:#60a5fa">API docs</a>.
-          </p>
-        </div>
-      ` : `<div class="app-grid">${appCards}</div>
-      <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your search.</p>`}
+      <div id="apps-live" hx-get="/partials/apps" hx-trigger="every 5s" hx-swap="innerHTML">
+        ${renderAppsLive(user, dashboardDomain)}
+      </div>
     `,
       { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
+});
+
+webRoutes.get("/partials/apps", (c) => {
+  const user = c.get("user");
+  const dashboardDomain = process.env.DASHBOARD_DOMAIN ?? "";
+  return c.html(renderAppsLive(user, dashboardDomain));
 });
 
 webRoutes.post("/apps", (c) => {
