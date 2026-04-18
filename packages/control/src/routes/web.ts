@@ -15,7 +15,7 @@ const APP_VERSION = (() => {
 import { listApps, createApp, deleteApp, getApp } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
-import { getAppStats } from "../deploy/stats.js";
+import { getAppStats, getAppStatsBulk, type AppStats } from "../deploy/stats.js";
 import { formatBytes, formatRelative } from "../util/format.js";
 import {
   authenticate,
@@ -679,13 +679,21 @@ webRoutes.use("/health", requireAdmin);
  * focus survive every swap. After each swap the dashboard script
  * re-runs `filterApps()` against the fresh cards.
  */
-function renderAppsLive(user: User, dashboardDomain: string): string {
+async function renderAppsLive(
+  user: User,
+  dashboardDomain: string
+): Promise<string> {
   const admin = isAdmin(user);
   const apps = admin
     ? listApps()
     : listApps().filter((a) => a.created_by === user.username);
+  // Pre-fetch live container state + memory + image size for every
+  // app so each card renders with real values inline. Without this
+  // the outer swap would paint "..." placeholders that a second
+  // round-trip then fills in — visible flicker on every 5s refresh.
+  const allStats = await getAppStatsBulk(apps);
   const appCards = apps
-    .map((app) => renderAppCard(app, dashboardDomain))
+    .map((app, i) => renderAppCard(app, dashboardDomain, allStats[i] ?? null))
     .join("");
 
   const running = apps.filter((a) => a.status === "running").length;
@@ -748,10 +756,11 @@ function renderAppsLive(user: User, dashboardDomain: string): string {
   return `${header}${body}`;
 }
 
-webRoutes.get("/", (c) => {
+webRoutes.get("/", async (c) => {
   const user = c.get("user");
   const baseDomain = getSetting("base_domain");
   const dashboardDomain = process.env.DASHBOARD_DOMAIN ?? "";
+  const appsHtml = await renderAppsLive(user, dashboardDomain);
 
   return c.html(
     layout(
@@ -785,7 +794,7 @@ webRoutes.get("/", (c) => {
       </div>
       ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
       <div id="apps-live" hx-get="/partials/apps" hx-trigger="every 5s" hx-swap="innerHTML">
-        ${renderAppsLive(user, dashboardDomain)}
+        ${appsHtml}
       </div>
     `,
       { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
@@ -793,10 +802,10 @@ webRoutes.get("/", (c) => {
   );
 });
 
-webRoutes.get("/partials/apps", (c) => {
+webRoutes.get("/partials/apps", async (c) => {
   const user = c.get("user");
   const dashboardDomain = process.env.DASHBOARD_DOMAIN ?? "";
-  return c.html(renderAppsLive(user, dashboardDomain));
+  return c.html(await renderAppsLive(user, dashboardDomain));
 });
 
 webRoutes.post("/apps", (c) => {
@@ -1095,7 +1104,8 @@ function renderScanBadge(app: ReturnType<typeof listApps>[number]): string {
 
 function renderAppCard(
   app: ReturnType<typeof listApps>[number],
-  dashboardDomain: string
+  dashboardDomain: string,
+  stats: AppStats | null = null
 ): string {
   const configured = !!(app.name && app.runtime);
   const title = configured
@@ -1112,16 +1122,36 @@ function renderAppCard(
     : "/llms.txt";
   const claudeInstruction = `Fetch ${llmsTxtUrl} and deploy this project using API key ${app.api_key}`;
 
-  const statsPlaceholder = configured
-    ? `<div hx-get="/apps/${encodeURIComponent(app.id)}/stats" hx-trigger="load" hx-swap="outerHTML">
-        <div class="stats" style="grid-template-columns:repeat(4,1fr);gap:0.5rem;padding:0.5rem;margin-top:0.5rem">
-          <div><div class="stat-label">Runtime</div><div class="stat-value" style="font-size:0.8rem">${escapeHtml(app.runtime!)}</div></div>
-          <div><div class="stat-label">Image</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-          <div><div class="stat-label">Memory</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-          <div><div class="stat-label">Uptime</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-        </div>
-      </div>`
-    : "";
+  // When stats were pre-fetched (bulk render, either on first page
+  // load or inside /partials/apps), render the values inline so the
+  // card never flickers. Fall back to the hx-get placeholder pattern
+  // when no stats were provided (keeps the function usable in other
+  // call sites).
+  const statsBlock = !configured
+    ? ""
+    : stats
+      ? `<div class="stats">
+          <div><div class="stat-label">Runtime</div><div class="stat-value">${escapeHtml(app.runtime!)}</div></div>
+          <div><div class="stat-label">Image</div><div class="stat-value">${escapeHtml(formatBytes(stats.imageBytes))}</div></div>
+          <div><div class="stat-label">Memory</div><div class="stat-value">${escapeHtml(formatBytes(stats.memoryBytes))}</div></div>
+          <div><div class="stat-label">Uptime</div><div class="stat-value">${escapeHtml(formatRelative(stats.startedAt))}</div></div>
+        </div>`
+      : `<div hx-get="/apps/${encodeURIComponent(app.id)}/stats" hx-trigger="load" hx-swap="outerHTML">
+          <div class="stats" style="grid-template-columns:repeat(4,1fr);gap:0.5rem;padding:0.5rem;margin-top:0.5rem">
+            <div><div class="stat-label">Runtime</div><div class="stat-value" style="font-size:0.8rem">${escapeHtml(app.runtime!)}</div></div>
+            <div><div class="stat-label">Image</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
+            <div><div class="stat-label">Memory</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
+            <div><div class="stat-label">Uptime</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
+          </div>
+        </div>`;
+
+  // Status badge: use live container state when available, otherwise
+  // fall back to the DB status + hx-get so the first render without
+  // prefetched stats still catches up.
+  const badgeState = stats ? stats.containerState ?? app.status : app.status;
+  const badgeHtml = stats
+    ? `<span class="badge badge-${escapeHtml(badgeState)}">${escapeHtml(badgeState)}</span>`
+    : `<span class="badge badge-${escapeHtml(app.status)}" hx-get="/apps/${encodeURIComponent(app.id)}/badge" hx-trigger="load" hx-swap="outerHTML">${escapeHtml(app.status)}</span>`;
 
   const initials = app.created_by
     ? app.created_by.slice(0, 2).toUpperCase()
@@ -1154,18 +1184,18 @@ function renderAppCard(
     : "";
 
   return `
-    <div class="card app-card status-${escapeHtml(app.status)}" data-name="${escapeHtml(app.name ?? app.id)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${escapeHtml(app.status)}"${!configured ? ' style="border-color:var(--status-info-bg)"' : ""}>
+    <div class="card app-card status-${escapeHtml(badgeState)}" data-name="${escapeHtml(app.name ?? app.id)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${escapeHtml(badgeState)}"${!configured ? ' style="border-color:var(--status-info-bg)"' : ""}>
       <div class="flex between" style="margin-bottom:0.25rem">
         <div style="display:flex;align-items:center;gap:0.5rem;min-width:0">
           ${avatar}
           <h2 style="font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</h2>
-          <span class="badge badge-${escapeHtml(app.status)}" hx-get="/apps/${encodeURIComponent(app.id)}/badge" hx-trigger="load" hx-swap="outerHTML">${escapeHtml(app.status)}</span>
+          ${badgeHtml}
           ${configured ? renderScanBadge(app) : ""}
         </div>
         ${overflowMenu}
       </div>
       ${domainLink}
-      ${statsPlaceholder}
+      ${statsBlock}
       ${unconfiguredBlock}
     </div>
   `;
