@@ -548,6 +548,9 @@ export function registerTools(server: McpServer, client: RunwayClient) {
   );
 }
 
+// Keep these templates aligned with dockerfileTemplates in
+// packages/control/src/routes/llms.ts — both flows (MCP + /llms.txt)
+// must produce a deploy that succeeds on the first try.
 function generateDockerfile(config: AppConfig): string {
   const port = config.port;
   const templates: Record<Runtime, string> = {

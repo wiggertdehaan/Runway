@@ -8,6 +8,80 @@ import { Hono } from "hono";
  */
 export const llmsRoutes = new Hono();
 
+// Dockerfile templates published in /llms.txt for agents that don't
+// use the MCP server. These must stay aligned with the templates in
+// packages/mcp/src/tools.ts (generateDockerfile) — both flows should
+// produce a deploy that succeeds on the first try.
+//
+// Each template:
+//  - upgrades OS packages right after FROM (silences scan vuln noise)
+//  - drops to a non-root user before EXPOSE
+//  - listens on the runtime's default port (3000 for node/python/go,
+//    80 for static) — that's what the gateway routes to
+const dockerfileTemplates = {
+  node: `FROM node:24-slim AS base
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-lock.yaml* package-lock.json* yarn.lock* ./
+RUN if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; \\
+    elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \\
+    else npm ci; fi
+
+FROM base AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build --if-present
+
+FROM base
+WORKDIR /app
+COPY --from=build /app .
+RUN addgroup --system app && adduser --system --ingroup app app
+USER app
+EXPOSE 3000
+CMD ["node", "."]`,
+
+  python: `FROM python:3.12-slim
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+RUN addgroup --system app && adduser --system --ingroup app app
+USER app
+EXPOSE 3000
+CMD ["python", "main.py"]`,
+
+  go: `FROM golang:1.23 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /app/server ./...
+
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /app/server /server
+EXPOSE 3000
+USER nonroot:nonroot
+ENTRYPOINT ["/server"]`,
+
+  static: `FROM nginx:1.27-alpine
+RUN apk upgrade --no-cache \\
+ && sed -i 's|pid.*nginx\\.pid;|pid /tmp/nginx.pid;|' /etc/nginx/nginx.conf \\
+ && mkdir -p /var/cache/nginx/client_temp \\
+              /var/cache/nginx/proxy_temp \\
+              /var/cache/nginx/fastcgi_temp \\
+              /var/cache/nginx/uwsgi_temp \\
+              /var/cache/nginx/scgi_temp \\
+ && chown -R nginx:nginx /var/cache/nginx /var/log/nginx /etc/nginx/conf.d
+COPY --chown=nginx:nginx . /usr/share/nginx/html
+USER nginx
+EXPOSE 80`,
+};
+
 llmsRoutes.get("/llms.txt", (c) => {
   const base =
     process.env.DASHBOARD_DOMAIN
@@ -78,31 +152,85 @@ the app will live.
 ### 3. Ensure a Dockerfile exists
 
 The deploy pipeline runs \`docker build\` on whatever you upload. The
-project root must contain a \`Dockerfile\`. If there is no Dockerfile, ask
-the user before creating one. A minimal template for each supported
-runtime:
+project root must contain a \`Dockerfile\`. If there is no Dockerfile,
+ask the user before creating one — and when you do, **copy one of the
+templates below verbatim** rather than writing your own from scratch.
+These templates are the same ones the Runway MCP server emits and have
+been tested against the security scanner; ad-hoc Dockerfiles often
+fail in subtle ways (wrong port, root user, missing OS upgrade,
+broken non-root nginx pidfile) that cost an iteration to debug.
 
-- **node**: \`FROM node:24-slim\`, \`RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*\`,
-  copy package.json + source, \`npm ci\` (or \`pnpm install --frozen-lockfile\`),
-  run \`npm run build\` if a build script exists, \`EXPOSE 3000\`, \`CMD ["node", "."]\`.
-- **python**: \`FROM python:3.12-slim\`, \`RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*\`,
-  copy requirements.txt + source, \`pip install -r requirements.txt\`,
-  \`EXPOSE 3000\`, \`CMD ["python","main.py"]\`.
-- **go**: multi-stage build from \`golang:1.23\` to \`gcr.io/distroless/static-debian12\`.
-- **static**: \`FROM nginx:1.27-alpine\`, \`RUN apk upgrade --no-cache\`,
-  create writable cache dirs and set ownership to the \`nginx\` user,
-  write a PID file to \`/tmp/nginx.pid\`, \`COPY --chown=nginx:nginx . /usr/share/nginx/html\`,
-  \`USER nginx\`, \`EXPOSE 80\`. Nginx requires writable cache and log
-  dirs to run as non-root — always prepare them before switching user.
+#### node (port 3000)
 
-**Important:** always include an OS package upgrade step (\`apt-get upgrade\`
-or \`apk upgrade\`) right after the \`FROM\` line. Base images ship with
-known vulnerabilities in OS packages — the upgrade step patches them
-before the security scan runs and prevents unnecessary warnings.
+\`\`\`dockerfile
+${dockerfileTemplates.node}
+\`\`\`
 
-The app is expected to listen on port 3000 unless the runtime is
-\`static\` (port 80). That port is already configured on the server; do
-not try to change it.
+#### python (port 3000)
+
+\`\`\`dockerfile
+${dockerfileTemplates.python}
+\`\`\`
+
+Replace \`main.py\` with your actual entrypoint. Your app must call
+\`bind("0.0.0.0", 3000)\` (or framework equivalent) — binding to
+\`127.0.0.1\` makes it unreachable from the gateway.
+
+#### go (port 3000)
+
+\`\`\`dockerfile
+${dockerfileTemplates.go}
+\`\`\`
+
+The final image is distroless: no shell, no curl, no busybox. Anything
+your binary needs (timezone data, CA bundle) must be in \`go build\`'s
+output. Listen on \`0.0.0.0:3000\`.
+
+#### static (port 80)
+
+\`\`\`dockerfile
+${dockerfileTemplates.static}
+\`\`\`
+
+The site root is the upload root: \`index.html\` must be at the top
+level of the tar, not inside \`dist/\` or \`build/\`. If you have a build
+step, run it first and tar the output directory's contents.
+
+The \`sed\` line is **not optional** — it moves nginx's pidfile from
+\`/run/nginx.pid\` (root-only) to \`/tmp/nginx.pid\` (writable by the
+\`nginx\` user). Without it the container crash-loops with
+\`open() "/run/nginx.pid" failed (13: Permission denied)\`.
+
+#### Pitfalls that cost an iteration
+
+These are the failure modes that show up most often on a first deploy:
+
+- **Bind to \`0.0.0.0\`, not \`127.0.0.1\`.** Inside a container,
+  localhost-only sockets are unreachable from the gateway. The deploy
+  succeeds but the URL returns 502.
+- **Port is fixed.** The gateway routes to 3000 (or 80 for static). If
+  your framework defaults to a different port (8000, 8080, 5000),
+  override it explicitly so it listens on the runtime's expected port.
+- **Static: build before tar.** \`COPY . /usr/share/nginx/html\` copies
+  the upload root. If your built site lives in \`dist/\`, either tar
+  from inside \`dist/\` or change the COPY to \`COPY dist/ ...\`.
+- **Don't iterate on \`scan.status: "warned"\`.** A warned deploy is
+  live and serving — \`low\` and \`medium\` findings are advisory unless
+  the user (or server admin) raises \`scan_threshold\`. Don't try to
+  fix base-image CVEs reactively unless the user asks. Only \`blocked\`
+  (HTTP 409) actually halts a deploy.
+- **Tar from the project root,** the directory containing the
+  Dockerfile. Tarring from one level up makes the Dockerfile invisible
+  to the build.
+- **\`.env\` is never deployed.** Set runtime config via
+  \`/api/v1/app/env\` (see "Environment variables" below); it survives
+  redeploys and never lands in the image. Adding \`.env\` to the tar
+  also trips the secret scanner.
+
+Each template already includes the OS package upgrade step (\`apt-get
+upgrade\` or \`apk upgrade\`) right after \`FROM\`. Don't remove it —
+that single step typically eliminates 5–20 base-image CVE warnings
+that would otherwise show up in the scan report.
 
 ### 4. Respect .dockerignore / .gitignore
 
