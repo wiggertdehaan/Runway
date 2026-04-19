@@ -14,7 +14,7 @@
     "@modelcontextprotocol/sdk": "^1.12.1",
     "ignore": "^7.0.5",
     "tar": "^7.4.3",
-    "zod": "^3.23.8"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
