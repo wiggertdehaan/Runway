@@ -14,7 +14,7 @@
     "dockerode": "^4.0.4",
     "hono": "^4.12.14",
     "js-yaml": "^4.1.0",
-    "nanoid": "^5.0.9",
+    "nanoid": "^5.1.9",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
