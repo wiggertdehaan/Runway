@@ -15,3 +15,10 @@ coverage/
 *.log
 tmp/
 .claude/
+
+# Security audit artefacts. Pentest reports contain reproduction
+# steps for (old) vulnerabilities and are kept outside the public
+# repo on purpose — anything worth tracking long-term lives in
+# CHANGELOG / release notes, not as raw findings dumps.
+SECURITY-AUDIT.md
+security-audits/
