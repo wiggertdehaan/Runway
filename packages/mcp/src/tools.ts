@@ -263,7 +263,7 @@ export function registerTools(server: McpServer, client: RunwayClient) {
     "Set environment variables for the Runway app. Variables are merged with existing ones — pass only the keys you want to add or update. Values are injected into the container on the next deploy. Do not store secrets in code; use this endpoint instead.",
     {
       env: z
-        .record(z.string())
+        .record(z.string(), z.string())
         .describe(
           'Key-value pairs to set, e.g. {"DATABASE_URL": "postgres://...", "NODE_ENV": "production"}'
         ),
