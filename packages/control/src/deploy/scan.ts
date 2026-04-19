@@ -353,21 +353,44 @@ async function checkDb(): Promise<{ ok: boolean; detail: string }> {
       DownloadedAt?: string;
       NextUpdate?: string;
     };
+    // Measure when WE last pulled the DB, not when Trivy's upstream
+    // CI last rebuilt it. Upstream publishing lag (Trivy's public DB
+    // has been known to go 48h+ between rebuilds) would otherwise
+    // raise a false alarm even when our refresh loop is working.
+    // Fall back to UpdatedAt for older metadata that predates
+    // DownloadedAt being populated.
+    const downloadedAt = meta.DownloadedAt ? new Date(meta.DownloadedAt) : null;
     const updatedAt = meta.UpdatedAt ? new Date(meta.UpdatedAt) : null;
-    if (!updatedAt || Number.isNaN(updatedAt.getTime())) {
-      return { ok: false, detail: "DB metadata has no valid UpdatedAt timestamp" };
+    const fresh =
+      downloadedAt && !Number.isNaN(downloadedAt.getTime())
+        ? downloadedAt
+        : updatedAt && !Number.isNaN(updatedAt.getTime())
+          ? updatedAt
+          : null;
+    if (!fresh) {
+      return {
+        ok: false,
+        detail: "DB metadata has no valid DownloadedAt / UpdatedAt timestamp",
+      };
     }
-    const ageMs = Date.now() - updatedAt.getTime();
+    const ageMs = Date.now() - fresh.getTime();
     const ageHours = Math.floor(ageMs / (60 * 60 * 1000));
+    const upstreamHours = updatedAt
+      ? Math.floor((Date.now() - updatedAt.getTime()) / (60 * 60 * 1000))
+      : null;
+    const upstreamNote =
+      upstreamHours !== null && upstreamHours - ageHours >= 6
+        ? ` (upstream DB itself was built ${upstreamHours}h ago)`
+        : "";
     if (ageMs > DB_STALE_AFTER_MS) {
       return {
         ok: false,
-        detail: `Vulnerability DB is ${ageHours}h old — it refreshes automatically overnight and on every deploy. If this persists for multiple days, check network connectivity from the control container.`,
+        detail: `Last vulnerability DB refresh was ${ageHours}h ago${upstreamNote}. It refreshes automatically overnight and on every deploy — if this persists, check network connectivity from the control container.`,
       };
     }
     return {
       ok: true,
-      detail: `Vulnerability DB updated ${ageHours}h ago (next update: ${meta.NextUpdate ?? "unknown"})`,
+      detail: `Vulnerability DB refreshed ${ageHours}h ago${upstreamNote}`,
     };
   } catch (err: any) {
     if (err?.code === "ENOENT") {
