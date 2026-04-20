@@ -1,7 +1,7 @@
 import { mkdir, writeFile, unlink } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import yaml from "js-yaml";
+import bcrypt from "bcryptjs";
 import type { App } from "../db/apps.js";
 
 const GATEWAY_CONFIG_DIR =
@@ -50,15 +50,13 @@ export interface AppRouteConfig {
 }
 
 /**
- * Build a Traefik-compatible htpasswd line for a single user. Uses
- * `{SHA}` format: supported by Traefik natively and derivable with
- * only node:crypto. The gateway-config volume is only readable by
- * root on the host, so an offline attack on the hash requires host
- * compromise — in which case the attacker already has the app DB.
+ * Build a Traefik-compatible htpasswd line for a single user using
+ * bcrypt, which is a slow password hashing scheme suitable for
+ * password storage.
  */
 export function buildHtpasswd(username: string, password: string): string {
-  const digest = createHash("sha1").update(password).digest("base64");
-  return `${username}:{SHA}${digest}`;
+  const hash = bcrypt.hashSync(password, 12);
+  return `${username}:${hash}`;
 }
 
 /**
