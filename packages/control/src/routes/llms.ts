@@ -55,6 +55,22 @@ USER app
 EXPOSE 3000
 CMD ["python", "main.py"]`,
 
+  pythonAlpine: `FROM python:3.12-alpine AS builder
+WORKDIR /build
+RUN apk add --no-cache build-base linux-headers libffi-dev
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --target=/install -r requirements.txt
+
+FROM python:3.12-alpine
+RUN apk upgrade --no-cache && adduser -D -u 1001 app
+WORKDIR /app
+COPY --from=builder /install /app/lib
+COPY . .
+ENV PYTHONPATH=/app/lib PYTHONUNBUFFERED=1
+USER app
+EXPOSE 3000
+CMD ["python", "main.py"]`,
+
   go: `FROM golang:1.23 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -176,6 +192,24 @@ Replace \`main.py\` with your actual entrypoint. Your app must call
 \`bind("0.0.0.0", 3000)\` (or framework equivalent) — binding to
 \`127.0.0.1\` makes it unreachable from the gateway.
 
+If \`effective_scan_threshold\` (from \`/api/v1/app\`) is \`high\` or
+stricter, prefer the Alpine variant below instead. The Debian \`slim\`
+images currently ship with HIGH-severity CVEs in OS packages that
+Debian marks as essential and cannot be removed via \`apt-get purge\`,
+so \`apt-get upgrade\` alone won't get the scan to clean. Alpine
+doesn't include those packages.
+
+#### python (Alpine, scan-strict alternative, port 3000)
+
+\`\`\`dockerfile
+${dockerfileTemplates.pythonAlpine}
+\`\`\`
+
+Multi-stage so build dependencies (\`build-base\`, \`linux-headers\`,
+\`libffi-dev\`) don't end up in the final image. If a dependency needs
+extra system libraries at runtime, add them with \`apk add --no-cache\`
+in the second stage.
+
 #### go (port 3000)
 
 \`\`\`dockerfile
@@ -226,6 +260,20 @@ These are the failure modes that show up most often on a first deploy:
   \`/api/v1/app/env\` (see "Environment variables" below); it survives
   redeploys and never lands in the image. Adding \`.env\` to the tar
   also trips the secret scanner.
+- **Webhook handlers must respond fast.** Many upstreams (Slack,
+  Stripe, GitHub, custom integrations) treat anything beyond a few
+  seconds as a timeout and retry — sometimes aggressively. If your
+  handler does real work, return \`202 Accepted\` immediately and
+  process the payload on a background worker or thread. The same
+  applies to the path you configure via \`/api/v1/app/healthcheck\`:
+  it must return 200 quickly without hitting external dependencies.
+- **GNU \`tar --exclude-from=.dockerignore\` is not equivalent to
+  Docker's \`.dockerignore\` parser.** Bare directory names like
+  \`out/\` or \`build/\` match anywhere in the tree under Docker but
+  only at the tar root under GNU tar, so build artifacts in nested
+  paths can still end up in the upload. If your tarball is
+  unexpectedly large, add explicit \`--exclude='**/out'\` flags or
+  pre-filter the file list before piping it into \`tar\`.
 
 Each template already includes the OS package upgrade step (\`apt-get
 upgrade\` or \`apk upgrade\`) right after \`FROM\`. Don't remove it —
@@ -387,6 +435,25 @@ Configure volumes **before** deploying. Data written to these paths will
 persist across redeploys. Removing a mount path from the config does
 **not** delete the underlying Docker volume — the data is still
 recoverable.
+
+### Non-root containers and volume ownership
+
+If your Dockerfile drops to a non-root user (all the templates above
+do), Docker creates the mount point owned by \`root\` on first start.
+A non-root process then can't write to it and the container crashes
+immediately. \`mkdir -p\` and \`chown\` each mount path **inside the
+Dockerfile** before the \`USER\` directive so the path exists with the
+right ownership when the volume mounts on top:
+
+\`\`\`dockerfile
+RUN addgroup --system app && adduser --system --ingroup app app \\
+ && mkdir -p /app/data /app/uploads \\
+ && chown -R app:app /app/data /app/uploads
+USER app
+\`\`\`
+
+This only matters for empty volumes; once data exists in the volume,
+ownership is preserved across redeploys.
 
 ## Custom domain
 
