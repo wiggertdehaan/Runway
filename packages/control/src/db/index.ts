@@ -266,4 +266,22 @@ export function migrate() {
   if (!deployCols.some((c) => c.name === "scan_report")) {
     db.exec(`ALTER TABLE deploys ADD COLUMN scan_report TEXT`);
   }
+
+  // Per-app activity tracking. last_request_at powers the dashboard
+  // "Active 5m / Idle 3d" label; app_request_buckets stores hourly
+  // counts for the 7-day sparkline. Both are populated by the access
+  // log tailer in deploy/activity-tailer.ts.
+  if (!appCols.some((c) => c.name === "last_request_at")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN last_request_at TEXT`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_request_buckets (
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      hour_at TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (app_id, hour_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_request_buckets_hour
+      ON app_request_buckets(hour_at);
+  `);
 }

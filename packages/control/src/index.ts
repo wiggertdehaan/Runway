@@ -5,8 +5,14 @@ import { writeDashboardRoute } from "./deploy/gateway.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
 import { refreshDb } from "./deploy/scan.js";
+import { startActivityTailer } from "./deploy/activity-tailer.js";
 
 migrate();
+
+// Tail Traefik's access log so the dashboard can show per-app
+// activity (idle vs active) and a 7-day request sparkline. No-op
+// when the log file is absent (dev / first boot).
+startActivityTailer();
 
 // Hourly housekeeping
 setInterval(() => {
