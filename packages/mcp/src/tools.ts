@@ -2,6 +2,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AppConfig, RunwayClient, Runtime } from "./client.js";
 import { tarProject } from "./tar.js";
+import { existsSync, mkdirSync, statSync } from "node:fs";
+import { readdir } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import * as tar from "tar";
 
 const RUNTIMES = ["node", "python", "go", "static"] as const;
 const SCAN_THRESHOLDS = ["none", "low", "medium", "high", "critical"] as const;
@@ -167,6 +172,128 @@ export function registerTools(server: McpServer, client: RunwayClient) {
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         isError: blocked,
+      };
+    }
+  );
+
+  server.tool(
+    "runway_pull",
+    "Pull the project source of a deployed Runway app back to a local directory. Useful when starting a fresh Claude Code session and you want to continue developing an app you previously deployed but no longer have a local copy of. The server returns the build context from the most recent successful deploy (no .git history — only the files that were uploaded). Refuses to extract into a non-empty directory unless 'force' is true.",
+    {
+      target_dir: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to extract the source into. Defaults to the current working directory. Created if it does not exist."
+        ),
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set to true to extract over an existing non-empty directory. Files are merged: existing files with the same path are overwritten, others are left in place."
+        ),
+    },
+    async ({ target_dir, force }) => {
+      const dest = target_dir ?? process.cwd();
+
+      if (!existsSync(dest)) {
+        try {
+          mkdirSync(dest, { recursive: true });
+        } catch (err: any) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed to create target directory ${dest}: ${err?.message ?? err}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      } else if (!statSync(dest).isDirectory()) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Target ${dest} exists but is not a directory.`,
+            },
+          ],
+          isError: true,
+        };
+      } else if (!force) {
+        const entries = await readdir(dest);
+        if (entries.length > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `Target directory ${dest} is not empty. ` +
+                  `Pass force=true to overwrite, or choose a different target_dir.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      let tarBuffer: Buffer | null;
+      try {
+        tarBuffer = await client.pullSource();
+      } catch (err: any) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to fetch source from server: ${err?.message ?? err}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (!tarBuffer) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "No source is saved for this app yet. Source is captured on every successful deploy. " +
+                "If the app was deployed before this feature was added, redeploy it once to enable pull.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      try {
+        await pipeline(Readable.from(tarBuffer), tar.x({ cwd: dest }));
+      } catch (err: any) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to extract source into ${dest}: ${err?.message ?? err}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `Pulled ${(tarBuffer.length / 1024).toFixed(1)} KB into ${dest}.`,
+              "",
+              "The extracted files are the build context from the most recent successful deploy",
+              "(.git history is not included). Initialize a fresh git repo if you want version control:",
+              "",
+              "  git init && git add . && git commit -m 'initial pull from runway'",
+            ].join("\n"),
+          },
+        ],
       };
     }
   );

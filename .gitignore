@@ -14,6 +14,7 @@ coverage/
 .turbo/
 *.log
 tmp/
+sources/
 .claude/
 
 # Security audit artefacts. Pentest reports contain reproduction

@@ -227,6 +227,27 @@ export class RunwayClient {
     return this.request("/app/rollback", { method: "POST" });
   }
 
+  /**
+   * Download the build context from the most recent successful deploy
+   * as a tar buffer. Returns null if the server has no source saved
+   * yet (404 — app deployed before this feature, or never deployed
+   * successfully).
+   */
+  async pullSource(): Promise<Buffer | null> {
+    const url = `${this.baseUrl}/api/v1/app/source`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Runway API error ${res.status}: ${text}`);
+    }
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  }
+
   async listDeploys(limit = 20): Promise<{
     app_id: string;
     current_image_tag: string | null;

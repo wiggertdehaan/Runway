@@ -31,6 +31,7 @@ import {
 } from "./scan.js";
 import { getSetting } from "../db/settings.js";
 import { preflightCheckTar, PreflightRejectedError } from "./preflight.js";
+import { saveSource } from "./source.js";
 export { PreflightRejectedError } from "./preflight.js";
 
 function dockerSafeId(appId: string): string {
@@ -264,6 +265,19 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     scanSummary,
     scanReport: scan,
   });
+
+  // Persist the build context so the user can later pull the project
+  // source back to a fresh working directory (runway_pull / GET
+  // /api/v1/app/source). Best-effort: don't fail the deploy if the
+  // disk write trips. Only saved on a successful deploy so a broken
+  // upload never replaces the last working source.
+  if (tarBuffer) {
+    try {
+      saveSource(app.id, tarBuffer);
+    } catch {
+      // ignore
+    }
+  }
 
   await pruneOldImages(app.id);
 
