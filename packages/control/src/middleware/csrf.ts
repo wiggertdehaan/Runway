@@ -36,6 +36,18 @@ export function csrfField(c: Context): string {
   return `<input type="hidden" name="${CSRF_FIELD}" value="${token}" />`;
 }
 
+/**
+ * Inject a hidden CSRF input right after every <form ... method="POST" ...>
+ * tag in the given HTML. Used by both layout() and partial responses
+ * (e.g. /partials/apps) so htmx-swapped fragments keep working without
+ * requiring every form template to remember to render csrfField()
+ * itself.
+ */
+export function injectCsrfFields(html: string, c: Context): string {
+  const field = csrfField(c);
+  return html.replace(/(<form\s[^>]*method="POST"[^>]*>)/gi, `$1${field}`);
+}
+
 export async function verifyCsrf(c: Context, next: Next) {
   if (c.req.method !== "POST") {
     return next();

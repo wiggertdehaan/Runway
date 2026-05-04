@@ -78,7 +78,7 @@ import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js
 import { getAppAllowedEmails, addAppAllowedEmail, removeAppAllowedEmail } from "../db/app-emails.js";
 import { appContainerName, destroyApp, rollbackApp } from "../deploy/index.js";
 import { docker } from "../deploy/docker.js";
-import { csrfField } from "../middleware/csrf.js";
+import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
 import { validateCustomDomain } from "../util/domain.js";
 import { assertSafeOutboundUrl } from "../util/ssrf-guard.js";
@@ -150,6 +150,8 @@ function layout(
   const csrf = opts?.csrf;
   const admin = opts?.isAdmin ?? false;
   if (csrf) {
+    // Same regex as injectCsrfFields(); kept inline because layout
+    // already has the rendered csrf string and doesn't need a Context.
     body = body.replace(
       /(<form\s[^>]*method="POST"[^>]*>)/gi,
       `$1${csrf}`
@@ -817,7 +819,11 @@ webRoutes.get("/", async (c) => {
 webRoutes.get("/partials/apps", async (c) => {
   const user = c.get("user");
   const dashboardDomain = process.env.DASHBOARD_DOMAIN ?? "";
-  return c.html(await renderAppsLive(user, dashboardDomain));
+  const html = await renderAppsLive(user, dashboardDomain);
+  // Partials don't go through layout(), so inject CSRF tokens here
+  // ourselves — the dashboard refresh swaps these cards in every 5s
+  // and their delete forms need a fresh hidden _csrf input.
+  return c.html(injectCsrfFields(html, c));
 });
 
 webRoutes.post("/apps", (c) => {
