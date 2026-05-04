@@ -16,7 +16,10 @@ import { listApps, createApp, deleteApp, getApp } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import { getAppStats, getAppStatsBulk, type AppStats } from "../deploy/stats.js";
-import { formatBytes, formatRelative } from "../util/format.js";
+import { formatActivity, formatBytes, formatRelative, type ActivityTone } from "../util/format.js";
+import { getBucketsBulk } from "../db/activity.js";
+
+const SPARKLINE_HOURS = 7 * 24;
 import {
   authenticate,
   clearTotp,
@@ -692,8 +695,17 @@ async function renderAppsLive(
   // the outer swap would paint "..." placeholders that a second
   // round-trip then fills in — visible flicker on every 5s refresh.
   const allStats = await getAppStatsBulk(apps);
+  const buckets = getBucketsBulk(
+    apps.map((a) => a.id),
+    SPARKLINE_HOURS
+  );
   const appCards = apps
-    .map((app, i) => renderAppCard(app, dashboardDomain, allStats[i] ?? null))
+    .map((app, i) =>
+      renderAppCard(app, dashboardDomain, allStats[i] ?? null, {
+        lastRequestAt: app.last_request_at,
+        buckets: buckets.get(app.id) ?? [],
+      })
+    )
     .join("");
 
   const running = apps.filter((a) => a.status === "running").length;
@@ -1102,10 +1114,71 @@ function renderScanBadge(app: ReturnType<typeof listApps>[number]): string {
   return `<a href="/apps/${encodeURIComponent(app.id)}#scan" class="badge" style="background:${color};text-decoration:none;font-size:0.7rem">${label}</a>`;
 }
 
+function activityToneColor(tone: ActivityTone): string {
+  switch (tone) {
+    case "active":
+      return "var(--status-success)";
+    case "recent":
+      return "var(--text)";
+    case "idle":
+    case "none":
+    default:
+      return "var(--text-muted)";
+  }
+}
+
+/**
+ * Inline SVG sparkline of hourly request counts. Bars stretch to the
+ * card width via preserveAspectRatio="none" so we don't have to know
+ * the column size at render time. Renders nothing when there is no
+ * traffic at all — the "No traffic yet" label carries that case.
+ */
+function renderSparkline(buckets: number[], tone: ActivityTone): string {
+  if (buckets.length === 0) return "";
+  const max = buckets.reduce((m, v) => (v > m ? v : m), 0);
+  if (max === 0) {
+    return `<div style="height:20px;border-radius:3px;background:var(--bg);border:1px solid var(--border)" title="No requests in the last 7 days"></div>`;
+  }
+  const color =
+    tone === "active"
+      ? "var(--status-success)"
+      : tone === "recent"
+        ? "var(--brand)"
+        : "var(--text-muted)";
+  const w = buckets.length;
+  const h = 24;
+  const bars = buckets
+    .map((c, i) => {
+      if (c === 0) return "";
+      const barH = Math.max(1, (c / max) * h);
+      return `<rect x="${i}" y="${(h - barH).toFixed(2)}" width="0.9" height="${barH.toFixed(2)}" fill="${color}" />`;
+    })
+    .join("");
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" width="100%" height="20" style="display:block" aria-hidden="true">${bars}</svg>`;
+}
+
+function renderActivityRow(
+  lastRequestAt: string | null,
+  buckets: number[]
+): string {
+  const { label, tone } = formatActivity(lastRequestAt);
+  const total = buckets.reduce((s, v) => s + v, 0);
+  const tooltip = total > 0 ? `${total} requests in the last 7 days` : "";
+  return `
+    <div style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)" title="${escapeHtml(tooltip)}">
+      <div class="flex between" style="margin-bottom:0.3rem">
+        <span class="stat-label">Activity</span>
+        <span style="font-size:0.7rem;color:${activityToneColor(tone)};font-weight:500">${escapeHtml(label)}</span>
+      </div>
+      ${renderSparkline(buckets, tone)}
+    </div>`;
+}
+
 function renderAppCard(
   app: ReturnType<typeof listApps>[number],
   dashboardDomain: string,
-  stats: AppStats | null = null
+  stats: AppStats | null = null,
+  activity: { lastRequestAt: string | null; buckets: number[] } | null = null
 ): string {
   const configured = !!(app.name && app.runtime);
   const title = configured
@@ -1183,6 +1256,11 @@ function renderAppCard(
       </div>`
     : "";
 
+  const activityBlock =
+    configured && activity
+      ? renderActivityRow(activity.lastRequestAt, activity.buckets)
+      : "";
+
   return `
     <div class="card app-card status-${escapeHtml(badgeState)}" data-name="${escapeHtml(app.name ?? app.id)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${escapeHtml(badgeState)}"${!configured ? ' style="border-color:var(--status-info-bg)"' : ""}>
       <div class="flex between" style="margin-bottom:0.25rem">
@@ -1196,6 +1274,7 @@ function renderAppCard(
       </div>
       ${domainLink}
       ${statsBlock}
+      ${activityBlock}
       ${unconfiguredBlock}
     </div>
   `;

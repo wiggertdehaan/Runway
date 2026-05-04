@@ -13,7 +13,8 @@ export type SettingKey =
   | "oauth_google_client_id"
   | "oauth_google_client_secret"
   | "oauth_microsoft_client_id"
-  | "oauth_microsoft_client_secret";
+  | "oauth_microsoft_client_secret"
+  | "activity_log_offset";
 
 export function getSetting(key: SettingKey): string | undefined {
   const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as

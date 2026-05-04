@@ -42,6 +42,7 @@ export interface App {
   basic_auth_enabled: number;
   basic_auth_username: string | null;
   basic_auth_htpasswd: string | null;
+  last_request_at: string | null;
   created_at: string;
   updated_at: string;
 }
