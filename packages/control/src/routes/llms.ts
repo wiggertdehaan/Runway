@@ -666,6 +666,41 @@ Rollback restarts the container with that image. Env vars, volumes,
 and other configuration are preserved. Only successful deploys are
 eligible; failed/blocked deploys never produced a runnable image.
 
+## Pull project source
+
+Download the build context from the most recent successful deploy as
+a tar stream. Useful when starting a fresh session and you want to
+keep developing an app you previously deployed but no longer have a
+local checkout of.
+
+\`\`\`bash
+curl -sS ${base}/api/v1/app/source \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -o source.tar
+mkdir my-app && tar -xf source.tar -C my-app
+\`\`\`
+
+Or in one go, into the current directory (must be empty):
+
+\`\`\`bash
+curl -sS ${base}/api/v1/app/source \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  | tar -xf -
+\`\`\`
+
+Notes:
+
+- The source is whatever was uploaded on the last successful deploy —
+  the same file set the build saw, post \`.dockerignore\` /
+  \`.gitignore\` filtering. **\`.git\` history is not included**;
+  initialize a fresh repo with \`git init\` after extracting if you
+  want version control.
+- Returns **404** if no source is saved yet (app deployed before this
+  feature was added, or never deployed successfully). Redeploy once
+  to populate it.
+- Only the latest successful deploy is retained — there is no
+  per-deploy source history.
+
 ## Error handling
 
 - \`401 Unauthorized\` — the Bearer token is missing or invalid.

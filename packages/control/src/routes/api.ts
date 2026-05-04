@@ -17,6 +17,8 @@ import {
   ScanBlockedError,
   PreflightRejectedError,
 } from "../deploy/index.js";
+import { sourcePath, sourceStat } from "../deploy/source.js";
+import { readFile } from "node:fs/promises";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, type Threshold } from "../deploy/scan.js";
 import { getDeploy, getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
@@ -268,6 +270,38 @@ apiRoutes.post("/app/deploy", async (c) => {
       500
     );
   }
+});
+
+/**
+ * Download the build context from the most recent successful deploy
+ * as a tar stream. Lets the user pull the project source back to a
+ * fresh working directory (e.g. a new Claude Code session) without
+ * the original local checkout.
+ */
+apiRoutes.get("/app/source", async (c) => {
+  const app = c.get("app");
+  const stat = sourceStat(app.id);
+  if (!stat) {
+    return c.json(
+      {
+        error: "No source available for this app",
+        hint: "Source is saved on each successful deploy. Run a deploy first.",
+      },
+      404
+    );
+  }
+  let buf: Buffer;
+  try {
+    buf = await readFile(sourcePath(app.id));
+  } catch (err: any) {
+    return c.json({ error: err?.message ?? "Failed to read source" }, 500);
+  }
+  const filename = `${slugify(app.name ?? app.id) || app.id}-source.tar`;
+  c.header("Content-Type", "application/x-tar");
+  c.header("Content-Length", String(stat.bytes));
+  c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  c.header("Last-Modified", stat.mtime.toUTCString());
+  return c.body(new Uint8Array(buf));
 });
 
 apiRoutes.get("/app/deploys/:deployId/scan", (c) => {
