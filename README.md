@@ -93,9 +93,12 @@ prints specific troubleshooting commands.
 
 ### Option A — zero install (recommended)
 
-Your Runway server publishes its full API documentation at `/llms.txt`.
-Claude Code fetches it and follows the instructions — no plugins or MCP
-servers needed.
+Your Runway server publishes its full API documentation at `/llms.txt`,
+including a pre-build *"Before you start building"* section with
+runtime-agnostic guardrails (non-root, pinned versions, health checks)
+and a per-runtime security checklist — so Claude Code gets the project
+right on day one and the first deploy passes the scan. No plugins or
+MCP servers needed.
 
 1. Create an app in the dashboard and copy the deploy instruction.
 2. Open your project in Claude Code and paste it.
@@ -359,6 +362,7 @@ Planned improvements — contributions welcome:
 - **App detail: sticky meta bar + scan in deploy table** — sticky summary bar (domain/status/uptime) across tabs; scan badge inline per deploy row instead of separate section
 - **Audit log filters** — filter by user/action/date, colored action badges, pagination, CSV export
 - **Multiple custom domains per app** — currently limited to one custom domain plus the auto-generated subdomain
+- ~~Pre-build guardrails in `/llms.txt`~~ *(v0.11 — "Before you start building" section with runtime-agnostic rules and per-runtime OWASP checklist, so agents produce a Runway-proof project on the first try)*
 - ~~Server-wide scan floor~~ *(v0.5.4 — admin-configurable minimum threshold that all apps must respect, with per-app exemption for admins; low findings muted in badge and report UI)*
 - ~~Deploy version history UI~~ *(v0.5.2 — dashboard table of recent deploys with one-click restore to any successful version, also via API and MCP)*
 - **Activity feed** — show recent deploys, status changes, and events on the dashboard
