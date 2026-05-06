@@ -14,6 +14,7 @@ export interface Skill {
   is_managed: number;
   approved_by: string | null;
   approved_at: string | null;
+  bundle_sha256: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -95,18 +96,32 @@ export interface UpsertSkillInput {
   description?: string | null;
   version?: string;
   is_managed?: boolean;
+  source_url?: string | null;
+  signed?: boolean;
+  bundle_sha256?: string | null;
+  approved_by?: string | null;
 }
 
 export function upsertSkill(input: UpsertSkillInput): void {
+  const stamp = input.approved_by ? "datetime('now')" : "approved_at";
   db.prepare(
-    `INSERT INTO skills (id, layer, name, description, version, is_managed, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    `INSERT INTO skills (
+       id, layer, name, description, version, is_managed,
+       source_url, signed, bundle_sha256, approved_by, approved_at,
+       updated_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${input.approved_by ? "datetime('now')" : "NULL"}, datetime('now'))
      ON CONFLICT(id) DO UPDATE SET
        layer = excluded.layer,
        name = excluded.name,
        description = excluded.description,
        version = excluded.version,
        is_managed = excluded.is_managed,
+       source_url = excluded.source_url,
+       signed = excluded.signed,
+       bundle_sha256 = excluded.bundle_sha256,
+       approved_by = COALESCE(excluded.approved_by, skills.approved_by),
+       approved_at = ${stamp},
        updated_at = datetime('now')`,
   ).run(
     input.id,
@@ -115,7 +130,20 @@ export function upsertSkill(input: UpsertSkillInput): void {
     input.description ?? null,
     input.version ?? "0.0.1",
     input.is_managed ? 1 : 0,
+    input.source_url ?? null,
+    input.signed ? 1 : 0,
+    input.bundle_sha256 ?? null,
+    input.approved_by ?? null,
   );
+}
+
+/**
+ * Drop every file row attached to a skill. Used before re-importing
+ * a curated skill so a renamed-or-removed file in the upstream bundle
+ * doesn't linger in our copy.
+ */
+export function deleteSkillFiles(skillId: string): void {
+  db.prepare(`DELETE FROM skill_files WHERE skill_id = ?`).run(skillId);
 }
 
 export function putSkillFile(

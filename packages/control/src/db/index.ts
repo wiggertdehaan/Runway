@@ -287,8 +287,10 @@ export function migrate() {
 
   // Phase 2: skill distribution. Developer tokens authenticate Claude
   // Code (or any MCP client) against /mcp; skills + skill_files store
-  // SKILL.md and assets; skill_audit tracks admin approve/disable;
-  // app_skill_profiles is a per-app suggestion list, not a gate.
+  // SKILL.md and assets; per-skill admin actions are recorded in the
+  // shared audit_log table (skill_uploaded / enabled / disabled /
+  // deleted); app_skill_profiles is a per-app suggestion list, not a
+  // gate.
   db.exec(`
     CREATE TABLE IF NOT EXISTS dev_tokens (
       id TEXT PRIMARY KEY,
@@ -325,20 +327,24 @@ export function migrate() {
       PRIMARY KEY (skill_id, path)
     );
 
-    CREATE TABLE IF NOT EXISTS skill_audit (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      skill_id TEXT NOT NULL,
-      action TEXT NOT NULL,
-      user_id TEXT,
-      notes TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_skill_audit_skill ON skill_audit(skill_id);
-
     CREATE TABLE IF NOT EXISTS app_skill_profiles (
       app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
       skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
       PRIMARY KEY (app_id, skill_id)
     );
   `);
+
+  // Drop the old skill_audit table on installs that ran the 0.13.0
+  // migration. Skill admin actions are recorded in the shared
+  // audit_log table; the dedicated table was never written to.
+  db.exec(`DROP TABLE IF EXISTS skill_audit`);
+
+  // bundle_sha256 records the hash computed at curated-import time so
+  // an admin can spot a silent upstream change on re-import.
+  const skillCols = db.prepare("PRAGMA table_info(skills)").all() as Array<{
+    name: string;
+  }>;
+  if (!skillCols.some((c) => c.name === "bundle_sha256")) {
+    db.exec(`ALTER TABLE skills ADD COLUMN bundle_sha256 TEXT`);
+  }
 }
