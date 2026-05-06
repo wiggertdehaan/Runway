@@ -124,6 +124,13 @@ claude mcp add runway-skills --transport http \
 
 No clone, no per-project install — the skills come straight from
 your Runway instance and stay current as the platform evolves.
+Admins can also import **curated** skills directly from public
+GitHub repos (e.g. `anthropics/skills/pdf`) — Runway fetches the
+bundle, hashes it (SHA-256), and marks it `signed` if the org is in
+the trusted-publisher whitelist. Or paste your own **custom**
+SKILL.md into the dashboard for org-specific guidance (house style,
+internal API conventions, etc.). All three layers are served over
+the same MCP endpoint.
 
 ### Option C — Local MCP server (legacy, app-scoped)
 
@@ -248,6 +255,13 @@ the image is built but never started, and the previously running
 container keeps serving traffic. Findings are available in the deploy
 response, on the dashboard, and via `runway_get_scan` from the MCP.
 
+A **periodic rescan** runs Trivy against every running app's current
+image once a day so CVEs published after the deploy gate ran still
+surface. The latest result is shown on the app detail page, and a
+new HIGH/CRITICAL finding (compared to the previous periodic scan)
+fires the configured webhook. There is also a manual *"Rescan now"*
+button for admins.
+
 ### Security
 
 - Passwords hashed with scrypt, constant-time comparison
@@ -311,8 +325,15 @@ Requires Node.js 24+ and pnpm.
 ```bash
 pnpm install
 pnpm typecheck
+pnpm test                            # vitest, control package
 pnpm --filter @runway/control dev   # Dashboard on http://localhost:3000
 ```
+
+The test suite is small and intentionally narrow: pure functions
+only (parsers, hashers, validators, formatters, the SSRF allowlist,
+the scan-threshold logic). Anything that touches HTTP, the database,
+or Docker is verified by a round-trip on the dev server, not in
+isolation.
 
 ## Security notes
 
@@ -384,12 +405,15 @@ Planned improvements — contributions welcome:
 - **App detail: sticky meta bar + scan in deploy table** — sticky summary bar (domain/status/uptime) across tabs; scan badge inline per deploy row instead of separate section
 - **Audit log filters** — filter by user/action/date, colored action badges, pagination, CSV export
 - **Multiple custom domains per app** — currently limited to one custom domain plus the auto-generated subdomain
+- ~~Periodic image rescan~~ *(v0.15 — daily Trivy rerun against every running app's image, surfaces new HIGH/CRITICAL CVEs published after the deploy gate, with manual "Rescan now" button and webhook on new severe findings)*
+- ~~Test suite~~ *(v0.15 — vitest harness for pure functions: source parsers, hashers, validators, formatters, SSRF allowlist, scan-threshold logic; 81 cases, runs in <500 ms)*
+- ~~Curated skill import~~ *(v0.14 — admin imports skills from public GitHub repos by source identifier; bundle is fetched, SHA-256 hashed, and tagged `signed` when the org is in the trusted-publisher whitelist)*
 - ~~Custom skills + per-app suggestions~~ *(v0.13 — admin uploads custom SKILL.md content on /skills with enable/disable + delete; per-app multiselect of "relevant skills" injected into `/api/v1/app` so agents can prioritize; all mutations are audit-logged)*
 - ~~Built-in MCP skill server~~ *(v0.12 — Runway hosts four built-in skills via remote MCP; users mint a developer token on /account and paste a one-line `claude mcp add` command to wire it into Claude Code)*
 - ~~Pre-build guardrails in `/llms.txt`~~ *(v0.11 — "Before you start building" section with runtime-agnostic rules and per-runtime OWASP checklist, so agents produce a Runway-proof project on the first try)*
 - ~~Server-wide scan floor~~ *(v0.5.4 — admin-configurable minimum threshold that all apps must respect, with per-app exemption for admins; low findings muted in badge and report UI)*
 - ~~Deploy version history UI~~ *(v0.5.2 — dashboard table of recent deploys with one-click restore to any successful version, also via API and MCP)*
-- **Activity feed** — show recent deploys, status changes, and events on the dashboard
+- ~~Per-app activity indicator~~ *(v0.10 — dashboard shows live "Active 5m / Idle 3d" labels and a 7-day request sparkline per app, fed by a Traefik access-log tailer)*
 - **Multiple deploy targets** — support deploying to multiple servers from a single dashboard
 - ~~SSO support~~ *(v0.6 — Google + Microsoft OAuth2 for dashboard login, Traefik forward-auth for per-app SSO with email allowlists)*
 - ~~Per-app basic auth~~ *(v0.5 — toggle HTTP basic auth at the gateway per app, set via dashboard or MCP, no redeploy needed)*
