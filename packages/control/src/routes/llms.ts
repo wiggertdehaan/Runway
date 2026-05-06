@@ -171,7 +171,7 @@ for actions (configure, deploy, rollback). All paths are under
 | Method | Path                          | Body                                                                                  |
 |--------|-------------------------------|----------------------------------------------------------------------------------------|
 | GET    | \`/app\`                        | —                                                                                      |
-| POST   | \`/app/configure\`              | \`{"name":"…","runtime":"node|python|go|static","scan_threshold"?:"none|low|…"}\`  |
+| POST   | \`/app/configure\`              | \`{"name":"…","runtime":"node|python|go|static","scan_threshold"?:"none|low|…","skill_ids"?:["…"]}\` |
 | POST   | \`/app/deploy\`                 | tar stream (\`Content-Type: application/x-tar\`)                                       |
 | POST   | \`/app/rollback\`               | \`{}\` or \`{"deploy_id":42}\`                                                           |
 | GET    | \`/app/source\`                 | — (returns tar stream)                                                                 |
@@ -237,6 +237,14 @@ curl -sS -X POST ${base}/api/v1/app/configure \\
 The response echoes the config and includes the computed \`domain\` (e.g.
 \`my-bot.runway.example.com\`). Show that to the user so they know where
 the app will live.
+
+You may optionally pass \`skill_ids\` (array of strings) to set the
+per-app skill suggestions in one step — same effect as
+\`PUT /app/skills\` later. The admin will usually have picked these
+when the API key was created in the dashboard, so the field is only
+needed when the agent learns app-specific context (e.g. "this is a
+data-pipeline app, suggest the relevant data-skill") that wasn't
+known at key-creation time.
 
 ### 3. Ensure a Dockerfile exists
 

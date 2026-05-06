@@ -29,6 +29,33 @@ import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import { getAppAllowedEmails, setAppAllowedEmails } from "../db/app-emails.js";
 import { getAppSkillIds, setAppSkillIds } from "../db/app-skills.js";
 import { getSkill, listEnabledSkills } from "../db/skills.js";
+
+/**
+ * Validate a JSON `skill_ids` value to a clean string array of
+ * currently-enabled skill ids. Returns either `{ ok: true, ids }` or
+ * `{ ok: false, error }`. Used by /app/configure (optional creation
+ * input) and /app/skills (full overwrite).
+ */
+function validateSkillIds(
+  raw: unknown,
+): { ok: true; ids: string[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: "skill_ids must be an array" };
+  }
+  const requested = raw.filter((v): v is string => typeof v === "string");
+  if (requested.length !== raw.length) {
+    return { ok: false, error: "skill_ids must contain only strings" };
+  }
+  const enabled = new Set(listEnabledSkills().map((s) => s.id));
+  const unknown = requested.filter((id) => !enabled.has(id));
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      error: `Unknown or disabled skills: ${unknown.join(", ")}`,
+    };
+  }
+  return { ok: true, ids: requested };
+}
 import { validateCustomDomain } from "../util/domain.js";
 
 type Env = { Variables: { app: App } };
@@ -154,9 +181,19 @@ apiRoutes.post("/app/configure", async (c) => {
     patch.scan_threshold = body.scan_threshold;
   }
 
+  let skillIds: string[] | null = null;
+  if (body.skill_ids !== undefined) {
+    const result = validateSkillIds(body.skill_ids);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    skillIds = result.ids;
+  }
+
   const updated = updateApp(app.id, patch);
   if (!updated) {
     return c.json({ error: "App not found" }, 404);
+  }
+  if (skillIds !== null) {
+    setAppSkillIds(updated.id, skillIds);
   }
 
   return c.json(toConfigResponse(updated));
@@ -705,26 +742,13 @@ apiRoutes.get("/app/skills", (c) => {
 apiRoutes.put("/app/skills", async (c) => {
   const app = c.get("app");
   const body = await c.req.json().catch(() => null);
-  if (!body || typeof body !== "object" || !Array.isArray(body.skill_ids)) {
-    return c.json({ error: "skill_ids must be an array" }, 400);
+  if (!body || typeof body !== "object") {
+    return c.json({ error: "Invalid JSON body" }, 400);
   }
+  const result = validateSkillIds(body.skill_ids);
+  if (!result.ok) return c.json({ error: result.error }, 400);
 
-  const requested = body.skill_ids.filter(
-    (id: unknown): id is string => typeof id === "string",
-  );
-
-  // Reject ids that don't exist or aren't enabled — silently
-  // accepting them would let the dashboard show stale entries.
-  const enabled = new Set(listEnabledSkills().map((s) => s.id));
-  const unknown = requested.filter((id: string) => !enabled.has(id));
-  if (unknown.length > 0) {
-    return c.json(
-      { error: `Unknown or disabled skills: ${unknown.join(", ")}` },
-      400,
-    );
-  }
-
-  setAppSkillIds(app.id, requested);
+  setAppSkillIds(app.id, result.ids);
   return c.json({ app_id: app.id, skill_ids: getAppSkillIds(app.id) });
 });
 

@@ -836,9 +836,25 @@ webRoutes.get("/", async (c) => {
       ` : ""}
       <div class="flex between" style="margin-bottom:1rem">
         <h1 style="margin:0">Apps</h1>
-        <form method="POST" action="/apps" style="margin:0">
-          <button type="submit" style="width:auto">+ New app</button>
-        </form>
+        <details style="margin:0">
+          <summary style="cursor:pointer;display:inline-block;padding:0.55rem 1rem;background:var(--brand);color:#fff;border-radius:6px;font-weight:600;font-size:0.9rem;list-style:none">+ New app</summary>
+          <form method="POST" action="/apps" style="margin:0.75rem 0 0;padding:1rem;background:var(--card);border:1px solid var(--border);border-radius:6px;min-width:340px;position:absolute;right:1rem;z-index:5">
+            ${csrfField(c)}
+            ${
+              renderCreateAppSkillPicker(listEnabledSkills())
+            }
+            <div class="flex" style="gap:0.5rem;margin-top:0.75rem;justify-content:flex-end">
+              <button type="submit" style="width:auto">Create</button>
+            </div>
+            <p class="meta" style="font-size:0.75rem;margin:0.6rem 0 0">
+              You can adjust the skill selection later on the app's
+              detail page. Built-in skills are reachable for every app
+              over MCP regardless of this checklist; this list only
+              prioritises which skills the agent reads first for this
+              app.
+            </p>
+          </form>
+        </details>
       </div>
       ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
       <div id="apps-live" hx-get="/partials/apps" hx-trigger="every 5s" hx-swap="innerHTML">
@@ -860,11 +876,57 @@ webRoutes.get("/partials/apps", async (c) => {
   return c.html(injectCsrfFields(html, c));
 });
 
-webRoutes.post("/apps", (c) => {
+webRoutes.post("/apps", async (c) => {
   const user = c.get("user");
+  const body = await c.req.parseBody({ all: true });
+  const raw = body["skill_ids"];
+  const requested = Array.isArray(raw)
+    ? (raw.filter((v) => typeof v === "string") as string[])
+    : typeof raw === "string"
+      ? [raw]
+      : [];
+  const enabled = new Set(listEnabledSkills().map((s) => s.id));
+  const valid = requested.filter((id) => enabled.has(id));
+
   const app = createApp(user.username);
+  if (valid.length > 0) {
+    setAppSkillIds(app.id, valid);
+  }
   return c.redirect(`/?new=${encodeURIComponent(app.id)}`);
 });
+
+/**
+ * Skill multiselect rendered into the dashboard's "+ New app"
+ * dropdown. Built-in skills (lifecycle helpers like runway-bootstrap
+ * and runway-deploy) are pre-checked because they apply to every
+ * app; curated and custom skills start unchecked so the admin can
+ * opt them in deliberately. The same checkbox UI on the app detail
+ * page is the place to revisit this later.
+ */
+function renderCreateAppSkillPicker(skills: ReturnType<typeof listEnabledSkills>): string {
+  if (skills.length === 0) {
+    return `<p class="meta" style="margin:0;font-size:0.8rem">No skills configured yet — create the app and configure them later.</p>`;
+  }
+  const rows = skills
+    .map(
+      (s) => `
+        <label style="display:flex;gap:0.5rem;align-items:flex-start;font-size:0.8rem;cursor:pointer">
+          <input type="checkbox" name="skill_ids" value="${escapeHtml(s.id)}" ${s.layer === "builtin" ? "checked" : ""} style="margin-top:0.2rem" />
+          <span>
+            <strong>${escapeHtml(s.name)}</strong>
+            <span class="meta" style="margin-left:0.4rem;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.04em">${escapeHtml(s.layer)}</span>
+            ${s.description ? `<br /><span class="meta" style="font-size:0.75rem">${escapeHtml(s.description)}</span>` : ""}
+          </span>
+        </label>`,
+    )
+    .join("");
+  return `
+    <strong style="font-size:0.85rem">Skills for this app</strong>
+    <div style="display:flex;flex-direction:column;gap:0.4rem;margin-top:0.5rem;max-height:240px;overflow-y:auto;padding-right:0.25rem">
+      ${rows}
+    </div>
+  `;
+}
 
 function renderDeployHistory(
   app: ReturnType<typeof listApps>[number]
