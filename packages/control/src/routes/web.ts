@@ -834,28 +834,50 @@ webRoutes.get("/", async (c) => {
           </p>
         </div>
       ` : ""}
-      <div class="flex between" style="margin-bottom:1rem">
+      <div class="flex between" style="margin-bottom:1rem;align-items:flex-start;flex-wrap:wrap;gap:0.75rem">
         <h1 style="margin:0">Apps</h1>
-        <details style="margin:0">
-          <summary style="cursor:pointer;display:inline-block;padding:0.55rem 1rem;background:var(--brand);color:#fff;border-radius:6px;font-weight:600;font-size:0.9rem;list-style:none">+ New app</summary>
-          <form method="POST" action="/apps" style="margin:0.75rem 0 0;padding:1rem;background:var(--card);border:1px solid var(--border);border-radius:6px;min-width:340px;position:absolute;right:1rem;z-index:5">
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:0.5rem">
+          <div class="flex" style="gap:0.5rem;flex-wrap:wrap;justify-content:flex-end">
+            <form method="POST" action="/apps" style="margin:0">
+              ${csrfField(c)}
+              <button type="submit" style="width:auto">+ New app</button>
+            </form>
+            <details style="margin:0">
+              <summary class="ghost" style="cursor:pointer;display:inline-block;padding:0.5rem 0.85rem;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;list-style:none">+ with skills&hellip;</summary>
+            </details>
+          </div>
+          <form method="POST" action="/apps" id="new-app-with-skills" style="display:none;margin:0;padding:1rem 1.25rem;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;min-width:360px;max-width:480px">
             ${csrfField(c)}
-            ${
-              renderCreateAppSkillPicker(listEnabledSkills())
-            }
-            <div class="flex" style="gap:0.5rem;margin-top:0.75rem;justify-content:flex-end">
-              <button type="submit" style="width:auto">Create</button>
+            ${renderCreateAppSkillPicker(listEnabledSkills())}
+            <div class="flex" style="gap:0.5rem;margin-top:0.85rem;justify-content:flex-end">
+              <button type="submit" style="width:auto">Create with selected skills</button>
             </div>
-            <p class="meta" style="font-size:0.75rem;margin:0.6rem 0 0">
-              You can adjust the skill selection later on the app's
-              detail page. Built-in skills are reachable for every app
-              over MCP regardless of this checklist; this list only
-              prioritises which skills the agent reads first for this
-              app.
+            <p class="meta" style="font-size:0.7rem;margin:0.6rem 0 0;line-height:1.4">
+              You can revisit this list anytime on the app's detail
+              page. Built-in skills are reachable over MCP for every
+              app — this list only prioritises which skills the agent
+              reads first for this app.
             </p>
           </form>
-        </details>
+        </div>
       </div>
+      <script>
+        // Show the skill-picker panel when "with skills…" is opened.
+        // Uses native <details> as the trigger; the actual form lives
+        // outside <details> so the panel renders inline (no absolute
+        // overlay) and stays full width on narrow screens.
+        document.querySelectorAll('details > summary').forEach((s) => {
+          if (s.textContent && s.textContent.includes('with skills')) {
+            const det = s.parentElement;
+            const form = document.getElementById('new-app-with-skills');
+            if (det && form) {
+              det.addEventListener('toggle', () => {
+                form.style.display = det.open ? 'block' : 'none';
+              });
+            }
+          }
+        });
+      </script>
       ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
       <div id="apps-live" hx-get="/partials/apps" hx-trigger="every 5s" hx-swap="innerHTML">
         ${appsHtml}
@@ -896,33 +918,35 @@ webRoutes.post("/apps", async (c) => {
 });
 
 /**
- * Skill multiselect rendered into the dashboard's "+ New app"
- * dropdown. Built-in skills (lifecycle helpers like runway-bootstrap
+ * Skill multiselect rendered into the "+ with skills…" panel on the
+ * dashboard. Built-in skills (lifecycle helpers like runway-bootstrap
  * and runway-deploy) are pre-checked because they apply to every
  * app; curated and custom skills start unchecked so the admin can
- * opt them in deliberately. The same checkbox UI on the app detail
- * page is the place to revisit this later.
+ * opt them in deliberately. Each row is one line with a small (i)
+ * tooltip carrying the SKILL.md description, so the panel stays
+ * compact even with a dozen skills enabled.
  */
 function renderCreateAppSkillPicker(skills: ReturnType<typeof listEnabledSkills>): string {
   if (skills.length === 0) {
     return `<p class="meta" style="margin:0;font-size:0.8rem">No skills configured yet — create the app and configure them later.</p>`;
   }
   const rows = skills
-    .map(
-      (s) => `
-        <label style="display:flex;gap:0.5rem;align-items:flex-start;font-size:0.8rem;cursor:pointer">
-          <input type="checkbox" name="skill_ids" value="${escapeHtml(s.id)}" ${s.layer === "builtin" ? "checked" : ""} style="margin-top:0.2rem" />
-          <span>
-            <strong>${escapeHtml(s.name)}</strong>
-            <span class="meta" style="margin-left:0.4rem;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.04em">${escapeHtml(s.layer)}</span>
-            ${s.description ? `<br /><span class="meta" style="font-size:0.75rem">${escapeHtml(s.description)}</span>` : ""}
-          </span>
-        </label>`,
-    )
+    .map((s) => {
+      const tooltip = s.description
+        ? `<span title="${escapeHtml(s.description)}" style="display:inline-block;width:1rem;height:1rem;line-height:1rem;text-align:center;font-size:0.7rem;border:1px solid var(--border);border-radius:50%;color:var(--text-muted);cursor:help;flex-shrink:0">i</span>`
+        : "";
+      return `
+        <label style="display:flex;gap:0.5rem;align-items:center;font-size:0.85rem;cursor:pointer;padding:0.2rem 0">
+          <input type="checkbox" name="skill_ids" value="${escapeHtml(s.id)}" ${s.layer === "builtin" ? "checked" : ""} />
+          <strong style="flex-shrink:0">${escapeHtml(s.name)}</strong>
+          <span class="meta" style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.04em;flex-shrink:0">${escapeHtml(s.layer)}</span>
+          ${tooltip}
+        </label>`;
+    })
     .join("");
   return `
     <strong style="font-size:0.85rem">Skills for this app</strong>
-    <div style="display:flex;flex-direction:column;gap:0.4rem;margin-top:0.5rem;max-height:240px;overflow-y:auto;padding-right:0.25rem">
+    <div style="display:flex;flex-direction:column;gap:0.15rem;margin-top:0.5rem;max-height:280px;overflow-y:auto">
       ${rows}
     </div>
   `;
