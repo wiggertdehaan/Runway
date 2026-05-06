@@ -384,6 +384,7 @@ Planned improvements — contributions welcome:
 - **App detail: sticky meta bar + scan in deploy table** — sticky summary bar (domain/status/uptime) across tabs; scan badge inline per deploy row instead of separate section
 - **Audit log filters** — filter by user/action/date, colored action badges, pagination, CSV export
 - **Multiple custom domains per app** — currently limited to one custom domain plus the auto-generated subdomain
+- ~~Custom skills + per-app suggestions~~ *(v0.13 — admin uploads custom SKILL.md content on /skills with enable/disable + delete; per-app multiselect of "relevant skills" injected into `/api/v1/app` so agents can prioritize; all mutations are audit-logged)*
 - ~~Built-in MCP skill server~~ *(v0.12 — Runway hosts four built-in skills via remote MCP; users mint a developer token on /account and paste a one-line `claude mcp add` command to wire it into Claude Code)*
 - ~~Pre-build guardrails in `/llms.txt`~~ *(v0.11 — "Before you start building" section with runtime-agnostic rules and per-runtime OWASP checklist, so agents produce a Runway-proof project on the first try)*
 - ~~Server-wide scan floor~~ *(v0.5.4 — admin-configurable minimum threshold that all apps must respect, with per-app exemption for admins; low findings muted in badge and report UI)*

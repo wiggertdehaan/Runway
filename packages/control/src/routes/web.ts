@@ -20,6 +20,17 @@ import {
   deleteDevToken,
   listDevTokens,
 } from "../db/dev-tokens.js";
+import { getAppSkillIds, setAppSkillIds } from "../db/app-skills.js";
+import {
+  deleteCustomSkill,
+  getSkill,
+  listAllSkills,
+  listEnabledSkills,
+  putSkillFile,
+  setSkillEnabled,
+  upsertSkill,
+} from "../db/skills.js";
+import yaml from "js-yaml";
 import { getAppStats, getAppStatsBulk, type AppStats } from "../deploy/stats.js";
 import { formatActivity, formatBytes, formatRelative, type ActivityTone } from "../util/format.js";
 import { getBucketsBulk } from "../db/activity.js";
@@ -67,6 +78,7 @@ import {
   setSetting,
   deleteSetting,
   normalizeBaseDomain,
+  slugify,
 } from "../db/settings.js";
 import {
   SESSION_COOKIE,
@@ -164,6 +176,7 @@ function layout(
   }
   const adminLinks = admin
     ? `<a href="/users">Users</a>
+         <a href="/skills">Skills</a>
          <a href="/settings">Settings</a>
          <a href="/audit">Audit</a>
          <a href="/health">Health</a>`
@@ -674,6 +687,10 @@ webRoutes.use("/settings", requireAdmin);
 webRoutes.use("/settings/*", requireAdmin);
 webRoutes.use("/audit", requireSession);
 webRoutes.use("/audit", requireAdmin);
+webRoutes.use("/skills", requireSession);
+webRoutes.use("/skills/*", requireSession);
+webRoutes.use("/skills", requireAdmin);
+webRoutes.use("/skills/*", requireAdmin);
 webRoutes.use("/account", requireSession);
 webRoutes.use("/account/*", requireSession);
 webRoutes.use("/health", requireSession);
@@ -1333,6 +1350,8 @@ webRoutes.get("/apps/:id", (c) => {
 
   const env = getEnvVars(app.id);
   const volumes = getVolumes(app.id);
+  const allSkills = listEnabledSkills();
+  const selectedSkillIds = new Set(getAppSkillIds(app.id));
   const saved = c.req.query("saved");
   const rollbackError = c.req.query("rollback_error");
   const domainError = c.req.query("domain_error");
@@ -1546,6 +1565,38 @@ webRoutes.get("/apps/:id", (c) => {
                   <button type="submit">Add</button>
                 </div>
               </form>
+            </div>
+
+            <div class="card">
+              <h2>Suggested skills</h2>
+              <p class="hint" style="margin:0.5rem 0 1rem">
+                Select the skills most relevant to this app. Suggestions only —
+                Claude Code still sees every enabled skill via the MCP server,
+                but the agent uses this list to prioritize what to read first
+                for this app.
+              </p>
+              ${
+                allSkills.length === 0
+                  ? '<p class="meta">No skills available yet. Built-ins ship with Runway; admins can add custom ones from the Skills page.</p>'
+                  : `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/skills">
+                      <div style="display:flex;flex-direction:column;gap:0.4rem;margin-bottom:0.75rem">
+                        ${allSkills
+                          .map(
+                            (s) => `
+                          <label style="display:flex;gap:0.6rem;align-items:flex-start;font-size:0.85rem;cursor:pointer">
+                            <input type="checkbox" name="skill_ids" value="${escapeHtml(s.id)}" ${selectedSkillIds.has(s.id) ? "checked" : ""} style="margin-top:0.2rem" />
+                            <span>
+                              <strong>${escapeHtml(s.name)}</strong>
+                              <span class="meta" style="margin-left:0.5rem;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em">${escapeHtml(s.layer)}</span>
+                              ${s.description ? `<br /><span class="meta" style="font-size:0.8rem">${escapeHtml(s.description)}</span>` : ""}
+                            </span>
+                          </label>`,
+                          )
+                          .join("")}
+                      </div>
+                      <button type="submit">Save suggestions</button>
+                    </form>`
+              }
             </div>
           </div>
         </div>
@@ -1769,6 +1820,24 @@ webRoutes.post("/apps/:id/volumes/delete", async (c) => {
     deleteVolume(app.id, mountPath);
   }
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1`);
+});
+
+webRoutes.post("/apps/:id/skills", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody({ all: true });
+  const raw = body["skill_ids"];
+  const requested = Array.isArray(raw)
+    ? (raw.filter((v) => typeof v === "string") as string[])
+    : typeof raw === "string"
+      ? [raw]
+      : [];
+  // Drop ids that don't match an enabled skill — silent filter so a
+  // checkbox for a since-disabled skill doesn't leave stale entries.
+  const enabled = new Set(listEnabledSkills().map((s) => s.id));
+  const valid = requested.filter((id) => enabled.has(id));
+  setAppSkillIds(app.id, valid);
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#tab-config`);
 });
 
 // ── Users management ─────────────────────────────────────
@@ -2236,6 +2305,189 @@ webRoutes.get("/audit", (c) => {
       { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
+});
+
+// ── Skills (admin) ──────────────────────────────────────
+
+const SKILL_FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+function parseSkillFrontmatter(source: string): {
+  name?: string;
+  description?: string;
+  version?: string;
+} {
+  const match = source.match(SKILL_FRONTMATTER_RE);
+  if (!match) return {};
+  try {
+    const parsed = yaml.load(match[1]!);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as { name?: string; description?: string; version?: string };
+  } catch {
+    return {};
+  }
+}
+
+const MAX_SKILL_MD_BYTES = 200 * 1024;
+
+webRoutes.get("/skills", (c) => {
+  const user = c.get("user");
+  const error = c.req.query("error");
+  const saved = c.req.query("saved");
+  const skills = listAllSkills();
+
+  const errorMessage =
+    error === "no_frontmatter"
+      ? "SKILL.md is missing the YAML frontmatter block (---)."
+      : error === "no_name"
+        ? "Frontmatter must include a `name` field."
+        : error === "no_description"
+          ? "Frontmatter must include a `description` field."
+          : error === "bad_id"
+            ? "Could not derive a valid id from the name (use letters/digits)."
+            : error === "managed"
+              ? "That id is reserved for a built-in skill — pick a different name."
+              : error === "too_large"
+                ? `SKILL.md exceeds ${MAX_SKILL_MD_BYTES / 1024} KB.`
+                : null;
+
+  const layerBadge = (layer: string) => {
+    const cls = layer === "custom" ? "badge-running" : "badge-stopped";
+    return `<span class="badge ${cls}">${escapeHtml(layer)}</span>`;
+  };
+
+  const rows = skills
+    .map((s) => {
+      const enabledToggle = `<form method="POST" action="/skills/${encodeURIComponent(s.id)}/toggle" style="margin:0">
+        <input type="hidden" name="enabled" value="${s.enabled ? 0 : 1}" />
+        <button type="submit" class="ghost" style="padding:0.25rem 0.6rem;font-size:0.75rem">${s.enabled ? "Disable" : "Enable"}</button>
+      </form>`;
+      const deleteBtn = s.is_managed
+        ? '<span class="meta" style="font-size:0.75rem">built-in</span>'
+        : `<form method="POST" action="/skills/${encodeURIComponent(s.id)}/delete" style="margin:0" onsubmit="return confirm('Delete this skill? Apps that suggest it lose the suggestion.')">
+            <button type="submit" class="danger" style="padding:0.25rem 0.6rem;font-size:0.75rem">Delete</button>
+          </form>`;
+      return `
+        <div class="card">
+          <div class="flex between" style="gap:1rem;flex-wrap:wrap;align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <div class="flex" style="gap:0.6rem;flex-wrap:wrap;align-items:center">
+                <h2 style="margin:0">${escapeHtml(s.name)}</h2>
+                ${layerBadge(s.layer)}
+                ${s.enabled ? "" : '<span class="badge badge-stopped">disabled</span>'}
+                <span class="meta" style="font-size:0.75rem"><code>${escapeHtml(s.id)}</code> v${escapeHtml(s.version)}</span>
+              </div>
+              ${s.description ? `<p class="meta" style="margin:0.4rem 0 0;font-size:0.85rem">${escapeHtml(s.description)}</p>` : ""}
+            </div>
+            <div class="flex" style="gap:0.5rem;flex-wrap:wrap">
+              ${enabledToggle}
+              ${deleteBtn}
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  return c.html(
+    layout(
+      "Skills",
+      `
+      <h1>Skills</h1>
+      <p class="hint" style="margin-bottom:1.5rem">
+        Skills served via this Runway instance's MCP endpoint
+        (<code>/mcp</code>). Built-ins ship with the platform; custom
+        skills are defined here.
+      </p>
+      ${saved === "added" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill added.</div>' : ""}
+      ${saved === "toggled" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Updated.</div>' : ""}
+      ${saved === "deleted" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill deleted.</div>' : ""}
+      ${errorMessage ? `<div class="error">${escapeHtml(errorMessage)}</div>` : ""}
+
+      ${skills.length > 0 ? rows : '<p class="meta">No skills loaded yet.</p>'}
+
+      <div class="card" style="margin-top:1.5rem">
+        <h2>Add custom skill</h2>
+        <p class="hint" style="margin:0.5rem 0 1rem">
+          Paste a SKILL.md file. Must start with a YAML frontmatter
+          block (<code>---</code>) containing <code>name</code> and
+          <code>description</code>. Max ${MAX_SKILL_MD_BYTES / 1024} KB.
+        </p>
+        <form method="POST" action="/skills">
+          <textarea name="skill_md" rows="14" required style="width:100%;font-family:monospace;font-size:0.85rem;padding:0.6rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;color:#d4d4d4" placeholder="---&#10;name: my-skill&#10;description: When and why to use this skill.&#10;---&#10;&#10;# Skill content here"></textarea>
+          <button type="submit" style="margin-top:0.75rem">Add skill</button>
+        </form>
+      </div>
+    `,
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+    )
+  );
+});
+
+webRoutes.post("/skills", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const skillMd = (body["skill_md"] as string | undefined) ?? "";
+
+  if (skillMd.length > MAX_SKILL_MD_BYTES) {
+    return c.redirect("/skills?error=too_large");
+  }
+  if (!SKILL_FRONTMATTER_RE.test(skillMd)) {
+    return c.redirect("/skills?error=no_frontmatter");
+  }
+
+  const fm = parseSkillFrontmatter(skillMd);
+  const name = (fm.name ?? "").trim();
+  const description = (fm.description ?? "").trim();
+  if (!name) return c.redirect("/skills?error=no_name");
+  if (!description) return c.redirect("/skills?error=no_description");
+
+  const id = slugify(name);
+  if (!id) return c.redirect("/skills?error=bad_id");
+
+  const existing = getSkill(id);
+  if (existing && existing.is_managed) {
+    return c.redirect("/skills?error=managed");
+  }
+
+  upsertSkill({
+    id,
+    layer: "custom",
+    name,
+    description,
+    version: fm.version ?? "0.1.0",
+    is_managed: false,
+  });
+  putSkillFile(id, "SKILL.md", new TextEncoder().encode(skillMd), "text/markdown");
+
+  logAudit(user.id, user.username, "skill_uploaded", { detail: id });
+  return c.redirect("/skills?saved=added");
+});
+
+webRoutes.post("/skills/:id/toggle", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id");
+  const body = await c.req.parseBody();
+  const enabled = body["enabled"] === "1";
+  const ok = setSkillEnabled(id, enabled);
+  if (ok) {
+    logAudit(
+      user.id,
+      user.username,
+      enabled ? "skill_enabled" : "skill_disabled",
+      { detail: id },
+    );
+  }
+  return c.redirect("/skills?saved=toggled");
+});
+
+webRoutes.post("/skills/:id/delete", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id");
+  const ok = deleteCustomSkill(id);
+  if (ok) {
+    logAudit(user.id, user.username, "skill_deleted", { detail: id });
+  }
+  return c.redirect(ok ? "/skills?saved=deleted" : "/skills?error=managed");
 });
 
 // ── Health check ────────────────────────────────────────

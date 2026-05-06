@@ -27,6 +27,8 @@ import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { notifyDeployFailure } from "../util/webhook.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import { getAppAllowedEmails, setAppAllowedEmails } from "../db/app-emails.js";
+import { getAppSkillIds, setAppSkillIds } from "../db/app-skills.js";
+import { getSkill, listEnabledSkills } from "../db/skills.js";
 import { validateCustomDomain } from "../util/domain.js";
 
 type Env = { Variables: { app: App } };
@@ -39,6 +41,15 @@ const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 apiRoutes.use("/*", apiAuth);
 
 function toConfigResponse(app: App) {
+  const relevantSkillIds = getAppSkillIds(app.id);
+  const relevantSkills = relevantSkillIds
+    .map((id) => {
+      const s = getSkill(id);
+      if (!s || !s.enabled) return null;
+      return { id: s.id, name: s.name, description: s.description };
+    })
+    .filter((s): s is { id: string; name: string; description: string | null } => s !== null);
+
   return {
     id: app.id,
     name: app.name,
@@ -62,6 +73,7 @@ function toConfigResponse(app: App) {
       username: app.basic_auth_username,
     },
     sso_enabled: !!app.sso_enabled,
+    relevant_skills: relevantSkills,
     configured: isConfigured(app),
   };
 }
@@ -654,6 +666,41 @@ apiRoutes.put("/app/sso", async (c) => {
     sso_enabled: !!updated.sso_enabled,
     allowed_emails: getAppAllowedEmails(updated.id),
   });
+});
+
+// ── Skill profile (suggestions, not a gate) ────────────
+apiRoutes.get("/app/skills", (c) => {
+  const app = c.get("app");
+  return c.json({
+    app_id: app.id,
+    skill_ids: getAppSkillIds(app.id),
+  });
+});
+
+apiRoutes.put("/app/skills", async (c) => {
+  const app = c.get("app");
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !Array.isArray(body.skill_ids)) {
+    return c.json({ error: "skill_ids must be an array" }, 400);
+  }
+
+  const requested = body.skill_ids.filter(
+    (id: unknown): id is string => typeof id === "string",
+  );
+
+  // Reject ids that don't exist or aren't enabled — silently
+  // accepting them would let the dashboard show stale entries.
+  const enabled = new Set(listEnabledSkills().map((s) => s.id));
+  const unknown = requested.filter((id: string) => !enabled.has(id));
+  if (unknown.length > 0) {
+    return c.json(
+      { error: `Unknown or disabled skills: ${unknown.join(", ")}` },
+      400,
+    );
+  }
+
+  setAppSkillIds(app.id, requested);
+  return c.json({ app_id: app.id, skill_ids: getAppSkillIds(app.id) });
 });
 
 // ── Rollback ────────────────────────────────────────────

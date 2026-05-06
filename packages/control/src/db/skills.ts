@@ -37,6 +37,39 @@ export function listEnabledSkills(): Skill[] {
     .all() as unknown as Skill[];
 }
 
+export function listAllSkills(): Skill[] {
+  return db
+    .prepare(
+      `SELECT * FROM skills
+       ORDER BY
+         CASE layer WHEN 'custom' THEN 0 WHEN 'curated' THEN 1 ELSE 2 END,
+         name`,
+    )
+    .all() as unknown as Skill[];
+}
+
+export function setSkillEnabled(id: string, enabled: boolean): boolean {
+  const result = db
+    .prepare(
+      `UPDATE skills SET enabled = ?, updated_at = datetime('now') WHERE id = ?`,
+    )
+    .run(enabled ? 1 : 0, id);
+  return result.changes > 0;
+}
+
+/**
+ * Delete a skill row and all of its files. Refuses to delete
+ * `is_managed` (built-in) skills — those are restored from disk on
+ * every restart, so a user-initiated delete would just resurrect
+ * them and look broken.
+ */
+export function deleteCustomSkill(id: string): boolean {
+  const skill = getSkill(id);
+  if (!skill || skill.is_managed) return false;
+  const result = db.prepare(`DELETE FROM skills WHERE id = ?`).run(id);
+  return result.changes > 0;
+}
+
 export function getSkill(id: string): Skill | undefined {
   return db
     .prepare(`SELECT * FROM skills WHERE id = ?`)
