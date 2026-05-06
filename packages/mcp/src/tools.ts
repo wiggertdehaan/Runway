@@ -701,9 +701,14 @@ RUN npm run build --if-present
 FROM base
 WORKDIR /app
 COPY --from=build /app .
-RUN addgroup --system app && adduser --system --ingroup app app
+# The npm bundled in node:24-slim ships HIGH-severity CVEs in tar,
+# minimatch, cross-spawn, etc. We don't need it at runtime.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \\
+ && addgroup --system app && adduser --system --ingroup app app
 USER app
 EXPOSE ${port}
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
+  CMD node -e "require('http').get('http://127.0.0.1:${port}/healthz', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"
 CMD ["node", "."]`,
 
     python: `FROM python:3.12-slim
@@ -715,6 +720,8 @@ COPY . .
 RUN addgroup --system app && adduser --system --ingroup app app
 USER app
 EXPOSE ${port}
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
+  CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:${port}/healthz',timeout=3); sys.exit(0 if r.status<500 else 1)"
 CMD ["python", "main.py"]`,
 
     go: `FROM golang:1.23 AS build
@@ -724,6 +731,10 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /app/server ./...
 
+# distroless/static has no shell and cannot run HEALTHCHECK CMD.
+# Trivy DS026 (LOW) will flag the missing instruction; for
+# scan_threshold=low either implement a healthcheck flag in the
+# binary itself or switch to distroless:debug (adds busybox).
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /app/server /server
 EXPOSE ${port}
@@ -741,7 +752,9 @@ RUN apk upgrade --no-cache \\
  && chown -R nginx:nginx /var/cache/nginx /var/log/nginx /etc/nginx/conf.d
 COPY --chown=nginx:nginx . /usr/share/nginx/html
 USER nginx
-EXPOSE 80`,
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
+  CMD wget --quiet --tries=1 --spider http://127.0.0.1:80/ || exit 1`,
   };
 
   return templates[config.runtime!];

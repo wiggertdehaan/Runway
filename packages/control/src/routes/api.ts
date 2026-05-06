@@ -245,14 +245,27 @@ apiRoutes.post("/app/deploy", async (c) => {
     if (err instanceof ScanBlockedError) {
       // Keep app status untouched — the previous container is still
       // running. The deploy row is already recorded as "blocked".
+      const appThreshold = (app.scan_threshold ?? "none") as Threshold;
+      const floor = (getSetting("min_scan_threshold") ?? "none") as Threshold;
+      const effective = effectiveThreshold(
+        appThreshold,
+        floor,
+        !!app.scan_floor_exempt,
+      );
+      const floorActive = effective !== appThreshold && floor !== "none";
+      const hint = floorActive
+        ? `Server-wide scan floor (${floor}) raised this app's effective threshold above scan_threshold=${appThreshold}. Either fix the findings, ask the admin to grant scan_floor_exempt, or relax min_scan_threshold. Full report: GET /api/v1/app/deploys/${err.deployId}/scan`
+        : `Fix the findings, lower scan_threshold, or deploy again. Full report: GET /api/v1/app/deploys/${err.deployId}/scan`;
       return c.json(
         {
           status: "blocked",
           error: err.message,
           image_tag: err.imageTag,
           deploy_id: err.deployId,
+          scan_threshold: appThreshold,
+          effective_scan_threshold: effective,
           scan: summarizeScanForResponse(err.scan),
-          hint: `Fix the findings, lower scan_threshold, or deploy again. Full report: GET /api/v1/app/deploys/${err.deployId}/scan`,
+          hint,
         },
         409
       );
@@ -401,17 +414,29 @@ apiRoutes.put("/app/env", async (c) => {
 
   const env = body.env as Record<string, unknown>;
   const clean: Record<string, string> = {};
+  const toDelete: string[] = [];
   for (const [key, value] of Object.entries(env)) {
     if (typeof key !== "string" || !key.match(/^[A-Za-z_][A-Za-z0-9_]*$/)) {
+      return c.json({ error: `Invalid env var name: ${key}` }, 400);
+    }
+    // PUT merges: present keys are upserted, `null` removes the
+    // entry. Storing String(null) === "null" was a footgun — the
+    // var stayed set and the agent thought it was cleared.
+    if (value === null) {
+      toDelete.push(key);
+      continue;
+    }
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
       return c.json(
-        { error: `Invalid env var name: ${key}` },
-        400
+        { error: `Env var '${key}' must be a string, number, boolean, or null` },
+        400,
       );
     }
     clean[key] = String(value);
   }
 
   setEnvVars(app.id, clean);
+  for (const key of toDelete) deleteEnvVar(app.id, key);
   return c.json({ app_id: app.id, env: getEnvVars(app.id) });
 });
 
