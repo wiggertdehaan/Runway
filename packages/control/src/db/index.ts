@@ -347,4 +347,23 @@ export function migrate() {
   if (!skillCols.some((c) => c.name === "bundle_sha256")) {
     db.exec(`ALTER TABLE skills ADD COLUMN bundle_sha256 TEXT`);
   }
+
+  // Periodic image rescans. Trivy refreshes its CVE DB on a schedule
+  // (~6h); a deploy that passed the gate at build time can develop new
+  // findings later. The periodic scanner writes one row per scan so
+  // the dashboard can show a delta against the previous run.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_periodic_scans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      image_tag TEXT NOT NULL,
+      scan_status TEXT NOT NULL,
+      scan_summary TEXT NOT NULL,
+      scan_report TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_periodic_scans_app_recent
+      ON app_periodic_scans(app_id, created_at DESC);
+  `);
 }

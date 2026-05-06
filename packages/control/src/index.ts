@@ -6,6 +6,7 @@ import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
 import { refreshDb } from "./deploy/scan.js";
 import { startActivityTailer } from "./deploy/activity-tailer.js";
+import { startPeriodicScanner } from "./deploy/periodic-scanner.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
 
 migrate();
@@ -28,6 +29,11 @@ setTimeout(() => {
   refreshDb();
   setInterval(refreshDb, 24 * 60 * 60 * 1000);
 }, 60 * 1000);
+
+// Daily image rescan of every running app, so CVEs that the Trivy
+// DB picks up after deploy still surface. Override the cadence with
+// PERIODIC_SCAN_INTERVAL_HOURS for dev.
+startPeriodicScanner();
 
 const dashboardDomain = process.env.DASHBOARD_DOMAIN;
 if (dashboardDomain) {

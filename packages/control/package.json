@@ -1,23 +1,24 @@
 {
   "name": "@runway/control",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "bcryptjs": "^3.0.3",
     "dockerode": "^4.0.4",
     "hono": "^4.12.14",
     "js-yaml": "^4.1.0",
     "nanoid": "^5.1.9",
     "qrcode": "^1.5.4",
-    "bcryptjs": "^3.0.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -25,7 +26,9 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.6.0",
     "@types/qrcode": "^1.5.5",
+    "@vitest/coverage-v8": "^4.1.5",
     "tsx": "^4.19.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
   }
 }

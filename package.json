@@ -18,6 +18,7 @@
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --if-present test",
     "mcp:build": "pnpm --filter @runway/mcp build",
     "mcp:path": "node -e \"console.log(require('path').resolve('packages/mcp/dist/index.js'))\"",
     "audit": "pnpm -r audit",
