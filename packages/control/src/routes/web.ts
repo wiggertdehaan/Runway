@@ -23,6 +23,7 @@ import {
 import { getAppSkillIds, setAppSkillIds } from "../db/app-skills.js";
 import {
   deleteCustomSkill,
+  deleteSkillFiles,
   getSkill,
   listAllSkills,
   listEnabledSkills,
@@ -30,6 +31,15 @@ import {
   setSkillEnabled,
   upsertSkill,
 } from "../db/skills.js";
+import {
+  bundleSha256,
+  fetchSkillBundle,
+  isTrustedSource,
+  listTrustedOrgs,
+  mimeForPath,
+  parseSkillSource,
+  sourceUrl,
+} from "../skills/registry.js";
 import yaml from "js-yaml";
 import { getAppStats, getAppStatsBulk, type AppStats } from "../deploy/stats.js";
 import { formatActivity, formatBytes, formatRelative, type ActivityTone } from "../util/format.js";
@@ -2332,6 +2342,7 @@ const MAX_SKILL_MD_BYTES = 200 * 1024;
 webRoutes.get("/skills", (c) => {
   const user = c.get("user");
   const error = c.req.query("error");
+  const detail = c.req.query("detail");
   const saved = c.req.query("saved");
   const skills = listAllSkills();
 
@@ -2348,10 +2359,21 @@ webRoutes.get("/skills", (c) => {
               ? "That id is reserved for a built-in skill — pick a different name."
               : error === "too_large"
                 ? `SKILL.md exceeds ${MAX_SKILL_MD_BYTES / 1024} KB.`
-                : null;
+                : error === "bad_source"
+                  ? "Could not parse the source — expected `owner/repo` or `owner/repo/path`."
+                  : error === "untrusted"
+                    ? "That source is not in the trusted-org whitelist. Tick the override box if you really want to import it."
+                    : error === "fetch_failed"
+                      ? `Could not import: ${detail ? detail : "unknown error"}.`
+                      : null;
 
   const layerBadge = (layer: string) => {
-    const cls = layer === "custom" ? "badge-running" : "badge-stopped";
+    const cls =
+      layer === "custom"
+        ? "badge-running"
+        : layer === "curated"
+          ? "badge-starting"
+          : "badge-created";
     return `<span class="badge ${cls}">${escapeHtml(layer)}</span>`;
   };
 
@@ -2366,6 +2388,15 @@ webRoutes.get("/skills", (c) => {
         : `<form method="POST" action="/skills/${encodeURIComponent(s.id)}/delete" style="margin:0" onsubmit="return confirm('Delete this skill? Apps that suggest it lose the suggestion.')">
             <button type="submit" class="danger" style="padding:0.25rem 0.6rem;font-size:0.75rem">Delete</button>
           </form>`;
+      const signedBadge =
+        s.layer === "curated"
+          ? s.signed
+            ? '<span class="badge badge-running" title="Source is in the trusted-org whitelist">signed</span>'
+            : '<span class="badge badge-stopped" title="Source not in whitelist; admin imported with override">unverified</span>'
+          : "";
+      const sourceLine = s.source_url
+        ? `<p class="meta" style="margin:0.25rem 0 0;font-size:0.75rem">source: <a href="${escapeHtml(s.source_url)}" target="_blank" rel="noopener">${escapeHtml(s.source_url.replace(/^https:\/\/github\.com\//, ""))}</a>${s.bundle_sha256 ? ` · sha256 <code>${escapeHtml(s.bundle_sha256.slice(0, 12))}</code>` : ""}</p>`
+        : "";
       return `
         <div class="card">
           <div class="flex between" style="gap:1rem;flex-wrap:wrap;align-items:flex-start">
@@ -2373,10 +2404,12 @@ webRoutes.get("/skills", (c) => {
               <div class="flex" style="gap:0.6rem;flex-wrap:wrap;align-items:center">
                 <h2 style="margin:0">${escapeHtml(s.name)}</h2>
                 ${layerBadge(s.layer)}
+                ${signedBadge}
                 ${s.enabled ? "" : '<span class="badge badge-stopped">disabled</span>'}
                 <span class="meta" style="font-size:0.75rem"><code>${escapeHtml(s.id)}</code> v${escapeHtml(s.version)}</span>
               </div>
               ${s.description ? `<p class="meta" style="margin:0.4rem 0 0;font-size:0.85rem">${escapeHtml(s.description)}</p>` : ""}
+              ${sourceLine}
             </div>
             <div class="flex" style="gap:0.5rem;flex-wrap:wrap">
               ${enabledToggle}
@@ -2388,6 +2421,10 @@ webRoutes.get("/skills", (c) => {
     })
     .join("");
 
+  const trustedList = listTrustedOrgs()
+    .map((o) => `<code>${escapeHtml(o)}</code>`)
+    .join(", ");
+
   return c.html(
     layout(
       "Skills",
@@ -2395,15 +2432,40 @@ webRoutes.get("/skills", (c) => {
       <h1>Skills</h1>
       <p class="hint" style="margin-bottom:1.5rem">
         Skills served via this Runway instance's MCP endpoint
-        (<code>/mcp</code>). Built-ins ship with the platform; custom
-        skills are defined here.
+        (<code>/mcp</code>). Built-ins ship with the platform; curated
+        skills are imported from a public GitHub bundle; custom skills
+        are pasted in below.
       </p>
       ${saved === "added" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill added.</div>' : ""}
+      ${saved === "imported" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill imported.</div>' : ""}
       ${saved === "toggled" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Updated.</div>' : ""}
       ${saved === "deleted" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill deleted.</div>' : ""}
       ${errorMessage ? `<div class="error">${escapeHtml(errorMessage)}</div>` : ""}
 
       ${skills.length > 0 ? rows : '<p class="meta">No skills loaded yet.</p>'}
+
+      <div class="card" style="margin-top:1.5rem">
+        <h2>Import curated skill</h2>
+        <p class="hint" style="margin:0.5rem 0 1rem">
+          Pull a skill from a public GitHub repo. Paste a source like
+          <code>anthropics/skills/pdf</code> or a GitHub URL such as
+          <code>https://github.com/vercel-labs/agent-skills/tree/main/find-skills</code>.
+          The bundle's <code>SKILL.md</code> + companion files are
+          fetched, hashed, and stored under the <em>curated</em> layer.
+        </p>
+        <p class="hint" style="margin:0 0 1rem;font-size:0.8rem">
+          Trusted publishers (signed): ${trustedList}.
+        </p>
+        <form method="POST" action="/skills/import">
+          <input type="text" name="source" required placeholder="anthropics/skills/pdf" style="width:100%;font-family:monospace;font-size:0.9rem;padding:0.5rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;color:#d4d4d4" />
+          <label class="meta" style="display:block;margin-top:0.6rem;font-size:0.8rem">
+            <input type="checkbox" name="allow_untrusted" value="1" style="vertical-align:middle" />
+            I have reviewed this source and want to import even though
+            it is not in the trusted-org whitelist.
+          </label>
+          <button type="submit" style="margin-top:0.75rem">Import skill</button>
+        </form>
+      </div>
 
       <div class="card" style="margin-top:1.5rem">
         <h2>Add custom skill</h2>
@@ -2461,6 +2523,81 @@ webRoutes.post("/skills", async (c) => {
 
   logAudit(user.id, user.username, "skill_uploaded", { detail: id });
   return c.redirect("/skills?saved=added");
+});
+
+webRoutes.post("/skills/import", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const sourceInput = ((body["source"] as string | undefined) ?? "").trim();
+  const allowUntrusted = body["allow_untrusted"] === "1";
+
+  const src = parseSkillSource(sourceInput);
+  if (!src) return c.redirect("/skills?error=bad_source");
+
+  const trusted = isTrustedSource(src.owner);
+  if (!trusted && !allowUntrusted) {
+    return c.redirect("/skills?error=untrusted");
+  }
+
+  let files;
+  try {
+    files = await fetchSkillBundle(src);
+  } catch (err) {
+    const detail = (err as Error).message ?? "fetch failed";
+    return c.redirect(
+      `/skills?error=fetch_failed&detail=${encodeURIComponent(detail)}`,
+    );
+  }
+
+  const skillMdFile = files.find((f) => f.path === "SKILL.md")!;
+  const skillMdText = new TextDecoder().decode(skillMdFile.content);
+  if (skillMdText.length > MAX_SKILL_MD_BYTES) {
+    return c.redirect("/skills?error=too_large");
+  }
+  if (!SKILL_FRONTMATTER_RE.test(skillMdText)) {
+    return c.redirect("/skills?error=no_frontmatter");
+  }
+
+  const fm = parseSkillFrontmatter(skillMdText);
+  const name = (fm.name ?? "").trim();
+  const description = (fm.description ?? "").trim();
+  if (!name) return c.redirect("/skills?error=no_name");
+  if (!description) return c.redirect("/skills?error=no_description");
+
+  const id = slugify(name);
+  if (!id) return c.redirect("/skills?error=bad_id");
+
+  const existing = getSkill(id);
+  if (existing && existing.is_managed) {
+    return c.redirect("/skills?error=managed");
+  }
+
+  const sha = bundleSha256(files);
+
+  upsertSkill({
+    id,
+    layer: "curated",
+    name,
+    description,
+    version: fm.version ?? "0.1.0",
+    is_managed: false,
+    source_url: sourceUrl(src),
+    signed: trusted,
+    bundle_sha256: sha,
+    approved_by: user.id,
+  });
+
+  // Re-import: drop stale files first so renamed/removed assets don't
+  // linger in our copy.
+  deleteSkillFiles(id);
+  for (const f of files) {
+    putSkillFile(id, f.path, f.content, mimeForPath(f.path));
+  }
+
+  logAudit(user.id, user.username, "skill_imported", {
+    detail: `${id} ${trusted ? "signed" : "unverified"} sha256=${sha.slice(0, 12)} from ${src.owner}/${src.repo}${src.path ? "/" + src.path : ""}`,
+  });
+  return c.redirect("/skills?saved=imported");
 });
 
 webRoutes.post("/skills/:id/toggle", async (c) => {

@@ -120,69 +120,23 @@ This document is for LLM agents (Claude Code and similar) that have been
 asked to deploy a project to ${base}. Follow the steps below using your
 existing shell and HTTP tools — no MCP server or SDK is required.
 
-> **Skill server available.** This Runway instance also exposes built-in
-> skills (\`runway-bootstrap\`, \`runway-deploy\`, \`runway-fix-scan-finding\`,
-> \`runway-debug-deploy-fail\`) over MCP at \`${base}/mcp\`. Generate a
-> developer token on \`${base}/account\` and run the
+> **Before you start building, load the \`runway-bootstrap\` skill.** This
+> Runway instance exposes its built-in skills over MCP at \`${base}/mcp\`.
+> The bootstrap skill carries the runtime-agnostic guardrails (non-root
+> user, \`.dockerignore\` from day one, pinned base images, \`/healthz\`,
+> bind to \`0.0.0.0\`) plus a per-runtime security checklist that this
+> document used to repeat. Sister skills cover the rest of the lifecycle:
+> \`runway-deploy\`, \`runway-fix-scan-finding\`, \`runway-debug-deploy-fail\`.
+>
+> Generate a developer token on \`${base}/account\` and run the
 > \`claude mcp add ...\` command shown there to register the server with
-> Claude Code. With the skill server connected you get richer guidance
-> than this document alone provides.
+> Claude Code. With the skill server connected you get richer, scoped
+> guidance than this document alone — and an agent that loaded
+> \`runway-bootstrap\` first will produce a project that passes the scan
+> on its first deploy.
 
 You will be given an API key of the form \`rwy_...\`. Each key is tied to
 one app on the server. Treat it as a secret and do not echo it to the user.
-
-## Before you start building
-
-Read this **before** writing the first line of the app — these guardrails
-save an iteration at deploy time. The full deploy mechanics (auth, tar,
-scan) are further down; this section is about getting the project right
-on day one.
-
-### Runtime-agnostic
-
-- **Pin everything.** No \`:latest\` base images, no unpinned dependencies.
-  Commit lock files (\`pnpm-lock.yaml\`, \`requirements.txt\` with hashes,
-  \`go.sum\`).
-- **Non-root in the Dockerfile.** Drop to a dedicated user before
-  \`EXPOSE\`. Persistent volumes only get correct ownership when the
-  container is non-root from the start (see "Non-root containers and
-  volume ownership" below).
-- **Plan a health check endpoint up front** — default \`/healthz\`
-  returning a plain 200. Wire it into your router on day one; Runway
-  probes it every 30 s once configured (see "Health check"). It must
-  return quickly without hitting external dependencies.
-- **No secrets in the image or repo.** All runtime config goes through
-  Runway env vars (\`/api/v1/app/env\`), which persist across redeploys
-  and never land in the build context.
-- **\`.dockerignore\` on day one.** Add \`node_modules/\`, \`.git/\`, build
-  artifacts, local databases, and \`.env*\` *before* you tar — patching it
-  retroactively after a 100 MB upload fails is wasted work.
-- **Multi-stage builds.** Smaller attack surface, faster Trivy scans,
-  fewer base-image CVEs in the final image.
-- **Bind to \`0.0.0.0\`, not \`127.0.0.1\`.** Default port is 3000 (80 for
-  static). Localhost-only sockets are unreachable from the gateway.
-- **Tar upload is plain POSIX, max 100 MB.** No gzip; the server unpacks
-  the stream directly.
-
-### Per-runtime security checklist
-
-These are the OWASP-relevant points that surface most often in Trivy's
-secret + misconfig scans, narrowed to what's actionable per runtime:
-
-- **Node** — never \`eval\` or \`Function(...)\` on user input; use
-  prepared statements / parameterized queries; set security headers via
-  \`helmet\`; validate inputs at request boundaries (\`zod\` / JSON
-  schema).
-- **Python** — parameterized queries everywhere; \`pydantic\` at input
-  boundaries; never \`pickle\` untrusted data; use \`secrets\` (not
-  \`random\`) for tokens.
-- **Go** — \`database/sql\` with parameter placeholders; \`html/template\`
-  (not \`text/template\`) for any HTML output; context deadlines on every
-  handler.
-- **Static** — set a CSP header in nginx; no secrets in the JS bundle;
-  SRI on external scripts; no inline event handlers.
-
-Once these are in place, follow the deploy flow below.
 
 ## Authentication
 
