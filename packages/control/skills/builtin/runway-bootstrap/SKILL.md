@@ -90,9 +90,15 @@ RUN npm run build --if-present
 FROM base
 WORKDIR /app
 COPY --from=build /app .
-RUN addgroup --system app && adduser --system --ingroup app app
+# The npm bundled in node:24-slim ships HIGH-severity CVEs in tar,
+# minimatch, cross-spawn, etc. We don't need it at runtime, so wipe
+# it before the scan runs.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+ && addgroup --system app && adduser --system --ingroup app app
 USER app
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:3000/healthz', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"
 CMD ["node", "."]
 ```
 
@@ -108,6 +114,8 @@ COPY . .
 RUN addgroup --system app && adduser --system --ingroup app app
 USER app
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:3000/healthz',timeout=3); sys.exit(0 if r.status<500 else 1)"
 CMD ["python", "main.py"]
 ```
 
@@ -130,6 +138,8 @@ COPY . .
 ENV PYTHONPATH=/app/lib PYTHONUNBUFFERED=1
 USER app
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:3000/healthz',timeout=3); sys.exit(0 if r.status<500 else 1)"
 CMD ["python", "main.py"]
 ```
 
@@ -143,6 +153,10 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /app/server ./...
 
+# distroless/static has no shell and cannot run HEALTHCHECK CMD.
+# Trivy DS026 (LOW) will flag the missing instruction; if you target
+# scan_threshold=low either build a healthcheck flag into the binary
+# or switch to gcr.io/distroless/static-debian12:debug (adds busybox).
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /app/server /server
 EXPOSE 3000
@@ -169,6 +183,8 @@ RUN apk upgrade --no-cache \
 COPY --chown=nginx:nginx . /usr/share/nginx/html
 USER nginx
 EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget --quiet --tries=1 --spider http://127.0.0.1:80/ || exit 1
 ```
 
 The `sed` line is **not optional** — it moves nginx's pidfile to a

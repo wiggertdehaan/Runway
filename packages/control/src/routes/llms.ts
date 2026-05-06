@@ -39,9 +39,15 @@ RUN npm run build --if-present
 FROM base
 WORKDIR /app
 COPY --from=build /app .
-RUN addgroup --system app && adduser --system --ingroup app app
+# The npm bundled in node:24-slim ships HIGH-severity CVEs in tar,
+# minimatch, cross-spawn, etc. We do not need it at runtime, so wipe
+# it to clear those findings before the scan runs.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \\
+ && addgroup --system app && adduser --system --ingroup app app
 USER app
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
+  CMD node -e "require('http').get('http://127.0.0.1:3000/healthz', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"
 CMD ["node", "."]`,
 
   python: `FROM python:3.12-slim
@@ -53,6 +59,8 @@ COPY . .
 RUN addgroup --system app && adduser --system --ingroup app app
 USER app
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
+  CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:3000/healthz',timeout=3); sys.exit(0 if r.status<500 else 1)"
 CMD ["python", "main.py"]`,
 
   pythonAlpine: `FROM python:3.12-alpine AS builder
@@ -69,6 +77,8 @@ COPY . .
 ENV PYTHONPATH=/app/lib PYTHONUNBUFFERED=1
 USER app
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
+  CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:3000/healthz',timeout=3); sys.exit(0 if r.status<500 else 1)"
 CMD ["python", "main.py"]`,
 
   go: `FROM golang:1.23 AS build
@@ -78,6 +88,10 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /app/server ./...
 
+# distroless/static has no shell and cannot run a HEALTHCHECK CMD.
+# Trivy DS026 (LOW) will flag the missing instruction; agents
+# targeting scan_threshold=low must either implement a healthcheck
+# in the binary itself or switch to distroless:debug (adds busybox).
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /app/server /server
 EXPOSE 3000
@@ -95,7 +109,9 @@ RUN apk upgrade --no-cache \\
  && chown -R nginx:nginx /var/cache/nginx /var/log/nginx /etc/nginx/conf.d
 COPY --chown=nginx:nginx . /usr/share/nginx/html
 USER nginx
-EXPOSE 80`,
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
+  CMD wget --quiet --tries=1 --spider http://127.0.0.1:80/ || exit 1`,
 };
 
 llmsRoutes.get("/llms.txt", (c) => {
@@ -146,6 +162,45 @@ Every call below uses a Bearer token:
 Authorization: Bearer rwy_YOUR_KEY
 \`\`\`
 
+## Endpoint reference
+
+Every config endpoint is **PUT** with a JSON body — \`POST\` is reserved
+for actions (configure, deploy, rollback). All paths are under
+\`${base}/api/v1\`.
+
+| Method | Path                          | Body                                                                                  |
+|--------|-------------------------------|----------------------------------------------------------------------------------------|
+| GET    | \`/app\`                        | —                                                                                      |
+| POST   | \`/app/configure\`              | \`{"name":"…","runtime":"node|python|go|static","scan_threshold"?:"none|low|…"}\`  |
+| POST   | \`/app/deploy\`                 | tar stream (\`Content-Type: application/x-tar\`)                                       |
+| POST   | \`/app/rollback\`               | \`{}\` or \`{"deploy_id":42}\`                                                           |
+| GET    | \`/app/source\`                 | — (returns tar stream)                                                                 |
+| GET    | \`/app/status\`                 | —                                                                                      |
+| GET    | \`/app/logs?tail=200\`          | —                                                                                      |
+| GET    | \`/app/env\`                    | —                                                                                      |
+| PUT    | \`/app/env\`                    | \`{"env":{"KEY":"value","DROP":null}}\` — \`null\` removes the key                       |
+| DELETE | \`/app/env/:KEY\`               | —                                                                                      |
+| GET    | \`/app/volumes\`                | —                                                                                      |
+| PUT    | \`/app/volumes\`                | \`{"mount_paths":["/app/data"]}\` — replaces the full list                              |
+| DELETE | \`/app/volumes/:path\`          | —                                                                                      |
+| PUT    | \`/app/healthcheck\`            | \`{"path":"/healthz"}\` — pass \`null\` to disable. **No GET; read \`health_check_path\` from \`/app\`.** |
+| PUT    | \`/app/scan-threshold\`         | \`{"threshold":"low|medium|high|critical|none"}\`                                       |
+| PUT    | \`/app/domain\`                 | \`{"custom_domain":"app.example.com"}\` or \`{"custom_domain":null}\`                    |
+| PUT    | \`/app/basic-auth\`             | \`{"enabled":true,"username":"…","password":"…"}\` or \`{"enabled":false}\`              |
+| GET    | \`/app/sso\`                    | —                                                                                      |
+| PUT    | \`/app/sso\`                    | \`{"enabled":true,"allowed_emails":["a@b.com"]}\`                                       |
+| GET    | \`/app/scan\`                   | —                                                                                      |
+| GET    | \`/app/deploys?limit=20\`       | —                                                                                      |
+| GET    | \`/app/deploys/:id/scan\`       | —                                                                                      |
+
+**Important — scan thresholds.** \`scan_threshold\` is the per-app
+setting; \`effective_scan_threshold\` (returned by \`GET /app\`) is what
+actually gates the deploy. The two diverge when the server admin has
+set a stricter \`min_scan_threshold\` (the **scan floor**). Always read
+\`effective_scan_threshold\` before deploying — a per-app
+\`scan_threshold:none\` does not override an admin-set floor unless
+\`scan_floor_exempt\` is true on the app.
+
 ## Deploy flow
 
 ### 1. Inspect the current app state
@@ -157,7 +212,10 @@ curl -sS ${base}/api/v1/app \\
 
 The response is JSON with a \`configured\` boolean. If \`configured\` is
 \`false\`, the app has only an API key and needs a name and runtime before
-it can accept deploys.
+it can accept deploys — and \`domain\` will be \`null\` until you call
+\`/app/configure\`. Also note \`scan_threshold\` (per-app) vs
+\`effective_scan_threshold\` (after the server-wide floor) — see
+the Endpoint reference above.
 
 ### 2. Configure the app (only if not configured yet)
 
@@ -391,24 +449,30 @@ curl -sS ${base}/api/v1/app/env \\
 
 ### Set or update env vars
 
-Send a JSON object with an \`env\` key. Keys are merged — existing keys not
-included in the request are left unchanged.
+Send a JSON object with an \`env\` key. Keys are **merged** with what
+is already stored — keys you don't include are left untouched. To
+remove a key, set its value to \`null\` (an empty string \`""\` is
+stored as a real, empty value).
 
 \`\`\`bash
 curl -sS -X PUT ${base}/api/v1/app/env \\
   -H "Authorization: Bearer rwy_YOUR_KEY" \\
   -H "Content-Type: application/json" \\
-  -d '{"env":{"DATABASE_URL":"postgres://...","NODE_ENV":"production"}}'
+  -d '{"env":{"DATABASE_URL":"postgres://...","NODE_ENV":"production","OLD_FLAG":null}}'
 \`\`\`
 
 ### Delete a single env var
+
+Equivalent to passing \`{"env":{"KEY":null}}\` above:
 
 \`\`\`bash
 curl -sS -X DELETE ${base}/api/v1/app/env/DATABASE_URL \\
   -H "Authorization: Bearer rwy_YOUR_KEY"
 \`\`\`
 
-Env var names must match \`[A-Za-z_][A-Za-z0-9_]*\`.
+Env var names must match \`[A-Za-z_][A-Za-z0-9_]*\`. Values must be
+strings, numbers, booleans, or \`null\` (= delete) — anything else is
+rejected with a 400.
 
 After changing env vars, redeploy the app (step 5) so the container
 restarts with the new values.
@@ -511,7 +575,9 @@ curl -sS -X PUT ${base}/api/v1/app/healthcheck \\
 
 The container will be probed every 30 seconds. If three consecutive
 checks fail, the container is marked unhealthy. Pass \`null\` to disable.
-Takes effect on the next deploy.
+Takes effect on the next deploy. There is **no GET /app/healthcheck**
+— read the currently-configured path from the \`health_check_path\`
+field of \`GET /app\`.
 
 ## Security scan
 
