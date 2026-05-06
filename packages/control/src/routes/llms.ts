@@ -120,6 +120,14 @@ This document is for LLM agents (Claude Code and similar) that have been
 asked to deploy a project to ${base}. Follow the steps below using your
 existing shell and HTTP tools — no MCP server or SDK is required.
 
+> **Skill server available.** This Runway instance also exposes built-in
+> skills (\`runway-bootstrap\`, \`runway-deploy\`, \`runway-fix-scan-finding\`,
+> \`runway-debug-deploy-fail\`) over MCP at \`${base}/mcp\`. Generate a
+> developer token on \`${base}/account\` and run the
+> \`claude mcp add ...\` command shown there to register the server with
+> Claude Code. With the skill server connected you get richer guidance
+> than this document alone provides.
+
 You will be given an API key of the form \`rwy_...\`. Each key is tied to
 one app on the server. Treat it as a secret and do not echo it to the user.
 

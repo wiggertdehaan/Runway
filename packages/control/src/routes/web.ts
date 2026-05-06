@@ -15,6 +15,11 @@ const APP_VERSION = (() => {
 import { listApps, createApp, deleteApp, getApp } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
+import {
+  createDevToken,
+  deleteDevToken,
+  listDevTokens,
+} from "../db/dev-tokens.js";
 import { getAppStats, getAppStatsBulk, type AppStats } from "../deploy/stats.js";
 import { formatActivity, formatBytes, formatRelative, type ActivityTone } from "../util/format.js";
 import { getBucketsBulk } from "../db/activity.js";
@@ -2342,6 +2347,13 @@ webRoutes.get("/health", async (c) => {
 
 // ── Account (self-service 2FA) ───────────────────────────
 
+function publicBaseUrl(c: Context): string {
+  if (process.env.DASHBOARD_DOMAIN) {
+    return `https://${process.env.DASHBOARD_DOMAIN}`;
+  }
+  return new URL(c.req.url).origin;
+}
+
 webRoutes.get("/account", (c) => {
   const user = c.get("user");
   const enabled = isTotpEnabled(user);
@@ -2349,6 +2361,8 @@ webRoutes.get("/account", (c) => {
   const error = c.req.query("error");
   const pwError = c.req.query("pw_error");
   const pwSaved = c.req.query("pw_saved");
+  const tokenRevoked = c.req.query("token_revoked");
+  const tokens = listDevTokens(user.id);
 
   const passwordCard = `
     <div class="card">
@@ -2414,6 +2428,55 @@ webRoutes.get("/account", (c) => {
       </div>
     `;
 
+  const tokensRows = tokens.length
+    ? `<table style="width:100%;border-collapse:collapse;margin-top:0.75rem;font-size:0.9rem">
+        <thead>
+          <tr style="text-align:left;color:var(--text-muted);font-weight:500">
+            <th style="padding:0.4rem 0.6rem 0.4rem 0">Name</th>
+            <th style="padding:0.4rem 0.6rem">Last used</th>
+            <th style="padding:0.4rem 0.6rem">Created</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tokens
+            .map(
+              (t) => `
+            <tr style="border-top:1px solid var(--border)">
+              <td style="padding:0.5rem 0.6rem 0.5rem 0">${escapeHtml(t.name)}</td>
+              <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.last_used_at ? escapeHtml(formatRelative(t.last_used_at)) : "never"}</td>
+              <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${escapeHtml(formatRelative(t.created_at))}</td>
+              <td style="padding:0.5rem 0 0.5rem 0.6rem;text-align:right">
+                <form method="POST" action="/account/tokens/${escapeHtml(t.id)}/delete" style="margin:0" onsubmit="return confirm('Revoke this token? Any Claude Code session using it will lose access.')">
+                  <button type="submit" class="danger" style="padding:0.25rem 0.6rem;font-size:0.75rem;width:auto">Revoke</button>
+                </form>
+              </td>
+            </tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table>`
+    : `<p class="meta" style="margin-top:0.75rem">You have no developer tokens yet.</p>`;
+
+  const tokensCard = `
+    <div class="card">
+      <h2>Skill MCP tokens</h2>
+      <p class="meta" style="margin-top:0.5rem">
+        Connect Claude Code to this Runway instance's skill server.
+        Each token is tied to your account; the token is shown only
+        once when you generate it.
+      </p>
+      ${tokenRevoked ? '<p style="color:#4ade80;margin:0.75rem 0 0">Token revoked.</p>' : ""}
+      ${tokensRows}
+      <form method="POST" action="/account/tokens" style="margin-top:0.75rem">
+        <div class="flex" style="gap:0.5rem">
+          <input type="text" name="name" placeholder="Token label (e.g. laptop)" required maxlength="60" style="flex:1" />
+          <button type="submit" style="width:auto">Generate token</button>
+        </div>
+      </form>
+    </div>
+  `;
+
   return c.html(
     layout(
       "Account",
@@ -2428,10 +2491,68 @@ webRoutes.get("/account", (c) => {
       </div>
       ${passwordCard}
       ${twofaCard}
+      ${tokensCard}
     `,
       { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
+});
+
+webRoutes.post("/account/tokens", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const name = ((body["name"] as string | undefined) ?? "").trim();
+  if (!name || name.length > 60) {
+    return c.redirect("/account");
+  }
+
+  const created = createDevToken(user.id, name);
+  logAudit(user.id, user.username, "dev_token_created", { detail: name });
+
+  const base = publicBaseUrl(c);
+  const mcpUrl = `${base}/mcp`;
+  const installCmd = `claude mcp add runway-skills --transport http ${mcpUrl} --header "Authorization: Bearer ${created.token}"`;
+
+  return c.html(
+    layout(
+      "Token created",
+      `
+      <h1>Developer token created</h1>
+      <div class="card">
+        <h2>${escapeHtml(created.name)}</h2>
+        <p class="meta" style="margin-top:0.5rem">
+          <strong>This is the only time the token will be shown.</strong>
+          Store it in your password manager if you want to keep a copy.
+        </p>
+        <p style="margin-top:0.75rem;font-size:0.85rem">Token:</p>
+        <pre style="background:#0f0f0f;border:1px solid #262626;border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.85rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(created.token)}</pre>
+        <button type="button" style="margin-top:0.5rem;padding:0.3rem 0.7rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(created.token)}" onclick="copyText(this)">Copy token</button>
+
+        <p style="margin-top:1.5rem;font-size:0.85rem">
+          Paste this into a terminal to register the skill server with
+          <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:var(--brand)">Claude Code</a>:
+        </p>
+        <pre style="background:#0f0f0f;border:1px solid #262626;border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.8rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(installCmd)}</pre>
+        <button type="button" style="margin-top:0.5rem;padding:0.3rem 0.7rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(installCmd)}" onclick="copyText(this)">Copy install command</button>
+
+        <div style="margin-top:1.5rem">
+          <a href="/account" style="color:var(--brand)">Back to account</a>
+        </div>
+      </div>
+    `,
+      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+    )
+  );
+});
+
+webRoutes.post("/account/tokens/:id/delete", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id");
+  const removed = deleteDevToken(id, user.id);
+  if (removed) {
+    logAudit(user.id, user.username, "dev_token_revoked", { detail: id });
+  }
+  return c.redirect("/account?token_revoked=1");
 });
 
 webRoutes.post("/account/password", async (c) => {

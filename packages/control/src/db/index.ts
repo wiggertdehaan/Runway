@@ -284,4 +284,61 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_request_buckets_hour
       ON app_request_buckets(hour_at);
   `);
+
+  // Phase 2: skill distribution. Developer tokens authenticate Claude
+  // Code (or any MCP client) against /mcp; skills + skill_files store
+  // SKILL.md and assets; skill_audit tracks admin approve/disable;
+  // app_skill_profiles is a per-app suggestion list, not a gate.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dev_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      last_used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_dev_tokens_user ON dev_tokens(user_id);
+
+    CREATE TABLE IF NOT EXISTS skills (
+      id TEXT PRIMARY KEY,
+      layer TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      version TEXT NOT NULL DEFAULT '0.0.1',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      source_url TEXT,
+      signed INTEGER NOT NULL DEFAULT 0,
+      is_managed INTEGER NOT NULL DEFAULT 0,
+      approved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      approved_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_skills_layer ON skills(layer);
+
+    CREATE TABLE IF NOT EXISTS skill_files (
+      skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+      path TEXT NOT NULL,
+      content BLOB NOT NULL,
+      mime_type TEXT NOT NULL,
+      PRIMARY KEY (skill_id, path)
+    );
+
+    CREATE TABLE IF NOT EXISTS skill_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      skill_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      user_id TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_audit_skill ON skill_audit(skill_id);
+
+    CREATE TABLE IF NOT EXISTS app_skill_profiles (
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+      PRIMARY KEY (app_id, skill_id)
+    );
+  `);
 }
