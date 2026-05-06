@@ -100,6 +100,8 @@ import {
 import { logAudit, getRecentAuditEntries } from "../db/audit.js";
 import { updateApp } from "../db/apps.js";
 import { getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
+import { getLatestPeriodicScan } from "../db/periodic-scans.js";
+import { rescanApp } from "../deploy/periodic-scanner.js";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
 import { getAppAllowedEmails, addAppAllowedEmail, removeAppAllowedEmail } from "../db/app-emails.js";
@@ -985,6 +987,42 @@ function renderScanSection(
       </form>`
     : "";
 
+  const periodic = getLatestPeriodicScan(app.id);
+  let periodicHtml = "";
+  if (periodic) {
+    let counts: Partial<ScanResult["counts"]> = {};
+    try {
+      const parsed = JSON.parse(periodic.scan_summary) as { counts?: ScanResult["counts"] };
+      counts = parsed.counts ?? {};
+    } catch {
+      /* keep counts empty */
+    }
+    const when = formatRelative(periodic.created_at);
+    const summary = periodic.error
+      ? `error: ${escapeHtml(periodic.error)}`
+      : `${counts.critical ?? 0} critical, ${counts.high ?? 0} high, ${counts.medium ?? 0} medium, ${counts.low ?? 0} low`;
+    const stale = periodic.image_tag !== app.image_tag
+      ? ` <span class="meta" style="font-size:0.7rem">(against <code>${escapeHtml(periodic.image_tag)}</code>, app now on <code>${escapeHtml(app.image_tag ?? "?")}</code>)</span>`
+      : "";
+    periodicHtml = `
+      <p class="meta" style="margin:0.5rem 0;font-size:0.8rem">
+        Last background rescan ${escapeHtml(when)} — ${summary}${stale}.
+      </p>`;
+  } else {
+    periodicHtml = `
+      <p class="meta" style="margin:0.5rem 0;font-size:0.8rem">
+        No background rescan yet. The scheduler reruns Trivy daily on
+        every running app's current image to surface CVEs published
+        after the deploy gate ran.
+      </p>`;
+  }
+  const rescanButton =
+    admin && app.image_tag && app.status === "running"
+      ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/rescan" style="margin:0 0 0.5rem">
+          <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Rescan now</button>
+        </form>`
+      : "";
+
   const latest = getLatestDeployWithScan(app.id);
   let reportHtml = '<p class="meta">No scan has run yet. Deploy the app to generate a report.</p>';
   if (latest?.scan_report) {
@@ -1107,6 +1145,8 @@ function renderScanSection(
       </form>
       ${floorNote}
       ${exemptToggle}
+      ${periodicHtml}
+      ${rescanButton}
       ${reportHtml}
     </div>
   `;
@@ -1723,6 +1763,22 @@ webRoutes.post("/apps/:id/scan-threshold", async (c) => {
   if (isValidThreshold(threshold)) {
     updateApp(app.id, { scan_threshold: threshold });
   }
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+webRoutes.post("/apps/:id/rescan", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  if (!app.image_tag) {
+    return c.redirect(
+      `/apps/${encodeURIComponent(app.id)}?error=no_image#scan`,
+    );
+  }
+  // Run inline so the page reload reflects the new periodic-scan row.
+  await rescanApp(app);
+  logAudit(user.id, user.username, "app_rescanned", { detail: app.id });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 

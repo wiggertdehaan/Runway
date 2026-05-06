@@ -28,13 +28,19 @@ things that would waste time to re-derive.
 ```bash
 pnpm install                 # once
 pnpm typecheck               # must be clean before committing
+pnpm test                    # vitest, control package only (no
+                             #   integration / DB / HTTP tests yet)
 pnpm --filter @runway/control dev   # run control locally on :3000
 pnpm mcp:build               # build packages/mcp/dist for Claude Code
 pnpm mcp:path                # print absolute path to the MCP entry
 ```
 
-There is no test suite yet. Verification is `pnpm typecheck` plus a
-round-trip on the dev server.
+The test suite (vitest, in `packages/control/src/**/*.test.ts`) only
+covers pure functions: source parsers, hashers, validators,
+formatters, the SSRF allowlist, and the scan-threshold logic. No
+HTTP, DB, or network integration tests yet — those rely on the dev
+server round-trip. When you add a new pure helper, add the test
+beside it (`foo.ts` → `foo.test.ts`).
 
 ## Deploy-to-server flow (when editing the platform)
 
