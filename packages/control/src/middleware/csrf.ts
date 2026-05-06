@@ -58,6 +58,11 @@ export async function verifyCsrf(c: Context, next: Next) {
     return next();
   }
 
+  // Skip CSRF for the MCP endpoint (Bearer-token authenticated, JSON-RPC).
+  if (c.req.path === "/mcp") {
+    return next();
+  }
+
   const cookieToken = getCookie(c, CSRF_COOKIE);
   if (!cookieToken) {
     return c.text("CSRF validation failed", 403);

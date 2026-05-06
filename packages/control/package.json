@@ -1,6 +1,6 @@
 {
   "name": "@runway/control",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,12 +11,14 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "dockerode": "^4.0.4",
     "hono": "^4.12.14",
     "js-yaml": "^4.1.0",
     "nanoid": "^5.1.9",
     "qrcode": "^1.5.4",
-    "bcryptjs": "^3.0.3"
+    "bcryptjs": "^3.0.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/dockerode": "^4.0.1",

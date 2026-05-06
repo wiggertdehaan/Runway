@@ -6,8 +6,10 @@ import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
 import { refreshDb } from "./deploy/scan.js";
 import { startActivityTailer } from "./deploy/activity-tailer.js";
+import { loadBuiltinSkills } from "./skills/builtin-loader.js";
 
 migrate();
+loadBuiltinSkills();
 
 // Tail Traefik's access log so the dashboard can show per-app
 // activity (idle vs active) and a 7-day request sparkline. No-op

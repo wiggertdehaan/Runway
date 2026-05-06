@@ -104,9 +104,31 @@ MCP servers needed.
 2. Open your project in Claude Code and paste it.
 3. Done. Claude handles the Dockerfile, build, and deploy.
 
-### Option B — MCP server
+### Option B — Built-in skill server (recommended for Claude Code)
 
-For power users who want structured tool calls instead of `curl`:
+Runway hosts an MCP-based skill server alongside the dashboard.
+Generate a developer token on `/account`, copy the one-line install
+command, paste it into a terminal, and Claude Code picks up four
+built-in skills:
+
+- `runway-bootstrap` — set up a Runway-friendly project layout
+- `runway-deploy` — push a deploy
+- `runway-fix-scan-finding` — diagnose Trivy findings
+- `runway-debug-deploy-fail` — diagnose failed deploys
+
+```bash
+claude mcp add runway-skills --transport http \
+  https://runway.example.com/mcp \
+  --header "Authorization: Bearer rwd_..."
+```
+
+No clone, no per-project install — the skills come straight from
+your Runway instance and stay current as the platform evolves.
+
+### Option C — Local MCP server (legacy, app-scoped)
+
+The original per-app MCP server still works for power users who want
+structured tool calls (deploy, env, volumes) instead of `curl`:
 
 ```bash
 git clone https://github.com/wiggertdehaan/Runway.git
@@ -362,6 +384,7 @@ Planned improvements — contributions welcome:
 - **App detail: sticky meta bar + scan in deploy table** — sticky summary bar (domain/status/uptime) across tabs; scan badge inline per deploy row instead of separate section
 - **Audit log filters** — filter by user/action/date, colored action badges, pagination, CSV export
 - **Multiple custom domains per app** — currently limited to one custom domain plus the auto-generated subdomain
+- ~~Built-in MCP skill server~~ *(v0.12 — Runway hosts four built-in skills via remote MCP; users mint a developer token on /account and paste a one-line `claude mcp add` command to wire it into Claude Code)*
 - ~~Pre-build guardrails in `/llms.txt`~~ *(v0.11 — "Before you start building" section with runtime-agnostic rules and per-runtime OWASP checklist, so agents produce a Runway-proof project on the first try)*
 - ~~Server-wide scan floor~~ *(v0.5.4 — admin-configurable minimum threshold that all apps must respect, with per-app exemption for admins; low findings muted in badge and report UI)*
 - ~~Deploy version history UI~~ *(v0.5.2 — dashboard table of recent deploys with one-click restore to any successful version, also via API and MCP)*
