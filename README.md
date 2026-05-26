@@ -374,8 +374,9 @@ isolation.
 - The **REST API** (`/api/v1/*`) uses Bearer-token auth with per-app keys,
   independent from the session cookie used by the web UI.
 - The **deploy endpoint** accepts up to 100 MB of `application/x-tar` per
-  request. The uploaded code is built as root inside Docker build, so
-  treat API key holders as trusted.
+  request by default; an admin can raise the limit under Settings. The
+  uploaded code is built as root inside Docker build, so treat API key
+  holders as trusted.
 - **Environment variables** are stored in SQLite and injected at container
   start. They are visible to authenticated dashboard users and API key
   holders; treat the dashboard and API keys as privileged access.

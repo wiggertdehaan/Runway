@@ -8,7 +8,7 @@ import {
   type App,
   type Runtime,
 } from "../db/apps.js";
-import { getSetting, slugify } from "../db/settings.js";
+import { getSetting, getMaxUploadBytes, slugify } from "../db/settings.js";
 import {
   deployApp,
   getAppLogs,
@@ -61,9 +61,6 @@ import { validateCustomDomain } from "../util/domain.js";
 type Env = { Variables: { app: App } };
 
 export const apiRoutes = new Hono<Env>();
-
-// Max upload size for a project tarball (100 MB).
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 apiRoutes.use("/*", apiAuth);
 
@@ -247,18 +244,19 @@ apiRoutes.post("/app/deploy", async (c) => {
     );
   }
 
+  const maxUploadBytes = getMaxUploadBytes();
   const lengthHeader = c.req.header("content-length");
-  if (lengthHeader && parseInt(lengthHeader, 10) > MAX_UPLOAD_BYTES) {
+  if (lengthHeader && parseInt(lengthHeader, 10) > maxUploadBytes) {
     return c.json(
-      { error: `Upload exceeds limit of ${MAX_UPLOAD_BYTES} bytes` },
+      { error: `Upload exceeds limit of ${maxUploadBytes} bytes` },
       413
     );
   }
 
   const arrayBuffer = await c.req.arrayBuffer();
-  if (arrayBuffer.byteLength > MAX_UPLOAD_BYTES) {
+  if (arrayBuffer.byteLength > maxUploadBytes) {
     return c.json(
-      { error: `Upload exceeds limit of ${MAX_UPLOAD_BYTES} bytes` },
+      { error: `Upload exceeds limit of ${maxUploadBytes} bytes` },
       413
     );
   }

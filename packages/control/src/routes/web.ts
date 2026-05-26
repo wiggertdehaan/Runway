@@ -89,6 +89,9 @@ import {
   deleteSetting,
   normalizeBaseDomain,
   slugify,
+  getMaxUploadMb,
+  clampUploadMb,
+  MAX_UPLOAD_MB_CEILING,
 } from "../db/settings.js";
 import {
   SESSION_COOKIE,
@@ -2195,6 +2198,7 @@ webRoutes.get("/settings", (c) => {
   const baseDomain = getSetting("base_domain") ?? "";
   const webhookUrl = getSetting("webhook_url") ?? "";
   const minScanThreshold = getSetting("min_scan_threshold") ?? "none";
+  const maxUploadMb = getMaxUploadMb();
   const googleClientId = getSetting("oauth_google_client_id") ?? "";
   const microsoftClientId = getSetting("oauth_microsoft_client_id") ?? "";
   const saved = c.req.query("saved");
@@ -2225,6 +2229,7 @@ webRoutes.get("/settings", (c) => {
           <a href="#domain">Base domain</a>
           <a href="#notifications">Notifications</a>
           <a href="#scan-floor">Scan floor</a>
+          <a href="#upload-limit">Upload limit</a>
           <a href="#sso">Single Sign-On</a>
         </nav>
         <div>
@@ -2275,6 +2280,21 @@ webRoutes.get("/settings", (c) => {
                     return `<option value="${t}"${sel}>${escapeHtml(labels[t] ?? t)}</option>`;
                   }).join("")}
                 </select>
+                <button type="submit">Save</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="card" id="upload-limit">
+            <h2>Upload limit</h2>
+            <p class="hint" style="margin:0.5rem 0 1rem">
+              Maximum size of a deploy tarball, in megabytes. The whole upload
+              is buffered in memory, so very large values can exhaust the
+              control container. Max ${MAX_UPLOAD_MB_CEILING} MB.
+            </p>
+            <form method="POST" action="/settings/upload-limit">
+              <div class="flex">
+                <input type="number" name="max_upload_mb" value="${maxUploadMb}" min="1" max="${MAX_UPLOAD_MB_CEILING}" step="1" style="flex:1" />
                 <button type="submit">Save</button>
               </div>
             </form>
@@ -2361,6 +2381,17 @@ webRoutes.post("/settings/scan-floor", async (c) => {
   const threshold = body["threshold"] as string | undefined;
   if (isValidThreshold(threshold)) {
     setSetting("min_scan_threshold", threshold);
+  }
+  return c.redirect("/settings?saved=1");
+});
+
+webRoutes.post("/settings/upload-limit", async (c) => {
+  const body = await c.req.parseBody();
+  const parsed = parseInt((body["max_upload_mb"] as string | undefined) ?? "", 10);
+  if (Number.isFinite(parsed)) {
+    // Clamp on write so the stored value matches what getMaxUploadMb()
+    // enforces on read. Ignore non-numeric input (keep current setting).
+    setSetting("max_upload_mb", String(clampUploadMb(parsed)));
   }
   return c.redirect("/settings?saved=1");
 });

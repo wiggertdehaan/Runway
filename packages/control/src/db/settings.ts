@@ -10,6 +10,7 @@ export type SettingKey =
   | "acme_email"
   | "webhook_url"
   | "min_scan_threshold"
+  | "max_upload_mb"
   | "oauth_google_client_id"
   | "oauth_google_client_secret"
   | "oauth_microsoft_client_id"
@@ -35,6 +36,39 @@ export function setSetting(key: SettingKey, value: string): void {
 
 export function deleteSetting(key: SettingKey): void {
   db.prepare(`DELETE FROM settings WHERE key = ?`).run(key);
+}
+
+/**
+ * Default and ceiling for the deploy upload limit, in megabytes. The whole
+ * tarball is buffered in memory during a deploy (`c.req.arrayBuffer()`), so
+ * the ceiling guards against an admin setting a value that risks OOM on the
+ * control container. Stored in the settings table as a plain integer.
+ */
+export const DEFAULT_MAX_UPLOAD_MB = 100;
+export const MAX_UPLOAD_MB_CEILING = 2048;
+
+/**
+ * Resolve the configured deploy upload limit in bytes. Falls back to the
+ * default when unset or unparseable, and clamps to
+ * [1, MAX_UPLOAD_MB_CEILING] so a bad stored value can't break deploys.
+ */
+export function getMaxUploadBytes(): number {
+  return getMaxUploadMb() * 1024 * 1024;
+}
+
+/** Same as getMaxUploadBytes() but in megabytes (for display in the UI). */
+export function getMaxUploadMb(): number {
+  return clampUploadMb(parseInt(getSetting("max_upload_mb") ?? "", 10));
+}
+
+/**
+ * Clamp a parsed megabyte value to the valid range. Returns the default for
+ * NaN/non-finite input, otherwise clamps to [1, MAX_UPLOAD_MB_CEILING].
+ * Pure — used both when reading and when persisting the setting.
+ */
+export function clampUploadMb(parsed: number): number {
+  if (!Number.isFinite(parsed)) return DEFAULT_MAX_UPLOAD_MB;
+  return Math.min(Math.max(parsed, 1), MAX_UPLOAD_MB_CEILING);
 }
 
 /**

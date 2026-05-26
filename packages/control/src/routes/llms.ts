@@ -385,8 +385,8 @@ tar --exclude-from=.dockerignore --exclude-from=.gitignore --exclude=.git -cf - 
 Notes:
 
 - The body must be a plain POSIX \`tar\` stream (not gzip).
-- Maximum upload size is 100 MB. If you exceed this, tighten the
-  ignore files.
+- Maximum upload size defaults to 100 MB (an admin can change this
+  under Settings). If you exceed it, tighten the ignore files.
 - The request may take tens of seconds: the server builds the image
   and starts the container before returning.
 
@@ -795,8 +795,8 @@ Notes:
 - \`401 Unauthorized\` — the Bearer token is missing or invalid.
 - \`409 Conflict\` on \`/app/deploy\` — the app has not been configured yet.
   Call \`/app/configure\` first.
-- \`413 Payload Too Large\` — the tar exceeded 100 MB. Shrink the ignore
-  lists.
+- \`413 Payload Too Large\` — the tar exceeded the configured upload
+  limit (100 MB by default). Shrink the ignore lists.
 - \`415 Unsupported Media Type\` — the Content-Type was not
   \`application/x-tar\`.
 - \`500 Internal Server Error\` — the build or container start failed.
