@@ -109,6 +109,13 @@ import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, typ
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
 import { getAppAllowedEmails, addAppAllowedEmail, removeAppAllowedEmail } from "../db/app-emails.js";
 import { appContainerName, destroyApp, rollbackApp } from "../deploy/index.js";
+import {
+  latestSource,
+  sourceForDeploy,
+  hasSourceForDeploy,
+  SOURCE_RETENTION,
+} from "../deploy/source.js";
+import { readFile } from "node:fs/promises";
 import { docker } from "../deploy/docker.js";
 import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
@@ -991,6 +998,9 @@ function renderDeployHistory(
       const tagShort = d.image_tag
         ? escapeHtml(d.image_tag.split(":").pop() ?? d.image_tag)
         : '<span class="meta">—</span>';
+      const sourceCell = hasSourceForDeploy(app.id, d.id)
+        ? `<a href="/apps/${encodeURIComponent(app.id)}/source?deploy=${d.id}" class="ghost" style="font-size:0.75rem;padding:0.25rem 0.5rem;text-decoration:none">Download</a>`
+        : '<span class="meta" style="font-size:0.75rem">—</span>';
       const canRollback =
         d.status === "success" && !!d.image_tag && !isCurrent;
       const action = isCurrent
@@ -1006,6 +1016,7 @@ function renderDeployHistory(
           <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span></td>
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem" title="${escapeHtml(d.image_tag ?? "")}">${tagShort}</td>
           <td style="padding:0.4rem 0.75rem;font-size:0.8rem" class="meta">${when}</td>
+          <td style="padding:0.4rem 0.75rem">${sourceCell}</td>
           <td style="padding:0.4rem 0.75rem;text-align:right">${action}</td>
         </tr>
       `;
@@ -1018,7 +1029,8 @@ function renderDeployHistory(
       <p class="hint" style="margin:0.5rem 0 1rem">
         Most recent deploys first. Restoring a previous deploy replaces the
         running container with that image. Env vars, volumes, and domain
-        config are preserved.
+        config are preserved. Download pulls that deploy's source tarball
+        (the last ${SOURCE_RETENTION} snapshots are kept).
       </p>
       <div style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse">
@@ -1028,6 +1040,7 @@ function renderDeployHistory(
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Status</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Image</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">When</th>
+              <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Source</th>
               <th style="padding:0.5rem 0.75rem"></th>
             </tr>
           </thead>
@@ -1788,6 +1801,40 @@ webRoutes.post("/apps/:id/rollback/:deployId", async (c) => {
       `/apps/${encodeURIComponent(app.id)}?rollback_error=${msg}#deploys`
     );
   }
+});
+
+webRoutes.get("/apps/:id/source", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+
+  const deployParam = c.req.query("deploy");
+  let ref = null as ReturnType<typeof latestSource>;
+  let suffix = "source";
+  if (deployParam !== undefined) {
+    const deployId = parseInt(deployParam, 10);
+    if (!Number.isInteger(deployId) || deployId < 1) {
+      return c.redirect(`/apps/${encodeURIComponent(app.id)}?error=bad_deploy_id#deploys`);
+    }
+    ref = sourceForDeploy(app.id, deployId);
+    suffix = `deploy-${deployId}`;
+  } else {
+    ref = latestSource(app.id);
+  }
+  if (!ref) {
+    return c.redirect(`/apps/${encodeURIComponent(app.id)}?error=no_source#deploys`);
+  }
+
+  let buf: Buffer;
+  try {
+    buf = await readFile(ref.path);
+  } catch {
+    return c.redirect(`/apps/${encodeURIComponent(app.id)}?error=no_source#deploys`);
+  }
+  const base = slugify(app.name ?? app.id) || app.id;
+  c.header("Content-Type", "application/x-tar");
+  c.header("Content-Length", String(ref.bytes));
+  c.header("Content-Disposition", `attachment; filename="${base}-${suffix}.tar"`);
+  return c.body(new Uint8Array(buf));
 });
 
 webRoutes.post("/apps/:id/basic-auth", async (c) => {

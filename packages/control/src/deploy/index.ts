@@ -31,7 +31,7 @@ import {
 } from "./scan.js";
 import { getSetting } from "../db/settings.js";
 import { preflightCheckTar, PreflightRejectedError } from "./preflight.js";
-import { saveSource } from "./source.js";
+import { saveSource, pruneOldSources, deleteAllSources } from "./source.js";
 export { PreflightRejectedError } from "./preflight.js";
 
 function dockerSafeId(appId: string): string {
@@ -259,21 +259,22 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     container_id: run.containerId,
   });
 
-  recordDeploy(app.id, imageTag, "success", {
+  const deploy = recordDeploy(app.id, imageTag, "success", {
     log: build.log,
     scanStatus: scan.status,
     scanSummary,
     scanReport: scan,
   });
 
-  // Persist the build context so the user can later pull the project
-  // source back to a fresh working directory (runway_pull / GET
-  // /api/v1/app/source). Best-effort: don't fail the deploy if the
-  // disk write trips. Only saved on a successful deploy so a broken
-  // upload never replaces the last working source.
+  // Persist the build context per deploy so the project source can later
+  // be pulled back to a fresh working directory (runway_pull / GET
+  // /api/v1/app/source). Best-effort: don't fail the deploy if the disk
+  // write trips. Only saved on a successful deploy so a broken upload
+  // never replaces a previous good source.
   if (tarBuffer) {
     try {
-      saveSource(app.id, tarBuffer);
+      saveSource(app.id, deploy.id, tarBuffer);
+      pruneOldSources(app.id);
     } catch {
       // ignore
     }
@@ -381,6 +382,7 @@ export async function rollbackApp(
 export async function destroyApp(app: App): Promise<void> {
   await removeContainerByName(appContainerName(app.id));
   await deleteAppRoute(app.id);
+  deleteAllSources(app.id);
 }
 
 export async function getAppStatus(app: App) {

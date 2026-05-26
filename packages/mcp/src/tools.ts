@@ -178,13 +178,21 @@ export function registerTools(server: McpServer, client: RunwayClient) {
 
   server.tool(
     "runway_pull",
-    "Pull the project source of a deployed Runway app back to a local directory. Useful when starting a fresh Claude Code session and you want to continue developing an app you previously deployed but no longer have a local copy of. The server returns the build context from the most recent successful deploy (no .git history — only the files that were uploaded). Refuses to extract into a non-empty directory unless 'force' is true.",
+    "Pull the project source of a deployed Runway app back to a local directory. Useful when starting a fresh Claude Code session and you want to continue developing an app you previously deployed but no longer have a local copy of. The server returns the build context from a successful deploy (no .git history — only the files that were uploaded); defaults to the most recent. Pass 'deploy' to fetch a specific deploy's snapshot (see runway_list_deploys for which ids still have source). Refuses to extract into a non-empty directory unless 'force' is true.",
     {
       target_dir: z
         .string()
         .optional()
         .describe(
           "Absolute path to extract the source into. Defaults to the current working directory. Created if it does not exist."
+        ),
+      deploy: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Deploy id to pull. Defaults to the most recent saved snapshot. Only the last several deploys are retained server-side."
         ),
       force: z
         .boolean()
@@ -193,7 +201,7 @@ export function registerTools(server: McpServer, client: RunwayClient) {
           "Set to true to extract over an existing non-empty directory. Files are merged: existing files with the same path are overwritten, others are left in place."
         ),
     },
-    async ({ target_dir, force }) => {
+    async ({ target_dir, deploy, force }) => {
       const dest = target_dir ?? process.cwd();
 
       if (!existsSync(dest)) {
@@ -239,7 +247,7 @@ export function registerTools(server: McpServer, client: RunwayClient) {
 
       let tarBuffer: Buffer | null;
       try {
-        tarBuffer = await client.pullSource();
+        tarBuffer = await client.pullSource(deploy);
       } catch (err: any) {
         return {
           content: [
@@ -258,8 +266,10 @@ export function registerTools(server: McpServer, client: RunwayClient) {
             {
               type: "text",
               text:
-                "No source is saved for this app yet. Source is captured on every successful deploy. " +
-                "If the app was deployed before this feature was added, redeploy it once to enable pull.",
+                deploy !== undefined
+                  ? `No source retained for deploy #${deploy}. Only the most recent snapshots are kept; run runway_list_deploys to see which ids still have source.`
+                  : "No source is saved for this app yet. Source is captured on every successful deploy. " +
+                    "If the app was deployed before this feature was added, redeploy it once to enable pull.",
             },
           ],
           isError: true,
@@ -285,9 +295,11 @@ export function registerTools(server: McpServer, client: RunwayClient) {
           {
             type: "text",
             text: [
-              `Pulled ${(tarBuffer.length / 1024).toFixed(1)} KB into ${dest}.`,
+              `Pulled ${(tarBuffer.length / 1024).toFixed(1)} KB into ${dest}` +
+                (deploy !== undefined ? ` (deploy #${deploy}).` : "."),
               "",
-              "The extracted files are the build context from the most recent successful deploy",
+              "The extracted files are the build context from the deploy" +
+                (deploy !== undefined ? "" : " (most recent successful one)"),
               "(.git history is not included). Initialize a fresh git repo if you want version control:",
               "",
               "  git init && git add . && git commit -m 'initial pull from runway'",
@@ -594,7 +606,7 @@ export function registerTools(server: McpServer, client: RunwayClient) {
 
   server.tool(
     "runway_list_deploys",
-    "List recent deploys of the Runway app (most recent first). Each entry has id, image_tag, status, scan summary, created_at, and is_current. Use the id with runway_rollback to restore any successful historical deploy.",
+    "List recent deploys of the Runway app (most recent first). Each entry has id, image_tag, status, scan summary, created_at, is_current, and has_source (whether that deploy's source tarball is still retained and can be fetched with runway_pull deploy=<id>). Use the id with runway_rollback to restore any successful historical deploy.",
     {
       limit: z
         .number()

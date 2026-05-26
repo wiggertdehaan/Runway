@@ -188,6 +188,20 @@ API (`GET /app/deploys`, `POST /app/rollback` with optional
 Env vars, volumes, and domain config stay untouched; only the
 container image changes.
 
+### Pull project source
+
+Runway keeps the build context of every successful deploy, so you can
+pull a codebase back to a fresh machine without a separate git host —
+handy when a teammate built an app and you want to continue it, or you
+just lost your local checkout. Download any retained snapshot from the
+deploy history table in the dashboard, via the API
+(`GET /app/source`, optional `?deploy=<id>`), or with the MCP
+(`runway_pull`, optional `deploy`). The most recent snapshots are kept
+(default 10, `RUNWAY_SOURCE_RETENTION`). The tarball is the uploaded
+file set after `.dockerignore`/`.gitignore` filtering — `.git` history
+is not included, so `git init` after extracting if you want version
+control.
+
 ### Basic auth
 
 Put HTTP basic auth in front of any app at the gateway with one

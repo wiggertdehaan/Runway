@@ -174,7 +174,7 @@ for actions (configure, deploy, rollback). All paths are under
 | POST   | \`/app/configure\`              | \`{"name":"…","runtime":"node|python|go|static","scan_threshold"?:"none|low|…","skill_ids"?:["…"]}\` |
 | POST   | \`/app/deploy\`                 | tar stream (\`Content-Type: application/x-tar\`)                                       |
 | POST   | \`/app/rollback\`               | \`{}\` or \`{"deploy_id":42}\`                                                           |
-| GET    | \`/app/source\`                 | — (returns tar stream)                                                                 |
+| GET    | \`/app/source?deploy=42\`       | — (returns tar stream; \`deploy\` optional, defaults to latest)                        |
 | GET    | \`/app/status\`                 | —                                                                                      |
 | GET    | \`/app/logs?tail=200\`          | —                                                                                      |
 | GET    | \`/app/env\`                    | —                                                                                      |
@@ -732,7 +732,8 @@ curl -sS "${base}/api/v1/app/deploys?limit=20" \\
 
 Each entry has \`id\`, \`image_tag\`, \`status\` (\`success\`,
 \`failed\`, \`blocked\`, \`warned\`), \`scan_status\`, \`scan_summary\`,
-\`created_at\`, and \`is_current\`.
+\`created_at\`, \`is_current\`, and \`has_source\` (whether that
+deploy's source tarball is still retained — see "Pull project source").
 
 Roll back to the previous successful deploy:
 
@@ -777,18 +778,27 @@ curl -sS ${base}/api/v1/app/source \\
   | tar -xf -
 \`\`\`
 
+Pull a specific historical deploy instead of the latest (find ids
+with \`has_source: true\` via \`/app/deploys\`):
+
+\`\`\`bash
+curl -sS "${base}/api/v1/app/source?deploy=42" \\
+  -H "Authorization: Bearer rwy_YOUR_KEY" \\
+  -o source.tar
+\`\`\`
+
 Notes:
 
-- The source is whatever was uploaded on the last successful deploy —
-  the same file set the build saw, post \`.dockerignore\` /
-  \`.gitignore\` filtering. **\`.git\` history is not included**;
-  initialize a fresh repo with \`git init\` after extracting if you
-  want version control.
-- Returns **404** if no source is saved yet (app deployed before this
-  feature was added, or never deployed successfully). Redeploy once
-  to populate it.
-- Only the latest successful deploy is retained — there is no
-  per-deploy source history.
+- The source is whatever was uploaded on that deploy — the same file
+  set the build saw, post \`.dockerignore\` / \`.gitignore\` filtering.
+  **\`.git\` history is not included**; initialize a fresh repo with
+  \`git init\` after extracting if you want version control.
+- A snapshot is saved on every successful deploy. The most recent
+  snapshots are retained (default 10, set by \`RUNWAY_SOURCE_RETENTION\`);
+  older ones are pruned. Omitting \`deploy\` returns the newest.
+- Returns **404** if no matching source exists — no successful deploy
+  yet, the app last deployed before this feature was added (redeploy
+  once to populate it), or the requested deploy's snapshot was pruned.
 
 ## Error handling
 
