@@ -228,13 +228,17 @@ export class RunwayClient {
   }
 
   /**
-   * Download the build context from the most recent successful deploy
-   * as a tar buffer. Returns null if the server has no source saved
-   * yet (404 — app deployed before this feature, or never deployed
-   * successfully).
+   * Download a deploy's build context as a tar buffer. Defaults to the
+   * most recent saved snapshot; pass a deploy id to fetch a specific one.
+   * Returns null if the server has no matching source (404 — app deployed
+   * before this feature, never deployed successfully, or the requested
+   * deploy's snapshot has been pruned).
    */
-  async pullSource(): Promise<Buffer | null> {
-    const url = `${this.baseUrl}/api/v1/app/source`;
+  async pullSource(deployId?: number): Promise<Buffer | null> {
+    const url =
+      deployId !== undefined
+        ? `${this.baseUrl}/api/v1/app/source?deploy=${deployId}`
+        : `${this.baseUrl}/api/v1/app/source`;
     const res = await fetch(url, {
       method: "GET",
       headers: { Authorization: `Bearer ${this.apiKey}` },
@@ -259,6 +263,7 @@ export class RunwayClient {
       scan_summary: { status?: string; counts?: Record<string, number> } | null;
       created_at: string;
       is_current: boolean;
+      has_source: boolean;
     }>;
   }> {
     return this.request(`/app/deploys?limit=${limit}`);

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { slugify } from "./settings.js";
+import {
+  slugify,
+  clampUploadMb,
+  DEFAULT_MAX_UPLOAD_MB,
+  MAX_UPLOAD_MB_CEILING,
+} from "./settings.js";
 
 describe("slugify", () => {
   it("lowercases and replaces non-alphanumeric runs with single hyphens", () => {
@@ -25,5 +30,26 @@ describe("slugify", () => {
 
   it("preserves digits", () => {
     expect(slugify("App 42")).toBe("app-42");
+  });
+});
+
+describe("clampUploadMb", () => {
+  it("returns the default for non-finite input", () => {
+    expect(clampUploadMb(NaN)).toBe(DEFAULT_MAX_UPLOAD_MB);
+    expect(clampUploadMb(Infinity)).toBe(DEFAULT_MAX_UPLOAD_MB);
+  });
+
+  it("passes valid values through unchanged", () => {
+    expect(clampUploadMb(250)).toBe(250);
+    expect(clampUploadMb(DEFAULT_MAX_UPLOAD_MB)).toBe(DEFAULT_MAX_UPLOAD_MB);
+  });
+
+  it("clamps to the floor of 1 MB", () => {
+    expect(clampUploadMb(0)).toBe(1);
+    expect(clampUploadMb(-50)).toBe(1);
+  });
+
+  it("clamps to the ceiling", () => {
+    expect(clampUploadMb(MAX_UPLOAD_MB_CEILING + 1000)).toBe(MAX_UPLOAD_MB_CEILING);
   });
 });

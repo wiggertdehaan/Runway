@@ -71,7 +71,7 @@ tar --exclude-from=.dockerignore --exclude-from=.gitignore --exclude=.git -cf - 
 
 Constraints:
 - Body must be plain POSIX `tar` (not gzip).
-- Max upload 100 MB.
+- Max upload 100 MB by default (admin-configurable in Settings).
 - The request can take tens of seconds — the server builds and
   starts the container before responding.
 

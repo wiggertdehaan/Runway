@@ -8,7 +8,7 @@ import {
   type App,
   type Runtime,
 } from "../db/apps.js";
-import { getSetting, slugify } from "../db/settings.js";
+import { getSetting, getMaxUploadBytes, slugify } from "../db/settings.js";
 import {
   deployApp,
   getAppLogs,
@@ -17,7 +17,12 @@ import {
   ScanBlockedError,
   PreflightRejectedError,
 } from "../deploy/index.js";
-import { sourcePath, sourceStat } from "../deploy/source.js";
+import {
+  latestSource,
+  sourceForDeploy,
+  hasSourceForDeploy,
+  type SourceRef,
+} from "../deploy/source.js";
 import { readFile } from "node:fs/promises";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, type Threshold } from "../deploy/scan.js";
 import { getDeploy, getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
@@ -61,9 +66,6 @@ import { validateCustomDomain } from "../util/domain.js";
 type Env = { Variables: { app: App } };
 
 export const apiRoutes = new Hono<Env>();
-
-// Max upload size for a project tarball (100 MB).
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 apiRoutes.use("/*", apiAuth);
 
@@ -247,18 +249,19 @@ apiRoutes.post("/app/deploy", async (c) => {
     );
   }
 
+  const maxUploadBytes = getMaxUploadBytes();
   const lengthHeader = c.req.header("content-length");
-  if (lengthHeader && parseInt(lengthHeader, 10) > MAX_UPLOAD_BYTES) {
+  if (lengthHeader && parseInt(lengthHeader, 10) > maxUploadBytes) {
     return c.json(
-      { error: `Upload exceeds limit of ${MAX_UPLOAD_BYTES} bytes` },
+      { error: `Upload exceeds limit of ${maxUploadBytes} bytes` },
       413
     );
   }
 
   const arrayBuffer = await c.req.arrayBuffer();
-  if (arrayBuffer.byteLength > MAX_UPLOAD_BYTES) {
+  if (arrayBuffer.byteLength > maxUploadBytes) {
     return c.json(
-      { error: `Upload exceeds limit of ${MAX_UPLOAD_BYTES} bytes` },
+      { error: `Upload exceeds limit of ${maxUploadBytes} bytes` },
       413
     );
   }
@@ -335,34 +338,58 @@ apiRoutes.post("/app/deploy", async (c) => {
 });
 
 /**
- * Download the build context from the most recent successful deploy
- * as a tar stream. Lets the user pull the project source back to a
- * fresh working directory (e.g. a new Claude Code session) without
- * the original local checkout.
+ * Download a deploy's build context as a tar stream. Lets the user pull
+ * the project source back to a fresh working directory (e.g. a new Claude
+ * Code session) without the original local checkout. Defaults to the most
+ * recent saved snapshot; `?deploy=<id>` selects a specific deploy.
  */
 apiRoutes.get("/app/source", async (c) => {
   const app = c.get("app");
-  const stat = sourceStat(app.id);
-  if (!stat) {
-    return c.json(
-      {
-        error: "No source available for this app",
-        hint: "Source is saved on each successful deploy. Run a deploy first.",
-      },
-      404
-    );
+
+  const deployParam = c.req.query("deploy");
+  let ref: SourceRef | null;
+  let filenameSuffix = "source";
+  if (deployParam !== undefined) {
+    const deployId = parseInt(deployParam, 10);
+    if (!Number.isInteger(deployId) || deployId < 1) {
+      return c.json({ error: "deploy must be a positive integer" }, 400);
+    }
+    ref = sourceForDeploy(app.id, deployId);
+    filenameSuffix = `deploy-${deployId}`;
+    if (!ref) {
+      return c.json(
+        {
+          error: `No source retained for deploy #${deployId}`,
+          hint: "Only the most recent snapshots are kept (see RUNWAY_SOURCE_RETENTION). List deploys to see which still have source.",
+        },
+        404
+      );
+    }
+  } else {
+    ref = latestSource(app.id);
+    if (!ref) {
+      return c.json(
+        {
+          error: "No source available for this app",
+          hint: "Source is saved on each successful deploy. Run a deploy first.",
+        },
+        404
+      );
+    }
   }
+
   let buf: Buffer;
   try {
-    buf = await readFile(sourcePath(app.id));
+    buf = await readFile(ref.path);
   } catch (err: any) {
     return c.json({ error: err?.message ?? "Failed to read source" }, 500);
   }
-  const filename = `${slugify(app.name ?? app.id) || app.id}-source.tar`;
+  const base = slugify(app.name ?? app.id) || app.id;
+  const filename = `${base}-${filenameSuffix}.tar`;
   c.header("Content-Type", "application/x-tar");
-  c.header("Content-Length", String(stat.bytes));
+  c.header("Content-Length", String(ref.bytes));
   c.header("Content-Disposition", `attachment; filename="${filename}"`);
-  c.header("Last-Modified", stat.mtime.toUTCString());
+  c.header("Last-Modified", ref.mtime.toUTCString());
   return c.body(new Uint8Array(buf));
 });
 
@@ -798,6 +825,7 @@ apiRoutes.get("/app/deploys", (c) => {
     scan_summary: d.scan_summary ? JSON.parse(d.scan_summary) : null,
     created_at: d.created_at,
     is_current: d.image_tag === app.image_tag && d.status === "success",
+    has_source: hasSourceForDeploy(app.id, d.id),
   }));
   return c.json({
     app_id: app.id,

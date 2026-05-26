@@ -89,6 +89,9 @@ import {
   deleteSetting,
   normalizeBaseDomain,
   slugify,
+  getMaxUploadMb,
+  clampUploadMb,
+  MAX_UPLOAD_MB_CEILING,
 } from "../db/settings.js";
 import {
   SESSION_COOKIE,
@@ -106,6 +109,13 @@ import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, typ
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
 import { getAppAllowedEmails, addAppAllowedEmail, removeAppAllowedEmail } from "../db/app-emails.js";
 import { appContainerName, destroyApp, rollbackApp } from "../deploy/index.js";
+import {
+  latestSource,
+  sourceForDeploy,
+  hasSourceForDeploy,
+  SOURCE_RETENTION,
+} from "../deploy/source.js";
+import { readFile } from "node:fs/promises";
 import { docker } from "../deploy/docker.js";
 import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
@@ -988,6 +998,9 @@ function renderDeployHistory(
       const tagShort = d.image_tag
         ? escapeHtml(d.image_tag.split(":").pop() ?? d.image_tag)
         : '<span class="meta">—</span>';
+      const sourceCell = hasSourceForDeploy(app.id, d.id)
+        ? `<a href="/apps/${encodeURIComponent(app.id)}/source?deploy=${d.id}" class="ghost" style="font-size:0.75rem;padding:0.25rem 0.5rem;text-decoration:none">Download</a>`
+        : '<span class="meta" style="font-size:0.75rem">—</span>';
       const canRollback =
         d.status === "success" && !!d.image_tag && !isCurrent;
       const action = isCurrent
@@ -1003,6 +1016,7 @@ function renderDeployHistory(
           <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span></td>
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem" title="${escapeHtml(d.image_tag ?? "")}">${tagShort}</td>
           <td style="padding:0.4rem 0.75rem;font-size:0.8rem" class="meta">${when}</td>
+          <td style="padding:0.4rem 0.75rem">${sourceCell}</td>
           <td style="padding:0.4rem 0.75rem;text-align:right">${action}</td>
         </tr>
       `;
@@ -1015,7 +1029,8 @@ function renderDeployHistory(
       <p class="hint" style="margin:0.5rem 0 1rem">
         Most recent deploys first. Restoring a previous deploy replaces the
         running container with that image. Env vars, volumes, and domain
-        config are preserved.
+        config are preserved. Download pulls that deploy's source tarball
+        (the last ${SOURCE_RETENTION} snapshots are kept).
       </p>
       <div style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse">
@@ -1025,6 +1040,7 @@ function renderDeployHistory(
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Status</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Image</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">When</th>
+              <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Source</th>
               <th style="padding:0.5rem 0.75rem"></th>
             </tr>
           </thead>
@@ -1787,6 +1803,40 @@ webRoutes.post("/apps/:id/rollback/:deployId", async (c) => {
   }
 });
 
+webRoutes.get("/apps/:id/source", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+
+  const deployParam = c.req.query("deploy");
+  let ref = null as ReturnType<typeof latestSource>;
+  let suffix = "source";
+  if (deployParam !== undefined) {
+    const deployId = parseInt(deployParam, 10);
+    if (!Number.isInteger(deployId) || deployId < 1) {
+      return c.redirect(`/apps/${encodeURIComponent(app.id)}?error=bad_deploy_id#deploys`);
+    }
+    ref = sourceForDeploy(app.id, deployId);
+    suffix = `deploy-${deployId}`;
+  } else {
+    ref = latestSource(app.id);
+  }
+  if (!ref) {
+    return c.redirect(`/apps/${encodeURIComponent(app.id)}?error=no_source#deploys`);
+  }
+
+  let buf: Buffer;
+  try {
+    buf = await readFile(ref.path);
+  } catch {
+    return c.redirect(`/apps/${encodeURIComponent(app.id)}?error=no_source#deploys`);
+  }
+  const base = slugify(app.name ?? app.id) || app.id;
+  c.header("Content-Type", "application/x-tar");
+  c.header("Content-Length", String(ref.bytes));
+  c.header("Content-Disposition", `attachment; filename="${base}-${suffix}.tar"`);
+  return c.body(new Uint8Array(buf));
+});
+
 webRoutes.post("/apps/:id/basic-auth", async (c) => {
   const app = getApp(c.req.param("id"));
   if (!app) return c.redirect("/");
@@ -2195,6 +2245,7 @@ webRoutes.get("/settings", (c) => {
   const baseDomain = getSetting("base_domain") ?? "";
   const webhookUrl = getSetting("webhook_url") ?? "";
   const minScanThreshold = getSetting("min_scan_threshold") ?? "none";
+  const maxUploadMb = getMaxUploadMb();
   const googleClientId = getSetting("oauth_google_client_id") ?? "";
   const microsoftClientId = getSetting("oauth_microsoft_client_id") ?? "";
   const saved = c.req.query("saved");
@@ -2225,6 +2276,7 @@ webRoutes.get("/settings", (c) => {
           <a href="#domain">Base domain</a>
           <a href="#notifications">Notifications</a>
           <a href="#scan-floor">Scan floor</a>
+          <a href="#upload-limit">Upload limit</a>
           <a href="#sso">Single Sign-On</a>
         </nav>
         <div>
@@ -2275,6 +2327,21 @@ webRoutes.get("/settings", (c) => {
                     return `<option value="${t}"${sel}>${escapeHtml(labels[t] ?? t)}</option>`;
                   }).join("")}
                 </select>
+                <button type="submit">Save</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="card" id="upload-limit">
+            <h2>Upload limit</h2>
+            <p class="hint" style="margin:0.5rem 0 1rem">
+              Maximum size of a deploy tarball, in megabytes. The whole upload
+              is buffered in memory, so very large values can exhaust the
+              control container. Max ${MAX_UPLOAD_MB_CEILING} MB.
+            </p>
+            <form method="POST" action="/settings/upload-limit">
+              <div class="flex">
+                <input type="number" name="max_upload_mb" value="${maxUploadMb}" min="1" max="${MAX_UPLOAD_MB_CEILING}" step="1" style="flex:1" />
                 <button type="submit">Save</button>
               </div>
             </form>
@@ -2361,6 +2428,17 @@ webRoutes.post("/settings/scan-floor", async (c) => {
   const threshold = body["threshold"] as string | undefined;
   if (isValidThreshold(threshold)) {
     setSetting("min_scan_threshold", threshold);
+  }
+  return c.redirect("/settings?saved=1");
+});
+
+webRoutes.post("/settings/upload-limit", async (c) => {
+  const body = await c.req.parseBody();
+  const parsed = parseInt((body["max_upload_mb"] as string | undefined) ?? "", 10);
+  if (Number.isFinite(parsed)) {
+    // Clamp on write so the stored value matches what getMaxUploadMb()
+    // enforces on read. Ignore non-numeric input (keep current setting).
+    setSetting("max_upload_mb", String(clampUploadMb(parsed)));
   }
   return c.redirect("/settings?saved=1");
 });
