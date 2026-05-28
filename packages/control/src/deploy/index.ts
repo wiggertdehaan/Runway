@@ -29,7 +29,7 @@ import {
   type ScanResult,
   type Threshold,
 } from "./scan.js";
-import { getSetting } from "../db/settings.js";
+import { getKeepImageVersions, getSetting } from "../db/settings.js";
 import { preflightCheckTar, PreflightRejectedError } from "./preflight.js";
 import { saveSource, pruneOldSources, deleteAllSources } from "./source.js";
 export { PreflightRejectedError } from "./preflight.js";
@@ -159,21 +159,9 @@ async function runScans(
   return result;
 }
 
-/**
- * How many most-recent successful image tags to keep per app.
- * Everything older is pruned from the Docker image cache so disk
- * doesn't grow unbounded. The deploys row stays — only the image
- * disappears, which means old rows can still be inspected but no
- * longer rolled back to. Tweak via RUNWAY_IMAGE_RETENTION.
- */
-const IMAGE_RETENTION = Math.max(
-  parseInt(process.env.RUNWAY_IMAGE_RETENTION ?? "", 10) || 10,
-  2
-);
-
 async function pruneOldImages(appId: string): Promise<void> {
   const tags = getSuccessfulImageTags(appId);
-  const toRemove = tags.slice(IMAGE_RETENTION);
+  const toRemove = tags.slice(getKeepImageVersions());
   for (const tag of toRemove) {
     try {
       await removeImageByTag(tag);

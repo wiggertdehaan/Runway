@@ -11,6 +11,7 @@ export type SettingKey =
   | "webhook_url"
   | "min_scan_threshold"
   | "max_upload_mb"
+  | "keep_image_versions"
   | "oauth_google_client_id"
   | "oauth_google_client_secret"
   | "oauth_microsoft_client_id"
@@ -69,6 +70,39 @@ export function getMaxUploadMb(): number {
 export function clampUploadMb(parsed: number): number {
   if (!Number.isFinite(parsed)) return DEFAULT_MAX_UPLOAD_MB;
   return Math.min(Math.max(parsed, 1), MAX_UPLOAD_MB_CEILING);
+}
+
+/**
+ * How many most-recent successful image tags to keep per app. Anything
+ * older is pruned from the local Docker image cache after each
+ * successful deploy. Floor of 2 guarantees at least one rollback target
+ * survives next to the running image; ceiling caps disk growth on
+ * apps with very large base images. The deploys row stays — only the
+ * image disappears, so older rows remain inspectable but unredeployable.
+ */
+export const DEFAULT_KEEP_IMAGE_VERSIONS = 3;
+export const KEEP_IMAGE_VERSIONS_FLOOR = 2;
+export const KEEP_IMAGE_VERSIONS_CEILING = 50;
+
+/** Resolve the configured retention count, clamped to safe bounds. */
+export function getKeepImageVersions(): number {
+  return clampKeepImageVersions(
+    parseInt(getSetting("keep_image_versions") ?? "", 10)
+  );
+}
+
+/**
+ * Clamp a parsed retention value to the valid range. Returns the default
+ * for non-finite input, otherwise clamps to
+ * [KEEP_IMAGE_VERSIONS_FLOOR, KEEP_IMAGE_VERSIONS_CEILING]. Pure — used
+ * both when reading and when persisting the setting.
+ */
+export function clampKeepImageVersions(parsed: number): number {
+  if (!Number.isFinite(parsed)) return DEFAULT_KEEP_IMAGE_VERSIONS;
+  return Math.min(
+    Math.max(parsed, KEEP_IMAGE_VERSIONS_FLOOR),
+    KEEP_IMAGE_VERSIONS_CEILING
+  );
 }
 
 /**

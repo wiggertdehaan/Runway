@@ -4,6 +4,10 @@ import {
   clampUploadMb,
   DEFAULT_MAX_UPLOAD_MB,
   MAX_UPLOAD_MB_CEILING,
+  clampKeepImageVersions,
+  DEFAULT_KEEP_IMAGE_VERSIONS,
+  KEEP_IMAGE_VERSIONS_FLOOR,
+  KEEP_IMAGE_VERSIONS_CEILING,
 } from "./settings.js";
 
 describe("slugify", () => {
@@ -51,5 +55,31 @@ describe("clampUploadMb", () => {
 
   it("clamps to the ceiling", () => {
     expect(clampUploadMb(MAX_UPLOAD_MB_CEILING + 1000)).toBe(MAX_UPLOAD_MB_CEILING);
+  });
+});
+
+describe("clampKeepImageVersions", () => {
+  it("returns the default for non-finite input", () => {
+    expect(clampKeepImageVersions(NaN)).toBe(DEFAULT_KEEP_IMAGE_VERSIONS);
+    expect(clampKeepImageVersions(Infinity)).toBe(DEFAULT_KEEP_IMAGE_VERSIONS);
+  });
+
+  it("passes valid values through unchanged", () => {
+    expect(clampKeepImageVersions(5)).toBe(5);
+    expect(clampKeepImageVersions(DEFAULT_KEEP_IMAGE_VERSIONS)).toBe(
+      DEFAULT_KEEP_IMAGE_VERSIONS
+    );
+  });
+
+  it("clamps to the floor so at least one rollback target survives", () => {
+    expect(clampKeepImageVersions(0)).toBe(KEEP_IMAGE_VERSIONS_FLOOR);
+    expect(clampKeepImageVersions(1)).toBe(KEEP_IMAGE_VERSIONS_FLOOR);
+    expect(clampKeepImageVersions(-10)).toBe(KEEP_IMAGE_VERSIONS_FLOOR);
+  });
+
+  it("clamps to the ceiling", () => {
+    expect(clampKeepImageVersions(KEEP_IMAGE_VERSIONS_CEILING + 5)).toBe(
+      KEEP_IMAGE_VERSIONS_CEILING
+    );
   });
 });

@@ -75,6 +75,48 @@ export async function buildImageFromTar(
   }
 }
 
+/**
+ * Run `buildctl prune` inside the BuildKit container to evict cache
+ * blobs older than the given duration (Go duration syntax, e.g. "168h"
+ * for one week). Returns a short summary line for logs.
+ *
+ * Best-effort: callers should swallow failures. Pruning is invoked from
+ * a periodic timer; a flake on one run should not break later runs.
+ */
+export async function pruneBuildCache(
+  keepDuration: string = "168h"
+): Promise<string> {
+  const cmd = ["buildctl", "prune", "--keep-duration", keepDuration];
+  const container = docker.getContainer(BUILDKIT_CONTAINER);
+  const exec = await container.exec({
+    Cmd: cmd,
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+  return new Promise((resolve, reject) => {
+    exec.start({ hijack: true }, (err: any, stream: any) => {
+      if (err) return reject(new Error(`buildctl prune failed: ${err.message}`));
+      const chunks: Buffer[] = [];
+      stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+      stream.on("end", async () => {
+        const log = stripDockerLogHeaders(Buffer.concat(chunks));
+        const info = await exec.inspect();
+        if (info.ExitCode !== 0) {
+          return reject(
+            new Error(`buildctl prune exit ${info.ExitCode}: ${log.slice(-200)}`)
+          );
+        }
+        const lastLine = log
+          .split("\n")
+          .filter((l) => l.trim().length > 0)
+          .pop();
+        resolve(lastLine ?? "prune completed");
+      });
+      stream.on("error", (e: Error) => reject(e));
+    });
+  });
+}
+
 async function runBuildctlViaExec(
   imageTag: string,
   contextDir: string,

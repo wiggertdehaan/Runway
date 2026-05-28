@@ -92,7 +92,12 @@ import {
   getMaxUploadMb,
   clampUploadMb,
   MAX_UPLOAD_MB_CEILING,
+  getKeepImageVersions,
+  clampKeepImageVersions,
+  KEEP_IMAGE_VERSIONS_FLOOR,
+  KEEP_IMAGE_VERSIONS_CEILING,
 } from "../db/settings.js";
+import { runCachePrune } from "../deploy/cache-pruner.js";
 import {
   SESSION_COOKIE,
   requireAdmin,
@@ -2246,6 +2251,7 @@ webRoutes.get("/settings", (c) => {
   const webhookUrl = getSetting("webhook_url") ?? "";
   const minScanThreshold = getSetting("min_scan_threshold") ?? "none";
   const maxUploadMb = getMaxUploadMb();
+  const keepImageVersions = getKeepImageVersions();
   const googleClientId = getSetting("oauth_google_client_id") ?? "";
   const microsoftClientId = getSetting("oauth_microsoft_client_id") ?? "";
   const saved = c.req.query("saved");
@@ -2277,6 +2283,7 @@ webRoutes.get("/settings", (c) => {
           <a href="#notifications">Notifications</a>
           <a href="#scan-floor">Scan floor</a>
           <a href="#upload-limit">Upload limit</a>
+          <a href="#image-retention">Image retention</a>
           <a href="#sso">Single Sign-On</a>
         </nav>
         <div>
@@ -2344,6 +2351,26 @@ webRoutes.get("/settings", (c) => {
                 <input type="number" name="max_upload_mb" value="${maxUploadMb}" min="1" max="${MAX_UPLOAD_MB_CEILING}" step="1" style="flex:1" />
                 <button type="submit">Save</button>
               </div>
+            </form>
+          </div>
+
+          <div class="card" id="image-retention">
+            <h2>Image retention</h2>
+            <p class="hint" style="margin:0.5rem 0 1rem">
+              How many most-recent successful image versions to keep per app.
+              Older images are pruned from the local Docker cache after each
+              deploy. Build cache layers are evicted weekly (older than 7d).
+              Lower values save disk; higher values give more rollback history.
+            </p>
+            <form method="POST" action="/settings/image-retention">
+              <div class="flex">
+                <input type="number" name="keep_image_versions" value="${keepImageVersions}" min="${KEEP_IMAGE_VERSIONS_FLOOR}" max="${KEEP_IMAGE_VERSIONS_CEILING}" step="1" style="flex:1" />
+                <button type="submit">Save</button>
+              </div>
+            </form>
+            <form method="POST" action="/settings/prune-build-cache" style="margin-top:0.75rem">
+              <button type="submit" style="width:auto">Prune build cache now</button>
+              <span class="hint" style="margin-left:0.75rem">Runs <code>buildctl prune --keep-duration 168h</code>.</span>
             </form>
           </div>
 
@@ -2440,6 +2467,26 @@ webRoutes.post("/settings/upload-limit", async (c) => {
     // enforces on read. Ignore non-numeric input (keep current setting).
     setSetting("max_upload_mb", String(clampUploadMb(parsed)));
   }
+  return c.redirect("/settings?saved=1");
+});
+
+webRoutes.post("/settings/image-retention", async (c) => {
+  const body = await c.req.parseBody();
+  const parsed = parseInt(
+    (body["keep_image_versions"] as string | undefined) ?? "",
+    10
+  );
+  if (Number.isFinite(parsed)) {
+    setSetting("keep_image_versions", String(clampKeepImageVersions(parsed)));
+  }
+  return c.redirect("/settings?saved=1");
+});
+
+webRoutes.post("/settings/prune-build-cache", async (c) => {
+  // Fire-and-forget: pruning can take several seconds on a large
+  // cache, and we don't want the admin's POST to hang. runCachePrune
+  // logs success/failure to the control container logs.
+  runCachePrune();
   return c.redirect("/settings?saved=1");
 });
 
