@@ -7,6 +7,7 @@ import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
 import { refreshDb } from "./deploy/scan.js";
 import { startActivityTailer } from "./deploy/activity-tailer.js";
 import { startPeriodicScanner } from "./deploy/periodic-scanner.js";
+import { startCachePruner } from "./deploy/cache-pruner.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
 
 migrate();
@@ -34,6 +35,11 @@ setTimeout(() => {
 // DB picks up after deploy still surface. Override the cadence with
 // PERIODIC_SCAN_INTERVAL_HOURS for dev.
 startPeriodicScanner();
+
+// Weekly BuildKit cache eviction. Image-level retention covers loaded
+// images; this covers the builder side, which is what fills disk fastest
+// on busy installs.
+startCachePruner();
 
 const dashboardDomain = process.env.DASHBOARD_DOMAIN;
 if (dashboardDomain) {
