@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "ignore": "^7.0.5",
+    "ignore": "^7.0.6",
     "tar": "^7.4.3",
     "zod": "^4.3.6"
   },
