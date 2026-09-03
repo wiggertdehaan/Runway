@@ -67,6 +67,13 @@ function loadIgnore(root: string): IgnoreInstance {
     ig.add(readFileSync(gitignore, "utf8"));
   }
 
+  // Force-include the two files the build itself needs. A generated
+  // .dockerignore excludes Dockerfile and .dockerignore so they never
+  // land in a static webroot, but buildctl reads the Dockerfile from a
+  // separate --local dockerfile mount and .dockerignore from the context
+  // root, so both must still reach the server in the tarball.
+  ig.add(["!Dockerfile", "!.dockerignore"]);
+
   return ig;
 }
 
