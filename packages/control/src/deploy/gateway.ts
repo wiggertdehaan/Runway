@@ -70,13 +70,12 @@ export function appBasicAuth(app: App): { htpasswd: string } | null {
 }
 
 /**
- * Write a Traefik dynamic config file for a single app. Traefik
- * watches the shared config directory and picks up new files
- * without requiring a reload.
+ * Build the Traefik dynamic config document for a single app. Split
+ * out from writeAppRoute so the routing rules can be asserted without
+ * touching the filesystem - the matchers below are easy to get subtly
+ * wrong and impossible to eyeball.
  */
-export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
-  await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
-
+export function buildAppRouteDoc(cfg: AppRouteConfig): Record<string, unknown> {
   const routerKey = `app-${cfg.appId}`;
   const useBasicAuth = !cfg.ssoEnabled && !!cfg.basicAuth?.htpasswd;
   const useSso = !!cfg.ssoEnabled;
@@ -149,6 +148,34 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
     routers[routerKey] = router;
   }
 
+  // Build metadata must never be served by an app container. The static
+  // preset copies the whole build context into the nginx webroot, so any
+  // repo without a strict .dockerignore leaks its Dockerfile, README and
+  // dotfiles (including .github/ and .env). Blocking at the gateway makes
+  // the guarantee hold for every app regardless of what its image holds,
+  // and survives redeploys. Traefik has no native deny middleware; an
+  // ipAllowList whose range matches no source address returns 403.
+  // Note: the matchers are Go RE2 - no lookahead - so .well-known is
+  // carved out with Traefik's ! operator instead, otherwise ACME
+  // HTTP-01 renewal would break for every app.
+  const denyKey = `${routerKey}-denyall`;
+  middlewares[denyKey] = {
+    ipAllowList: { sourceRange: ["255.255.255.255/32"] },
+  };
+  routers[`${routerKey}-blockmeta`] = {
+    rule:
+      `(${allDomains.map((d) => `Host(\`${d}\`)`).join(" || ")})` +
+      " && !PathPrefix(`/.well-known/`)" +
+      " && (PathRegexp(`(^|/)Dockerfile$`)" +
+      " || PathRegexp(`/[.]`)" +
+      " || PathRegexp(`(^|/)(README|CLAUDE|AGENTS|HISTORY)[.]md$`))",
+    priority: 100000,
+    entryPoints: ["websecure"],
+    service: routerKey,
+    tls: { certResolver: "letsencrypt" },
+    middlewares: [denyKey],
+  };
+
   const doc: Record<string, unknown> = {
     http: {
       routers,
@@ -163,8 +190,18 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
     },
   };
 
+  return doc;
+}
+
+/**
+ * Write a Traefik dynamic config file for a single app. Traefik
+ * watches the shared config directory and picks up new files
+ * without requiring a reload.
+ */
+export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
+  await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
   const path = join(GATEWAY_CONFIG_DIR, `${cfg.appId}.yml`);
-  await writeFile(path, yaml.dump(doc), "utf8");
+  await writeFile(path, yaml.dump(buildAppRouteDoc(cfg)), "utf8");
 }
 
 export async function deleteAppRoute(appId: string): Promise<void> {

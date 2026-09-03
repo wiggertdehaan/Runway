@@ -311,6 +311,29 @@ The site root is the upload root: \`index.html\` must be at the top
 level of the tar, not inside \`dist/\` or \`build/\`. If you have a build
 step, run it first and tar the output directory's contents.
 
+\`COPY . /usr/share/nginx/html\` means **the webroot is the build
+context**: every file you upload is publicly served. Ship a
+\`.dockerignore\` alongside the Dockerfile or you publish your own
+Dockerfile, README and dotfiles:
+
+\`\`\`
+Dockerfile
+.dockerignore
+.git
+.gitignore
+.github
+.env
+.env.*
+*.md
+.DS_Store
+._*
+\`\`\`
+
+Excluding \`Dockerfile\` is safe - the builder reads it outside the
+context - and \`._*\` catches the AppleDouble files macOS leaves in a
+tar. The gateway blocks these paths as a backstop, but the
+\`.dockerignore\` is what keeps them out of the image.
+
 The \`sed\` line is **not optional** — it moves nginx's pidfile from
 \`/run/nginx.pid\` (root-only) to \`/tmp/nginx.pid\` (writable by the
 \`nginx\` user). Without it the container crash-loops with

@@ -773,16 +773,25 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
 }
 
 function generateDockerignore(config: AppConfig): string {
+  // Nothing here is needed at runtime, and for the static runtime the
+  // whole context is copied into the nginx webroot - so anything left in
+  // is published. Dockerfile and .dockerignore are safe to exclude:
+  // buildctl reads them outside the context (see tar.ts).
   const common = `node_modules
 .git
+.gitignore
+.github
 .env
 .env.*
 *.md
 .DS_Store
+._*
 Thumbs.db
 coverage
 .nyc_output
 dist
+Dockerfile
+.dockerignore
 `;
 
   const extras: Record<Runtime, string> = {
