@@ -16,11 +16,18 @@ services:
   #
   # The dashboard/insecure API is intentionally disabled.
   gateway:
-    image: traefik:v3.5
+    # Pin the exact release: `up -d --build` never re-pulls an existing tag,
+    # so a floating tag stays on whatever the server first downloaded.
+    image: traefik:v3.7.17
     container_name: runway-gateway
     restart: unless-stopped
     environment:
       - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN must be set in .env}
+      # Stopgap for CVE-2026-98432: Go listens on MPTCP by default, and a
+      # container's network namespace doesn't inherit the host's setting.
+      - GODEBUG=multipathtcp=0
+    sysctls:
+      - net.mptcp.enabled=0
     command:
       - "--providers.file.directory=/config"
       - "--providers.file.watch=true"
