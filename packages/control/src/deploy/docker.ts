@@ -269,7 +269,7 @@ export async function runContainer(opts: RunOptions): Promise<RunResult> {
             "CMD",
             "wget",
             "-qO-",
-            `http://localhost:${opts.port}${opts.healthCheckPath}`,
+            `http://127.0.0.1:${opts.port}${opts.healthCheckPath}`,
           ],
           Interval: 30_000_000_000,
           Timeout: 5_000_000_000,
