@@ -8,6 +8,7 @@ import { refreshDb } from "./deploy/scan.js";
 import { startActivityTailer } from "./deploy/activity-tailer.js";
 import { startPeriodicScanner } from "./deploy/periodic-scanner.js";
 import { startCachePruner } from "./deploy/cache-pruner.js";
+import { startRebuildScheduler } from "./deploy/rebuild-scheduler.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
 
 migrate();
@@ -40,6 +41,10 @@ startPeriodicScanner();
 // images; this covers the builder side, which is what fills disk fastest
 // on busy installs.
 startCachePruner();
+
+// Weekly automatic rebuild of apps with exploited / fixable-critical
+// vulnerabilities (Sunday 05:00 Europe/Amsterdam by default).
+startRebuildScheduler();
 
 const dashboardDomain = process.env.DASHBOARD_DOMAIN;
 if (dashboardDomain) {

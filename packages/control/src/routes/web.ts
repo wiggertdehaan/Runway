@@ -66,7 +66,7 @@ import {
   type User,
   ROLES,
 } from "../db/users.js";
-import { createSession, deleteAllUserSessions, deleteSession } from "../db/sessions.js";
+import { createSession, deleteAllUserSessions, deleteSession, getSessionUser } from "../db/sessions.js";
 import {
   createPreauthSession,
   deletePreauthSession,
@@ -98,6 +98,23 @@ import {
   KEEP_IMAGE_VERSIONS_CEILING,
 } from "../db/settings.js";
 import { runCachePrune } from "../deploy/cache-pruner.js";
+import {
+  RebuildBusyError,
+  activeRebuildRunId,
+  startRebuildRun,
+} from "../deploy/rebuild.js";
+import {
+  SCHEDULE_TZ,
+  normalizeTime,
+  readSchedule,
+  saveSchedule,
+} from "../deploy/rebuild-scheduler.js";
+import {
+  getRebuildRun,
+  listRebuildRuns,
+  type RebuildAppResult,
+  type RebuildRun,
+} from "../db/rebuild-runs.js";
 import {
   SESSION_COOKIE,
   requireAdmin,
@@ -206,6 +223,7 @@ function layout(
          <a href="/skills">Skills</a>
          <a href="/settings">Settings</a>
          <a href="/audit">Audit</a>
+         <a href="/rebuild">Rebuild</a>
          <a href="/health">Health</a>`
     : "";
   const nav = username
@@ -720,6 +738,10 @@ webRoutes.use("/skills", requireAdmin);
 webRoutes.use("/skills/*", requireAdmin);
 webRoutes.use("/account", requireSession);
 webRoutes.use("/account/*", requireSession);
+webRoutes.use("/rebuild", requireSession);
+webRoutes.use("/rebuild", requireAdmin);
+webRoutes.use("/rebuild/*", requireSession);
+webRoutes.use("/rebuild/*", requireAdmin);
 webRoutes.use("/health", requireSession);
 webRoutes.use("/health", requireAdmin);
 
@@ -1130,6 +1152,19 @@ function renderScanSection(
         </form>`
       : "";
 
+  const rebuildControls =
+    admin && app.image_tag
+      ? `<div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin:0 0 0.5rem">
+          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/rebuild" style="margin:0" onsubmit="return confirm('Rebuild this app from source without cache?')">
+            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Rebuild (no cache)</button>
+          </form>
+          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-rebuild" style="margin:0">
+            <input type="hidden" name="enabled" value="${app.auto_rebuild ? "0" : "1"}" />
+            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Weekly auto-rebuild: ${app.auto_rebuild ? "on (turn off)" : "off (turn on)"}</button>
+          </form>
+        </div>`
+      : "";
+
   const latest = getLatestDeployWithScan(app.id);
   let reportHtml = '<p class="meta">No scan has run yet. Deploy the app to generate a report.</p>';
   if (latest?.scan_report) {
@@ -1254,6 +1289,7 @@ function renderScanSection(
       ${exemptToggle}
       ${periodicHtml}
       ${rescanButton}
+      ${rebuildControls}
       ${reportHtml}
     </div>
   `;
@@ -2488,6 +2524,208 @@ webRoutes.post("/settings/prune-build-cache", async (c) => {
   // logs success/failure to the control container logs.
   runCachePrune();
   return c.redirect("/settings?saved=1");
+});
+
+// ── Rebuild (admin) ─────────────────────────────────────
+// Rebuild apps from their stored source without the BuildKit cache so
+// base-image and apt fixes actually land. See deploy/rebuild.ts.
+
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+const OUTCOME_BADGE: Record<string, string> = {
+  rebuilt: "badge-running",
+  rolled_back: "badge-stopped",
+  blocked: "badge-stopped",
+  failed: "badge-stopped",
+  skipped: "badge-stopped",
+};
+
+function renderCounts(x: RebuildAppResult["before"]): string {
+  if (!x) return '<span class="meta">n/a</span>';
+  const c = x.counts;
+  return `${c.critical}C / ${c.high}H / ${c.medium}M &middot; <strong>${x.kev} KEV</strong>`;
+}
+
+function renderRebuildResults(run: RebuildRun): string {
+  if (run.results.length === 0) {
+    return `<p class="meta">${run.status === "running" ? "Starting&hellip;" : "No apps needed a rebuild."}</p>`;
+  }
+  const rows = run.results
+    .map(
+      (r) => `<tr>
+        <td>${escapeHtml(r.app_name ?? r.app_id)}</td>
+        <td><span class="badge ${OUTCOME_BADGE[r.outcome] ?? ""}">${escapeHtml(r.outcome.replace("_", " "))}</span></td>
+        <td>${renderCounts(r.before)}</td>
+        <td>${renderCounts(r.after)}</td>
+        <td class="meta">${escapeHtml(r.detail ?? "")}${r.duration_s !== undefined ? ` (${r.duration_s}s)` : ""}</td>
+      </tr>`
+    )
+    .join("");
+  return `<table>
+    <thead><tr><th>App</th><th>Result</th><th>Before</th><th>After</th><th>Note</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+webRoutes.get("/rebuild", async (c) => {
+  const user = c.get("user");
+  const schedule = readSchedule();
+  const runs = listRebuildRuns(5);
+  const running = activeRebuildRunId() !== null;
+  const latest = runs[0];
+  const flash =
+    c.req.query("busy") ? '<div class="error">A rebuild run is already in progress.</div>'
+    : c.req.query("saved") ? '<div class="card" style="margin-bottom:1rem">Saved.</div>'
+    : c.req.query("started") ? '<div class="card" style="margin-bottom:1rem">Rebuild started. Apps are rebuilt one after another; this page refreshes while it runs.</div>'
+    : "";
+  const dayOptions = WEEKDAY_NAMES.map(
+    (n, i) => `<option value="${i}"${i === schedule.day ? " selected" : ""}>${n}</option>`
+  ).join("");
+  const history = runs
+    .slice(1)
+    .map(
+      (r) => `<details style="margin-top:0.5rem"><summary class="meta">Run #${r.id} &middot; ${escapeHtml(r.trigger)} &middot; ${escapeHtml(formatRelative(r.started_at))}</summary>${renderRebuildResults(r)}</details>`
+    )
+    .join("");
+
+  return c.html(
+    layout(
+      "Rebuild",
+      `
+      ${running ? '<meta http-equiv="refresh" content="10" />' : ""}
+      <div class="container">
+        <h1>Rebuild</h1>
+        ${flash}
+        <div class="card">
+          <h2>Rebuild all apps</h2>
+          <p class="meta">
+            Rebuilds every deployed app from its stored source <strong>without the BuildKit cache</strong>,
+            one after another, through the normal scan gate. A new container that fails its health check is
+            replaced by the previous deploy automatically. Takes a few minutes per app; the live apps keep
+            serving until their own swap.
+          </p>
+          <form method="POST" action="/rebuild/run" onsubmit="return confirm('Rebuild all apps now?')">
+            <button type="submit" style="width:auto"${running ? " disabled" : ""}>${running ? "Run in progress&hellip;" : "Rebuild all apps"}</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>${latest ? `Latest run #${latest.id}` : "No runs yet"}</h2>
+          ${
+            latest
+              ? `<p class="meta">${escapeHtml(latest.trigger)} &middot; started ${escapeHtml(formatRelative(latest.started_at))} &middot; ${latest.status === "running" ? "<strong>running</strong>" : "finished"}. Before/after = critical / high / medium findings and actively exploited (CISA KEV) CVEs; "before" is the last scan of the old image.</p>${renderRebuildResults(latest)}`
+              : '<p class="meta">Nothing has been rebuilt yet.</p>'
+          }
+          ${history}
+        </div>
+
+        <div class="card">
+          <h2>Automatic weekly rebuild</h2>
+          <p class="meta">
+            Rebuilds only apps whose latest scan shows an actively exploited CVE (CISA KEV) or a critical
+            finding that has a fix, and that haven't opted out on their app page. The outcome is sent to the
+            notification webhook. Times are ${escapeHtml(SCHEDULE_TZ)}.
+          </p>
+          <form method="POST" action="/rebuild/schedule">
+            <label><input type="checkbox" name="enabled" value="1"${schedule.enabled ? " checked" : ""} /> Enabled</label>
+            <div style="display:flex;gap:0.5rem;margin:0.75rem 0">
+              <select name="day">${dayOptions}</select>
+              <input type="time" name="time" value="${escapeHtml(schedule.time)}" required />
+            </div>
+            <button type="submit" style="width:auto">Save schedule</button>
+          </form>
+        </div>
+      </div>`,
+      { username: user.username, csrf: csrfField(c), isAdmin: true }
+    )
+  );
+});
+
+webRoutes.post("/rebuild/run", async (c) => {
+  const user = c.get("user");
+  try {
+    const id = startRebuildRun({ trigger: "manual" });
+    logAudit(user.id, user.username, "rebuild_all_started", { detail: `run ${id}` });
+  } catch (err) {
+    if (err instanceof RebuildBusyError) return c.redirect("/rebuild?busy=1");
+    throw err;
+  }
+  return c.redirect("/rebuild?started=1");
+});
+
+webRoutes.post("/rebuild/schedule", async (c) => {
+  const body = await c.req.parseBody();
+  const time = normalizeTime(body["time"] as string | undefined);
+  const day = parseInt((body["day"] as string | undefined) ?? "", 10);
+  if (time && Number.isInteger(day) && day >= 0 && day <= 6) {
+    saveSchedule({ enabled: body["enabled"] === "1", day, time });
+  }
+  return c.redirect("/rebuild?saved=1");
+});
+
+webRoutes.post("/apps/:id/rebuild", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  try {
+    const id = startRebuildRun({ trigger: "manual", appIds: [app.id] });
+    logAudit(user.id, user.username, "app_rebuild_started", { detail: `${app.id} run ${id}` });
+  } catch (err) {
+    if (err instanceof RebuildBusyError) return c.redirect("/rebuild?busy=1");
+    throw err;
+  }
+  return c.redirect("/rebuild?started=1");
+});
+
+webRoutes.post("/apps/:id/auto-rebuild", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_rebuild: body["enabled"] === "1" ? 1 : 0 });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+// JSON admin API for scripts. Session-authenticated (not per-app
+// Bearer keys): the per-app key model is untouched. State-changing
+// calls must carry `X-Requested-With: runway`, which a cross-site form
+// cannot set; the session cookie is SameSite=Lax as a second layer.
+async function adminApi(c: any, next: any) {
+  const token = getCookieValue(c, SESSION_COOKIE);
+  const user = token ? getSessionUser(token) : undefined;
+  if (!user) return c.json({ error: "Not signed in" }, 401);
+  if (!isAdmin(user)) return c.json({ error: "Admin only" }, 403);
+  if (c.req.method !== "GET" && c.req.header("x-requested-with") !== "runway") {
+    return c.json({ error: "Missing X-Requested-With: runway header" }, 400);
+  }
+  c.set("user", user);
+  await next();
+}
+webRoutes.use("/admin/api/*", adminApi);
+
+webRoutes.post("/admin/api/rebuild-all", async (c) => {
+  const user = c.get("user");
+  try {
+    const id = startRebuildRun({ trigger: "manual" });
+    logAudit(user.id, user.username, "rebuild_all_started", { detail: `run ${id} (api)` });
+    return c.json({ status: "started", run_id: id }, 202);
+  } catch (err) {
+    if (err instanceof RebuildBusyError) {
+      return c.json({ error: err.message, run_id: activeRebuildRunId() }, 409);
+    }
+    throw err;
+  }
+});
+
+webRoutes.get("/admin/api/rebuild-runs", (c) =>
+  c.json({ runs: listRebuildRuns(20) })
+);
+
+webRoutes.get("/admin/api/rebuild-runs/:id", (c) => {
+  const run = getRebuildRun(parseInt(c.req.param("id"), 10));
+  return run ? c.json(run) : c.json({ error: "Run not found" }, 404);
 });
 
 webRoutes.post("/settings/oauth/google", async (c) => {

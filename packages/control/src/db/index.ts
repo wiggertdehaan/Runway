@@ -352,6 +352,24 @@ export function migrate() {
   // (~6h); a deploy that passed the gate at build time can develop new
   // findings later. The periodic scanner writes one row per scan so
   // the dashboard can show a delta against the previous run.
+  // Rebuild-all: per-app opt-out for the weekly automatic rebuild, and
+  // a history of rebuild runs (manual + scheduled). `results` is a JSON
+  // array of per-app outcomes, rewritten after each app so the dashboard
+  // can show progress while a run is in flight.
+  if (!appCols.some((c) => c.name === "auto_rebuild")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_rebuild INTEGER NOT NULL DEFAULT 1`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rebuild_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trigger TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT,
+      results TEXT NOT NULL DEFAULT '[]'
+    );
+  `);
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS app_periodic_scans (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

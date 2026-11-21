@@ -32,6 +32,7 @@ import {
 import { getKeepImageVersions, getSetting } from "../db/settings.js";
 import { preflightCheckTar, PreflightRejectedError } from "./preflight.js";
 import { saveSource, pruneOldSources, deleteAllSources } from "./source.js";
+import { waitForHealthy } from "./health.js";
 export { PreflightRejectedError } from "./preflight.js";
 
 function dockerSafeId(appId: string): string {
@@ -77,6 +78,16 @@ function buildVolumeBinds(appId: string) {
 export interface DeployInput {
   app: App;
   tar: Readable | Buffer;
+  /** Build without the BuildKit layer cache (used by rebuilds). */
+  noCache?: boolean;
+  /**
+   * After starting the new container, wait for it to be healthy. If it
+   * is not, put the previous image back and throw UnhealthyDeployError.
+   * Regular deploys keep the old fire-and-forget behaviour.
+   */
+  verifyHealth?: boolean;
+  /** Don't overwrite the stored source snapshot (rebuilds reuse it). */
+  skipSourceSave?: boolean;
 }
 
 export interface DeployResult {
@@ -108,6 +119,25 @@ export class ScanBlockedError extends Error {
     this.scan = scan;
     this.imageTag = imageTag;
     this.deployId = deployId;
+  }
+}
+
+/**
+ * Thrown when verifyHealth is set and the new container never became
+ * healthy. By the time this is thrown the previous image is running
+ * again (`restored`), or nothing could be restored (first deploy).
+ */
+export class UnhealthyDeployError extends Error {
+  imageTag: string;
+  restored: boolean;
+  scan: ScanResult;
+  constructor(reason: string, imageTag: string, restored: boolean, scan: ScanResult) {
+    super(
+      `New container unhealthy (${reason}); ${restored ? "restored the previous deploy" : "no previous deploy to restore"}`
+    );
+    this.imageTag = imageTag;
+    this.restored = restored;
+    this.scan = scan;
   }
 }
 
@@ -197,7 +227,10 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
 
   updateApp(app.id, { status: "building" });
 
-  const build = await buildImageFromTar(tarBuffer ?? tar, { imageTag });
+  const build = await buildImageFromTar(tarBuffer ?? tar, {
+    imageTag,
+    noCache: input.noCache,
+  });
 
   updateApp(app.id, { status: "scanning" });
 
@@ -218,6 +251,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
 
   const env = getEnvVars(app.id);
 
+  const previousTag = app.image_tag;
   const run = await runContainer({
     containerName,
     imageTag,
@@ -228,6 +262,44 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     memoryLimit: app.memory_limit,
     healthCheckPath: app.health_check_path,
   });
+
+  if (input.verifyHealth) {
+    const health = await waitForHealthy(containerName, {
+      hasHealthcheck: !!app.health_check_path,
+    });
+    if (!health.healthy) {
+      let restored = false;
+      if (previousTag) {
+        try {
+          const back = await runContainer({
+            containerName,
+            imageTag: previousTag,
+            port: app.port,
+            env,
+            volumes: buildVolumeBinds(app.id),
+            cpuLimit: app.cpu_limit,
+            memoryLimit: app.memory_limit,
+            healthCheckPath: app.health_check_path,
+          });
+          updateApp(app.id, { status: "running", container_id: back.containerId });
+          restored = true;
+        } catch {
+          updateApp(app.id, { status: "failed" });
+        }
+      } else {
+        await removeContainerByName(containerName).catch(() => {});
+        updateApp(app.id, { status: "failed" });
+      }
+      recordDeploy(app.id, imageTag, "unhealthy", {
+        log: `${build.log}\n[runway] unhealthy: ${health.reason}; ${restored ? "restored " + previousTag : "nothing restored"}`,
+        scanStatus: scan.status,
+        scanSummary,
+        scanReport: scan,
+      });
+      removeImageByTag(imageTag).catch(() => {});
+      throw new UnhealthyDeployError(health.reason, imageTag, restored, scan);
+    }
+  }
 
   if (app.domain) {
     await writeAppRoute({
@@ -259,7 +331,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   // /api/v1/app/source). Best-effort: don't fail the deploy if the disk
   // write trips. Only saved on a successful deploy so a broken upload
   // never replaces a previous good source.
-  if (tarBuffer) {
+  if (tarBuffer && !input.skipSourceSave) {
     try {
       saveSource(app.id, deploy.id, tarBuffer);
       pruneOldSources(app.id);

@@ -19,6 +19,15 @@ export const docker = new Docker({ socketPath: "/var/run/docker.sock" });
 export interface BuildOptions {
   imageTag: string;
   dockerfile?: string;
+  /**
+   * Bypass the BuildKit layer cache entirely (`buildctl --no-cache`).
+   * Used by rebuilds so a cached `apt-get upgrade` layer can't hand us
+   * back the same vulnerable packages. The base image tag is still
+   * resolved against the registry on every build (a newer digest is
+   * picked up), but already-downloaded layers of an unchanged digest
+   * are reused, which is correct and shows as `CACHED` on the FROM step.
+   */
+  noCache?: boolean;
 }
 
 export interface BuildResult {
@@ -65,7 +74,7 @@ export async function buildImageFromTar(
     execFileSync("sh", ["-c", `mkdir -p ${exchangeCtx} && tar xf ${localCtxTar} -C ${exchangeCtx}`]);
     await unlink(localCtxTar);
 
-    const log = await runBuildctlViaExec(opts.imageTag, exchangeCtx, exchangeOut, opts.dockerfile);
+    const log = await runBuildctlViaExec(opts.imageTag, exchangeCtx, exchangeOut, opts.dockerfile, opts.noCache);
 
     await loadImage(localOut);
 
@@ -121,24 +130,39 @@ async function runBuildctlViaExec(
   imageTag: string,
   contextDir: string,
   outputPath: string,
-  dockerfile?: string
+  dockerfile?: string,
+  noCache?: boolean
 ): Promise<string> {
-  const cmd = [
-    "buildctl", "build",
-    "--frontend", "dockerfile.v0",
-    "--local", `context=${contextDir}`,
-    "--local", `dockerfile=${contextDir}`,
-    ...(dockerfile ? ["--opt", `filename=${dockerfile}`] : []),
-    "--output", `type=docker,name=${imageTag},dest=${outputPath}`,
-  ];
-
+  const cmd = buildctlArgs({ imageTag, contextDir, outputPath, dockerfile, noCache });
   const container = docker.getContainer(BUILDKIT_CONTAINER);
   const exec = await container.exec({
     Cmd: cmd,
     AttachStdout: true,
     AttachStderr: true,
   });
+  return runBuildExec(exec);
+}
 
+/** Pure: the buildctl argv for one build. Exported for tests. */
+export function buildctlArgs(o: {
+  imageTag: string;
+  contextDir: string;
+  outputPath: string;
+  dockerfile?: string;
+  noCache?: boolean;
+}): string[] {
+  return [
+    "buildctl", "build",
+    "--frontend", "dockerfile.v0",
+    ...(o.noCache ? ["--no-cache"] : []),
+    "--local", `context=${o.contextDir}`,
+    "--local", `dockerfile=${o.contextDir}`,
+    ...(o.dockerfile ? ["--opt", `filename=${o.dockerfile}`] : []),
+    "--output", `type=docker,name=${o.imageTag},dest=${o.outputPath}`,
+  ];
+}
+
+async function runBuildExec(exec: Docker.Exec): Promise<string> {
   return new Promise((resolve, reject) => {
     exec.start({ hijack: true }, (err: any, stream: any) => {
       if (err) return reject(new Error(`Build exec failed: ${err.message}`));

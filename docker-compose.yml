@@ -58,13 +58,15 @@ services:
       - runway-apps
 
   # ── Builder (BuildKit) ─────────────────────────────────
+  # Pinned to a release tag (never :latest) so updates are deliberate:
+  # bump the tag here, then `docker compose pull && docker compose up -d`.
   # Isolated image builder. Control reaches buildkit via the Docker
   # socket (`docker exec`), not over TCP, so buildkit does NOT share
   # a network with control or with deployed apps. This prevents
   # malicious RUN steps in a user Dockerfile from reaching the
   # control plane or other apps at build time.
   buildkit:
-    image: moby/buildkit:latest
+    image: moby/buildkit:v0.35.1
     container_name: runway-buildkit
     restart: unless-stopped
     privileged: true
