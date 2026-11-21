@@ -327,6 +327,24 @@ deploy automatically.
   configurable on the same page): rebuilds only apps with a KEV CVE or
   a critical finding that has a fix. Individual apps can opt out on
   their app page. The result goes to the notification webhook.
+- **Automatic base-image patches**: when a `FROM` pins an exact patch
+  (`nginx:1.30.6-alpine`, `python:3.12.7-slim`), a rebuild looks up the
+  newest patch of the **same major.minor and the same variant** in the
+  registry and builds with that tag (`nginx:1.30.7-alpine`) from a
+  build-time copy of the Dockerfile. Your stored source is never
+  modified. Never a different minor/major; digest pins and floating tags
+  (`1.30-alpine`, `node:24`, `latest`) are left alone; `ARG`-driven
+  `FROM`s are supported when one ARG carries the tag or the whole image.
+  Per app: "Auto-patch base image on rebuild" (default on). The base
+  images used (tag + digest, and whether auto-raised) are recorded per
+  deploy and shown in deploy history and the rebuild table. For fewer
+  surprises, write minor pins (`nginx:1.30-alpine`) in your Dockerfile.
+- **Rebuild gate**: a rebuild goes live only if it is *not worse* than
+  the running version (no new CRITICAL and no new actively exploited
+  CVE compared with a fresh scan of the running image) **and** the new
+  container passes its healthcheck. Otherwise the old version keeps
+  running and the reason is reported (rebuild table + webhook). The
+  app's `scan_threshold` still gates normal deploys, not rebuilds.
 - **Scripting**: `POST /admin/api/rebuild-all` (202 + `run_id`),
   `GET /admin/api/rebuild-runs[/<id>]`. Requires an admin dashboard
   session cookie and the header `X-Requested-With: runway`; per-app API

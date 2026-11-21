@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { rebuildReason, snapshot, summarizeRun } from "./rebuild.js";
+import { evaluateRebuildGate, rebuildReason, snapshot, summarizeRun } from "./rebuild.js";
+import type { ScanResult } from "./scan.js";
 import type { Finding } from "./scan.js";
 import type { RebuildAppResult } from "../db/rebuild-runs.js";
 
@@ -63,5 +64,69 @@ describe("summarizeRun", () => {
     expect(text).toContain("1 rebuilt, 1 rolled back");
     expect(text).toContain("Alpha: rebuilt (critical 3→0, KEV 2→0)");
     expect(text).toContain("b: rolled back: healthcheck failing");
+  });
+});
+
+describe("evaluateRebuildGate", () => {
+  const scan = (findings: Finding[], status: ScanResult["status"] = "blocked"): ScanResult => ({
+    status,
+    counts: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 },
+    findings,
+  });
+  const kevSet = new Set(["CVE-KEV"]);
+
+  it("allows an equal result even when the threshold would have blocked it", () => {
+    const cur = [f("CVE-1", "CRITICAL", "9")];
+    const v = evaluateRebuildGate(cur, scan([f("CVE-1", "CRITICAL", "9")], "blocked"), kevSet);
+    expect(v.allow).toBe(true);
+  });
+  it("allows a strictly better build (4C -> fewer, the Fennomotor case)", () => {
+    const cur = [f("CVE-1", "CRITICAL"), f("CVE-2", "CRITICAL"), f("CVE-3", "HIGH")];
+    expect(evaluateRebuildGate(cur, scan([f("CVE-2", "CRITICAL")]), kevSet).allow).toBe(true);
+  });
+  it("blocks a new CRITICAL that the running version does not have", () => {
+    const v = evaluateRebuildGate([f("CVE-1", "CRITICAL")], scan([f("CVE-1", "CRITICAL"), f("CVE-9", "CRITICAL")]), kevSet);
+    expect(v.allow).toBe(false);
+    expect(v.reason).toContain("1 new critical (CVE-9)");
+  });
+  it("a HIGH that became CRITICAL counts as a new critical", () => {
+    const v = evaluateRebuildGate([f("CVE-5", "HIGH")], scan([f("CVE-5", "CRITICAL")]), kevSet);
+    expect(v.allow).toBe(false);
+  });
+  it("blocks a new KEV even at low severity, but not a KEV the running version already has", () => {
+    expect(evaluateRebuildGate([], scan([f("CVE-KEV", "LOW")]), kevSet).allow).toBe(false);
+    expect(evaluateRebuildGate([f("CVE-KEV", "LOW")], scan([f("CVE-KEV", "LOW")]), kevSet).allow).toBe(true);
+  });
+  it("new HIGH/MEDIUM findings alone do not block", () => {
+    expect(evaluateRebuildGate([], scan([f("CVE-7", "HIGH"), f("CVE-8", "MEDIUM")], "warned"), kevSet).allow).toBe(true);
+  });
+  it("ignores secret/misconfig findings", () => {
+    expect(evaluateRebuildGate([], scan([f("DS002", "CRITICAL", undefined, "misconfig")]), kevSet).allow).toBe(true);
+  });
+  it("fails closed without a baseline or when the new scan was skipped", () => {
+    expect(evaluateRebuildGate(null, scan([]), kevSet).allow).toBe(false);
+    expect(evaluateRebuildGate([], scan([], "skipped"), kevSet).allow).toBe(false);
+  });
+  it("caps the id list in the reason", () => {
+    const next = scan(["A", "B", "C", "D", "E"].map((id) => f(`CVE-${id}`, "CRITICAL")));
+    expect(evaluateRebuildGate([], next, kevSet).reason).toContain("+2 more");
+  });
+});
+
+describe("summarizeRun with base patches", () => {
+  it("mentions an automatically raised base image", () => {
+    const text = summarizeRun("scheduled", [
+      {
+        app_id: "a", app_name: "Fennomotor", outcome: "rebuilt", before: null, after: null,
+        patched: [{ from: "nginx:1.30.6-alpine", to: "nginx:1.30.7-alpine" }],
+      },
+    ]);
+    expect(text).toContain("[base nginx:1.30.6-alpine→nginx:1.30.7-alpine]");
+  });
+  it("shows the gate reason for a blocked app", () => {
+    const text = summarizeRun("manual", [
+      { app_id: "a", app_name: "X", outcome: "blocked", before: null, after: null, detail: "new build is worse than the running version: 1 new critical (CVE-9)" },
+    ]);
+    expect(text).toContain("X: blocked: new build is worse");
   });
 });

@@ -359,6 +359,14 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "auto_rebuild")) {
     db.exec(`ALTER TABLE apps ADD COLUMN auto_rebuild INTEGER NOT NULL DEFAULT 1`);
   }
+  // Auto-patch of base images on rebuild: per-app opt-out, and which base
+  // images (tag + digest, and whether auto-raised) each deploy used.
+  if (!appCols.some((c) => c.name === "auto_patch_base")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_patch_base INTEGER NOT NULL DEFAULT 1`);
+  }
+  if (!deployCols.some((c) => c.name === "base_images")) {
+    db.exec(`ALTER TABLE deploys ADD COLUMN base_images TEXT`);
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS rebuild_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

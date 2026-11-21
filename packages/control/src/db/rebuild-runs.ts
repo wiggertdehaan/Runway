@@ -24,6 +24,10 @@ export interface RebuildAppResult {
   after: { counts: SeverityCounts; kev: number } | null;
   /** Why it was picked (auto) or why it was skipped/failed. */
   detail?: string;
+  /** Base images (tag + digest) the new build used. */
+  base_images?: Array<{ image: string; digest: string; auto_patched_from?: string }>;
+  /** Exact patch pins that were automatically raised for this build. */
+  patched?: Array<{ from: string; to: string }>;
   duration_s?: number;
 }
 

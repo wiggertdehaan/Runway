@@ -25,7 +25,7 @@ import {
 } from "../deploy/source.js";
 import { readFile } from "node:fs/promises";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, type Threshold } from "../deploy/scan.js";
-import { getDeploy, getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
+import { getDeploy, getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
 import { appContainerName } from "../deploy/index.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
@@ -826,6 +826,7 @@ apiRoutes.get("/app/deploys", (c) => {
     created_at: d.created_at,
     is_current: d.image_tag === app.image_tag && d.status === "success",
     has_source: hasSourceForDeploy(app.id, d.id),
+    base_images: parseBaseImages(d),
   }));
   return c.json({
     app_id: app.id,

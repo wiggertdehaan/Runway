@@ -28,6 +28,14 @@ export interface BuildOptions {
    * are reused, which is correct and shows as `CACHED` on the FROM step.
    */
   noCache?: boolean;
+  /**
+   * Replacement Dockerfile text, written into the extracted build
+   * context only (the stored source tar is never modified). Used by
+   * rebuilds to bump exact base-image patch pins.
+   */
+  dockerfileOverride?: string;
+  /** `--build-arg` values (ARG-driven FROM refs). */
+  buildArgs?: Record<string, string>;
 }
 
 export interface BuildResult {
@@ -73,8 +81,17 @@ export async function buildImageFromTar(
     await writeFile(localCtxTar, contextBuf);
     execFileSync("sh", ["-c", `mkdir -p ${exchangeCtx} && tar xf ${localCtxTar} -C ${exchangeCtx}`]);
     await unlink(localCtxTar);
+    if (opts.dockerfileOverride !== undefined) {
+      // Fresh mtime on purpose: BuildKit's incremental context sync
+      // compares size+mtime, and a same-length tag bump must not be
+      // mistaken for "unchanged".
+      await writeFile(
+        `${exchangeCtx}/${opts.dockerfile ?? "Dockerfile"}`,
+        opts.dockerfileOverride
+      );
+    }
 
-    const log = await runBuildctlViaExec(opts.imageTag, exchangeCtx, exchangeOut, opts.dockerfile, opts.noCache);
+    const log = await runBuildctlViaExec(opts.imageTag, exchangeCtx, exchangeOut, opts.dockerfile, opts.noCache, opts.buildArgs);
 
     await loadImage(localOut);
 
@@ -131,9 +148,10 @@ async function runBuildctlViaExec(
   contextDir: string,
   outputPath: string,
   dockerfile?: string,
-  noCache?: boolean
+  noCache?: boolean,
+  buildArgs?: Record<string, string>
 ): Promise<string> {
-  const cmd = buildctlArgs({ imageTag, contextDir, outputPath, dockerfile, noCache });
+  const cmd = buildctlArgs({ imageTag, contextDir, outputPath, dockerfile, noCache, buildArgs });
   const container = docker.getContainer(BUILDKIT_CONTAINER);
   const exec = await container.exec({
     Cmd: cmd,
@@ -150,6 +168,7 @@ export function buildctlArgs(o: {
   outputPath: string;
   dockerfile?: string;
   noCache?: boolean;
+  buildArgs?: Record<string, string>;
 }): string[] {
   return [
     "buildctl", "build",
@@ -158,6 +177,9 @@ export function buildctlArgs(o: {
     "--local", `context=${o.contextDir}`,
     "--local", `dockerfile=${o.contextDir}`,
     ...(o.dockerfile ? ["--opt", `filename=${o.dockerfile}`] : []),
+    ...Object.entries(o.buildArgs ?? {})
+      .sort(([a], [b]) => a.localeCompare(b))
+      .flatMap(([k, v]) => ["--opt", `build-arg:${k}=${v}`]),
     "--output", `type=docker,name=${o.imageTag},dest=${o.outputPath}`,
   ];
 }

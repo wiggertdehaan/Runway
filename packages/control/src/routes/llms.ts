@@ -14,6 +14,8 @@ export const llmsRoutes = new Hono();
 // produce a deploy that succeeds on the first try.
 //
 // Each template:
+//  - pins the base image to the minor version (never an exact patch, so
+//    rebuilds keep getting security fixes)
 //  - upgrades OS packages right after FROM (silences scan vuln noise)
 //  - drops to a non-root user before EXPOSE
 //  - listens on the runtime's default port (3000 for node/python/go,
@@ -139,7 +141,9 @@ existing shell and HTTP tools — no MCP server or SDK is required.
 > **Before you start building, load the \`runway-bootstrap\` skill.** This
 > Runway instance exposes its built-in skills over MCP at \`${base}/mcp\`.
 > The bootstrap skill carries the runtime-agnostic guardrails (non-root
-> user, \`.dockerignore\` from day one, pinned base images, \`/healthz\`,
+> user, \`.dockerignore\` from day one, minor-pinned base images (e.g.
+> \`nginx:1.30-alpine\`, \`node:24-alpine\`, not an exact patch like
+> \`nginx:1.30.6-alpine\`), \`/healthz\`,
 > bind to \`0.0.0.0\`) plus a per-runtime security checklist that this
 > document used to repeat. Sister skills cover the rest of the lifecycle:
 > \`runway-deploy\`, \`runway-fix-scan-finding\`, \`runway-debug-deploy-fail\`.
@@ -343,6 +347,11 @@ The \`sed\` line is **not optional** — it moves nginx's pidfile from
 
 These are the failure modes that show up most often on a first deploy:
 
+- **Pin base images to the minor, not the patch.** \`FROM nginx:1.30-alpine\`
+  / \`node:24-alpine\`, not \`nginx:1.30.6-alpine\`. An exact patch pin
+  freezes the image on that patch's CVEs; a minor pin picks up the fix on
+  the next build. (A Runway rebuild raises exact patch pins itself, in a
+  build-time copy, but write the minor pin so normal deploys benefit too.)
 - **Bind to \`0.0.0.0\`, not \`127.0.0.1\`.** Inside a container,
   localhost-only sockets are unreachable from the gateway. The deploy
   succeeds but the URL returns 502.

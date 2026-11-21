@@ -105,7 +105,10 @@ deploy.
 
 If `scan.status === "blocked"` or HTTP 409, the build succeeded but
 the new container was not started — the previous version keeps
-serving. Use the `runway-fix-scan-finding` skill to triage.
+serving. Use the `runway-fix-scan-finding` skill to triage. A blocked
+deploy whose findings come from the base image often just needs the
+`FROM` tag loosened from an exact patch (`nginx:1.30.6-alpine`) to the
+minor (`nginx:1.30-alpine`).
 
 If HTTP 5xx: the body still has `log_tail` with the last build
 output lines. Surface that to the user. Use the
