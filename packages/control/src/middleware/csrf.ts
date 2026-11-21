@@ -58,6 +58,17 @@ export async function verifyCsrf(c: Context, next: Next) {
     return next();
   }
 
+  // Admin JSON API: session-authenticated, so it must NOT be skipped
+  // blindly. It requires a custom header that cross-site forms can't
+  // send (enforced in routes/web.ts adminApi), which replaces the
+  // form-token check for these JSON calls only.
+  if (
+    c.req.path.startsWith("/admin/api/") &&
+    c.req.header("x-requested-with") === "runway"
+  ) {
+    return next();
+  }
+
   // Skip CSRF for the MCP endpoint (Bearer-token authenticated, JSON-RPC).
   if (c.req.path === "/mcp") {
     return next();

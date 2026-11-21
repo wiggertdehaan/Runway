@@ -81,7 +81,7 @@ export function emptyCounts(): ScanCounts {
   return { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
 }
 
-function countSeverity(findings: Finding[]): ScanCounts {
+export function countSeverity(findings: Finding[]): ScanCounts {
   const counts = emptyCounts();
   for (const f of findings) {
     switch (f.severity) {

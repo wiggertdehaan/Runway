@@ -178,6 +178,30 @@ without knowing why.
   `"blocked"` with an `error` message attached, not `"skipped"`.
   Only both legs failing with zero findings yields `"skipped"`.
 
+### Rebuild-all (cache-free, health-verified)
+- `deploy/rebuild.ts` rebuilds from the stored source tar
+  (`latestSource`) via `deployApp({ noCache, verifyHealth,
+  skipSourceSave })`. `noCache` adds `buildctl --no-cache`;
+  `verifyHealth` waits (`deploy/health.ts`) and, if the new container
+  is not healthy, recreates the previous image tag and throws
+  `UnhealthyDeployError`. Regular deploys are unchanged (no wait).
+- `rebuildApp` never throws; every failure is an outcome so a batch
+  continues. Runs are strictly sequential and one at a time
+  (`startRebuildRun` throws `RebuildBusyError`). Progress lives in
+  `rebuild_runs.results` (JSON, rewritten per app).
+- KEV data is the CISA feed (`deploy/kev.ts`, cached 24h next to the
+  DB). Trivy's JSON has no KEV flag, so matching is by CVE id.
+- Weekly job: `deploy/rebuild-scheduler.ts`, 1-minute tick against
+  Europe/Amsterdam wall-clock; last launch date is persisted in
+  settings (`auto_rebuild_last_date`). Per-app opt-out:
+  `apps.auto_rebuild`.
+- The admin JSON API is under `/admin/api/*` (session + admin +
+  `X-Requested-With: runway`), deliberately NOT under `/api/` (which
+  skips CSRF and uses per-app Bearer keys).
+- Pre-existing quirk: on a scan-blocked deploy `deployApp` leaves
+  `apps.status` at "scanning". Rebuild restores it; plain deploys
+  still don't.
+
 ### SSO (Google + Microsoft OAuth2)
 - `packages/control/src/auth/oauth.ts` — provider configs, URL
   building, authorization code exchange, JWT payload decode. No

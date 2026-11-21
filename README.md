@@ -291,6 +291,47 @@ button for admins.
 - Per-deploy Trivy scan (image CVEs, hardcoded secrets, Dockerfile misconfigs) with a configurable blocking threshold
 - Two-role access model (admin / member) with per-user ownership of apps
 
+## Keeping Runway and its apps patched
+
+Two separate things go stale: Runway's own containers, and the images
+of the apps it deployed.
+
+**Runway itself** (gateway, BuildKit, control). Images are pinned in
+`docker-compose.yml`: Traefik on a minor tag (`v3.5`, picks up patch
+releases) and BuildKit on an exact release (`moby/buildkit:v0.35.1`,
+never `latest`). To update on the host, from the install directory
+(`/opt/runway`):
+
+```bash
+git pull                        # picks up new pins + control changes
+docker compose pull             # fetch pinned images (patch releases)
+docker compose up -d --build    # recreate what changed, rebuild control
+```
+
+That sequence is safe to put in a scheduled job: `up -d` only recreates
+containers whose image or config changed, and deployed apps live in
+separate containers and are not touched. To move BuildKit or Traefik to
+a newer release, bump the tag in `docker-compose.yml` first.
+
+**Deployed apps.** An app only becomes safe when it is rebuilt, and the
+BuildKit cache (kept 7 days) can replay an old `apt-get upgrade` layer.
+Admin > **Rebuild** rebuilds apps from their stored source with
+`buildctl --no-cache`, through the normal scan gate; a new container
+that is not healthy within two minutes is replaced by the previous
+deploy automatically.
+
+- **Rebuild all apps now**: sequential, with a per-app result
+  (rebuilt / rolled back / blocked / failed) and findings before and
+  after, including actively exploited CVEs from the CISA KEV catalog.
+- **Weekly automatic rebuild** (default Sunday 05:00 Europe/Amsterdam,
+  configurable on the same page): rebuilds only apps with a KEV CVE or
+  a critical finding that has a fix. Individual apps can opt out on
+  their app page. The result goes to the notification webhook.
+- **Scripting**: `POST /admin/api/rebuild-all` (202 + `run_id`),
+  `GET /admin/api/rebuild-runs[/<id>]`. Requires an admin dashboard
+  session cookie and the header `X-Requested-With: runway`; per-app API
+  keys cannot call it.
+
 ## Dashboard
 
 The web dashboard lets you manage apps, users, and settings.
