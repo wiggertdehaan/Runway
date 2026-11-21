@@ -126,6 +126,104 @@ export function pickLatestPatch(
   return best?.tag ?? null;
 }
 
+// ── Escalation: newer minor / major lines ─────────────────────────
+
+/** How a tag pins its version. */
+export type PinStyle = "exact" | "minor" | "major";
+
+export interface VersionTag {
+  style: PinStyle;
+  prefix: string;
+  major: number;
+  /** undefined for major-only tags (`24-alpine`). */
+  minor?: number;
+  patch?: number;
+  variant: string;
+}
+
+const MINOR_TAG = /^(v?)(\d+)\.(\d+)(?:-(.+))?$/;
+const MAJOR_TAG = /^(v?)(\d+)(?:-(.+))?$/;
+
+/** Classify any tag as exact / minor / major pin, or null (latest, names...). */
+export function parseVersionTag(tag: string): VersionTag | null {
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) return null;
+  const e = parseExactTag(tag);
+  if (e) return { style: "exact", ...e };
+  const m = MINOR_TAG.exec(tag);
+  if (m) {
+    const variant = m[4] ?? "";
+    if (variant && PRERELEASE_VARIANT.test(variant)) return null;
+    return { style: "minor", prefix: m[1], major: +m[2], minor: +m[3], variant };
+  }
+  const j = MAJOR_TAG.exec(tag);
+  if (j) {
+    const variant = j[3] ?? "";
+    if (variant && PRERELEASE_VARIANT.test(variant)) return null;
+    return { style: "major", prefix: j[1], major: +j[2], variant };
+  }
+  return null;
+}
+
+/**
+ * Candidate tags in NEWER MINOR lines of the same major and variant,
+ * lowest minor first, at most `limit`. The tag style follows the
+ * current pin: an exact pin gets the newest patch of each newer minor
+ * (`1.31.9-alpine`), a minor pin gets the minor tag (`1.31-alpine`).
+ * Major-only pins (`node:24`) have no minor to escalate.
+ */
+export function pickMinorCandidates(
+  current: VersionTag,
+  availableTags: string[],
+  limit = 3
+): string[] {
+  if (current.style === "major" || current.minor === undefined) return [];
+  const byMinor = new Map<number, { patch: number; tag: string }>();
+  for (const tag of availableTags) {
+    const t = parseVersionTag(tag);
+    if (!t || t.style !== current.style) continue;
+    if (t.prefix !== current.prefix || t.major !== current.major || t.variant !== current.variant) continue;
+    if (t.minor === undefined || t.minor <= current.minor) continue;
+    const patch = t.patch ?? 0;
+    const prev = byMinor.get(t.minor);
+    if (!prev || patch > prev.patch) byMinor.set(t.minor, { patch, tag });
+  }
+  return [...byMinor.entries()]
+    .sort(([a], [b]) => a - b)
+    .slice(0, limit)
+    .map(([, v]) => v.tag);
+}
+
+/**
+ * The tag to PROBE in the next major line (never applied automatically):
+ * the lowest newer major that exists for this variant, in the same
+ * pin style, newest version within it.
+ */
+export function pickMajorProbe(
+  current: VersionTag,
+  availableTags: string[]
+): string | null {
+  const higher = new Map<number, { key: number[]; tag: string }>();
+  for (const tag of availableTags) {
+    const t = parseVersionTag(tag);
+    if (!t || t.style !== current.style) continue;
+    if (t.prefix !== current.prefix || t.variant !== current.variant || t.major <= current.major) continue;
+    const key = [t.minor ?? 0, t.patch ?? 0];
+    const prev = higher.get(t.major);
+    if (!prev || key[0] > prev.key[0] || (key[0] === prev.key[0] && key[1] > prev.key[1])) {
+      higher.set(t.major, { key, tag });
+    }
+  }
+  const lowest = [...higher.keys()].sort((a, b) => a - b)[0];
+  return lowest === undefined ? null : higher.get(lowest)!.tag;
+}
+
+/** "1.30" for 1.30.7-alpine / 1.30-alpine; "24" for 24-alpine; null otherwise. */
+export function lineOf(tag: string): string | null {
+  const t = parseVersionTag(tag);
+  if (!t) return null;
+  return t.minor !== undefined ? `${t.major}.${t.minor}` : `${t.major}`;
+}
+
 // ── Dockerfile parsing ────────────────────────────────────────────
 
 export interface FromInstruction {
@@ -138,7 +236,17 @@ export interface FromInstruction {
   stage: string | null;
 }
 
+export interface StageInfo {
+  /** Index into ParsedDockerfile.froms when this stage's base is an external image, else null. */
+  fromIndex: number | null;
+  /** Index into `stages` when the base is an earlier stage, else null. */
+  baseStage: number | null;
+  scratch: boolean;
+}
+
 export interface ParsedDockerfile {
+  /** Every FROM, in order, resolved to external image vs earlier stage. */
+  stages: StageInfo[];
   froms: FromInstruction[];
   /** Global ARG defaults declared before the first FROM. */
   args: Record<string, string | undefined>;
@@ -218,7 +326,8 @@ export function parseDockerfile(text: string): ParsedDockerfile {
   const args: Record<string, string | undefined> = {};
   const declaredArgs = new Set<string>();
   const froms: FromInstruction[] = [];
-  const stageNames = new Set<string>();
+  const stages: StageInfo[] = [];
+  const stageNames = new Map<string, number>();
   let seenFrom = false;
 
   for (const { line, text: l } of logicalLines(text)) {
@@ -240,9 +349,16 @@ export function parseDockerfile(text: string): ParsedDockerfile {
     const raw = from[2];
     const stage = from[3] ?? null;
 
-    const isStageRef = stageNames.has(raw.toLowerCase());
-    if (stage) stageNames.add(stage.toLowerCase());
-    if (isStageRef || raw.toLowerCase() === "scratch") continue;
+    const refIdx = stageNames.get(raw.toLowerCase());
+    const isStageRef = refIdx !== undefined;
+    const scratch = raw.toLowerCase() === "scratch";
+    const stageIndex = stages.length;
+    if (stage) stageNames.set(stage.toLowerCase(), stageIndex);
+    if (isStageRef || scratch) {
+      stages.push({ fromIndex: null, baseStage: isStageRef ? refIdx! : null, scratch });
+      continue;
+    }
+    stages.push({ fromIndex: froms.length, baseStage: null, scratch: false });
 
     froms.push({
       line,
@@ -251,19 +367,47 @@ export function parseDockerfile(text: string): ParsedDockerfile {
       stage,
     });
   }
-  return { froms, args, declaredArgs };
+  return { stages, froms, args, declaredArgs };
+}
+
+/**
+ * The external FROM that provides the RUNTIME (final) stage: the last
+ * stage, following `FROM <earlier-stage>` chains back to an image.
+ * Packages in earlier build stages never reach the final image, so only
+ * this base matters for runtime vulnerabilities. Null for `scratch`.
+ */
+export function findRuntimeFrom(parsed: ParsedDockerfile): FromInstruction | null {
+  let i = parsed.stages.length - 1;
+  for (let guard = 0; i >= 0 && guard < 64; guard++) {
+    const st = parsed.stages[i];
+    if (st.fromIndex !== null) return parsed.froms[st.fromIndex] ?? null;
+    if (st.baseStage === null) return null; // scratch
+    i = st.baseStage;
+  }
+  return null;
 }
 
 // ── Planning ──────────────────────────────────────────────────────
 
-/** Lists available tags of a repository. Injected (registry.ts / tests). */
-export type TagSource = (ref: ImageRef) => Promise<string[]>;
+/**
+ * Lists available tags of a repository. Injected (registry.ts / tests).
+ * `filter` is a tag prefix hint (e.g. "1." for everything in major 1); by
+ * default the source narrows to the ref's own major.minor line.
+ */
+export type TagSource = (
+  ref: ImageRef,
+  opts?: { filter?: string }
+) => Promise<string[]>;
+
+export type BumpKind = "patch" | "minor" | "major";
 
 export interface BasePatch {
   /** Image as written/resolved before patching, e.g. "nginx:1.30.6-alpine". */
   from: string;
   /** Same image with the bumped tag, e.g. "nginx:1.30.7-alpine". */
   to: string;
+  /** "patch" (default), "minor" (escalation) or "major" (dry-run probe only). */
+  kind?: BumpKind;
 }
 
 export interface BaseSkip {
@@ -293,9 +437,19 @@ function withTag(resolved: string, newTag: string): string {
  * literal refs are rewritten in the Dockerfile copy; refs driven by a
  * single global ARG are overridden with a build-arg instead.
  */
+export interface PlanOptions {
+  /**
+   * Force one specific FROM (by its physical line) to a given tag instead
+   * of the normal "newest patch" rule. Used for minor escalation and the
+   * major probe; every other FROM still gets its normal patch bump.
+   */
+  retarget?: { line: number; tag: string; kind: BumpKind };
+}
+
 export async function planBasePatches(
   dockerfileText: string,
-  tagSource: TagSource
+  tagSource: TagSource,
+  opts: PlanOptions = {}
 ): Promise<BasePlan> {
   const parsed = parseDockerfile(dockerfileText);
   const lines = dockerfileText.split(/\r?\n/);
@@ -327,28 +481,41 @@ export async function planBasePatches(
       skipped.push({ ref: f.resolved, reason: "floating (no tag)" });
       continue;
     }
-    const exact = parseExactTag(ref.tag);
-    if (!exact) {
-      skipped.push({ ref: f.resolved, reason: "not an exact patch pin" });
-      continue;
+    const forced = opts.retarget && opts.retarget.line === f.line ? opts.retarget : null;
+    let newTag: string | null;
+    if (forced) {
+      if (!parseVersionTag(ref.tag)) {
+        skipped.push({ ref: f.resolved, reason: "runtime base is not a versioned tag" });
+        continue;
+      }
+      newTag = forced.tag;
+    } else {
+      const exact = parseExactTag(ref.tag);
+      if (!exact) {
+        skipped.push({ ref: f.resolved, reason: "not an exact patch pin" });
+        continue;
+      }
+      let available: string[];
+      try {
+        available = await tagSource(ref);
+      } catch (err) {
+        skipped.push({
+          ref: f.resolved,
+          reason: `registry lookup failed: ${(err as Error).message}`,
+        });
+        continue;
+      }
+      newTag = pickLatestPatch(exact, available);
+      if (!newTag) {
+        skipped.push({ ref: f.resolved, reason: "already on the newest patch" });
+        continue;
+      }
     }
-
-    let available: string[];
-    try {
-      available = await tagSource(ref);
-    } catch (err) {
-      skipped.push({
-        ref: f.resolved,
-        reason: `registry lookup failed: ${(err as Error).message}`,
-      });
-      continue;
-    }
-    const newTag = pickLatestPatch(exact, available);
-    if (!newTag) {
-      skipped.push({ ref: f.resolved, reason: "already on the newest patch" });
-      continue;
-    }
-    const patch: BasePatch = { from: f.resolved, to: withTag(f.resolved, newTag) };
+    const patch: BasePatch = {
+      from: f.resolved,
+      to: withTag(f.resolved, newTag),
+      ...(forced ? { kind: forced.kind } : {}),
+    };
 
     if (!f.raw.includes("$")) {
       if (!lines[f.line]?.includes(f.raw)) {
@@ -422,6 +589,8 @@ export interface UsedBaseImage {
   digest: string;
   /** Tag it was automatically raised from, if this build patched it. */
   auto_patched_from?: string;
+  /** Minor line it was escalated from ("1.30"), if this build jumped minors. */
+  auto_minor_from?: string;
 }
 
 /**
@@ -443,7 +612,11 @@ export function extractUsedBaseImages(
     seen.add(key);
     const used: UsedBaseImage = { image: m[1], digest: m[2] };
     const hit = patches.find((p) => sameImage(m[1], p.to));
-    if (hit) used.auto_patched_from = tagOf(hit.from) ?? hit.from;
+    if (hit) {
+      const fromTag = tagOf(hit.from) ?? hit.from;
+      if (hit.kind === "minor") used.auto_minor_from = lineOf(fromTag) ?? fromTag;
+      else used.auto_patched_from = fromTag;
+    }
     out.push(used);
   }
   return out;
@@ -463,5 +636,11 @@ function sameImage(a: string, b: string): boolean {
 export function describeBaseImage(b: UsedBaseImage): string {
   const short = b.image.replace(/^docker\.io\/(library\/)?/, "");
   const dg = b.digest.replace(/^sha256:/, "").slice(0, 12);
-  return `${short} @${dg}${b.auto_patched_from ? ` (auto-patched from ${b.auto_patched_from})` : ""}`;
+  const toLine = lineOf(parseImageRef(b.image)?.tag ?? "") ?? "?";
+  const note = b.auto_minor_from
+    ? ` (auto-minor ${b.auto_minor_from}→${toLine})`
+    : b.auto_patched_from
+      ? ` (auto-patched from ${b.auto_patched_from})`
+      : "";
+  return `${short} @${dg}${note}`;
 }

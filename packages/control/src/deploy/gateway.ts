@@ -212,3 +212,60 @@ export async function deleteAppRoute(appId: string): Promise<void> {
     if (err.code !== "ENOENT") throw err;
   }
 }
+
+export interface MaintenanceRouteConfig {
+  appId: string;
+  domain: string;
+  customDomain?: string | null;
+}
+
+/**
+ * Traefik config for a QUARANTINED app: the app's hosts are routed to the
+ * control plane's public /maintenance page instead of the (stopped)
+ * container. No SSO/basic-auth: the page carries no app data. Pure, so
+ * the matcher can be asserted in tests.
+ */
+export function buildMaintenanceRouteDoc(
+  cfg: MaintenanceRouteConfig
+): Record<string, unknown> {
+  const routerKey = `app-${cfg.appId}`;
+  const allDomains = [cfg.domain];
+  if (cfg.customDomain) allDomains.push(cfg.customDomain);
+  return {
+    http: {
+      routers: {
+        [routerKey]: {
+          rule: allDomains.map((d) => `Host(\`${d}\`)`).join(" || "),
+          entryPoints: ["websecure"],
+          service: `${routerKey}-maintenance`,
+          tls: {
+            certResolver: "letsencrypt",
+            ...(cfg.customDomain
+              ? { domains: allDomains.map((d) => ({ main: d })) }
+              : {}),
+          },
+          middlewares: [`${routerKey}-maintenance-path`],
+        },
+      },
+      middlewares: {
+        [`${routerKey}-maintenance-path`]: {
+          replacePath: { path: "/maintenance" },
+        },
+      },
+      services: {
+        [`${routerKey}-maintenance`]: {
+          loadBalancer: { servers: [{ url: "http://control:3000" }] },
+        },
+      },
+    },
+  };
+}
+
+/** Replace the app's route file with the maintenance route. */
+export async function writeMaintenanceRoute(
+  cfg: MaintenanceRouteConfig
+): Promise<void> {
+  await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
+  const path = join(GATEWAY_CONFIG_DIR, `${cfg.appId}.yml`);
+  await writeFile(path, yaml.dump(buildMaintenanceRouteDoc(cfg)), "utf8");
+}

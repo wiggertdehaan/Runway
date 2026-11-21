@@ -112,7 +112,7 @@ export function getLatestDeploys(appId: string, limit = 5): Deploy[] {
 /** Parse a deploy's stored base_images JSON (empty list when absent/corrupt). */
 export function parseBaseImages(
   d: Pick<Deploy, "base_images">
-): Array<{ image: string; digest: string; auto_patched_from?: string }> {
+): Array<{ image: string; digest: string; auto_patched_from?: string; auto_minor_from?: string }> {
   if (!d.base_images) return [];
   try {
     const v = JSON.parse(d.base_images);

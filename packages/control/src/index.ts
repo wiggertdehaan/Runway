@@ -9,6 +9,7 @@ import { startActivityTailer } from "./deploy/activity-tailer.js";
 import { startPeriodicScanner } from "./deploy/periodic-scanner.js";
 import { startCachePruner } from "./deploy/cache-pruner.js";
 import { startRebuildScheduler } from "./deploy/rebuild-scheduler.js";
+import { startQuarantineMonitor } from "./deploy/quarantine.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
 
 migrate();
@@ -45,6 +46,10 @@ startCachePruner();
 // Weekly automatic rebuild of apps with exploited / fixable-critical
 // vulnerabilities (Sunday 05:00 Europe/Amsterdam by default).
 startRebuildScheduler();
+
+// KEV quarantine: minute tick evaluating running apps against the CISA
+// KEV list (term, final rebuild attempt, quarantine, automatic return).
+startQuarantineMonitor();
 
 const dashboardDomain = process.env.DASHBOARD_DOMAIN;
 if (dashboardDomain) {

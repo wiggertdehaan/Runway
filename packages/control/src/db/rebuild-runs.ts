@@ -25,9 +25,17 @@ export interface RebuildAppResult {
   /** Why it was picked (auto) or why it was skipped/failed. */
   detail?: string;
   /** Base images (tag + digest) the new build used. */
-  base_images?: Array<{ image: string; digest: string; auto_patched_from?: string }>;
+  base_images?: Array<{ image: string; digest: string; auto_patched_from?: string; auto_minor_from?: string }>;
   /** Exact patch pins that were automatically raised for this build. */
-  patched?: Array<{ from: string; to: string }>;
+  patched?: Array<{ from: string; to: string; kind?: "patch" | "minor" | "major" }>;
+  /** Minor-line escalation attempts and major-available probes. */
+  escalation?: Array<{
+    kind: "minor" | "major";
+    from: string;
+    to: string;
+    outcome: "applied" | "blocked" | "unhealthy" | "failed" | "notice";
+    detail: string;
+  }>;
   duration_s?: number;
 }
 

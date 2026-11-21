@@ -12,7 +12,7 @@ const APP_VERSION = (() => {
     return "dev";
   }
 })();
-import { listApps, createApp, deleteApp, getApp } from "../db/apps.js";
+import { listApps, createApp, deleteApp, getApp, type App } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import {
@@ -125,7 +125,21 @@ import {
 import { logAudit, getRecentAuditEntries } from "../db/audit.js";
 import { updateApp } from "../db/apps.js";
 import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
-import { describeBaseImage } from "../deploy/base-images.js";
+import { describeBaseImage, lineOf, parseImageRef } from "../deploy/base-images.js";
+import {
+  addNotice,
+  deleteExemption,
+  getActiveExemption,
+  getExemption,
+  getQuarantine,
+  listNotices,
+  listQuarantine,
+  setExemption,
+} from "../db/quarantine.js";
+import { deadlineOf, evaluateAppQuarantine } from "../deploy/quarantine.js";
+import { getKevList } from "../deploy/kev.js";
+import { notifyAdminWebhook } from "../util/webhook.js";
+import { clampQuarantineTermDays, getQuarantineTermDays } from "../db/settings.js";
 import { getLatestPeriodicScan } from "../db/periodic-scans.js";
 import { rescanApp } from "../deploy/periodic-scanner.js";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
@@ -313,6 +327,7 @@ function layout(
           .badge-created { background: var(--status-info-bg); color: var(--status-info); }
           .badge-running { background: var(--status-success-bg); color: var(--status-success); }
           .badge-starting, .badge-building { background: var(--status-warn-bg); color: var(--status-warn); }
+          .badge-quarantined { background: var(--status-error-bg); color: var(--status-error); outline: 1px solid var(--status-error); }
           .badge-exited, .badge-stopped, .badge-failed { background: var(--status-error-bg); color: var(--status-error); }
           .badge-restarting, .badge-paused { background: #3a1d5f; color: #c084fc; }
           .badge-healthy { background: var(--status-success-bg); color: var(--status-success); }
@@ -746,6 +761,85 @@ webRoutes.use("/rebuild/*", requireAdmin);
 webRoutes.use("/health", requireSession);
 webRoutes.use("/health", requireAdmin);
 
+/** "auto-patched" / "auto-minor 1.29→1.30" badge for a used base image, or "". */
+function baseBadge(b: { image: string; auto_patched_from?: string; auto_minor_from?: string }): string {
+  if (b.auto_minor_from) {
+    const to = lineOf(parseImageRef(b.image)?.tag ?? "") ?? "?";
+    return ` <span class="badge badge-running" title="Escalated to a newer minor line because a vulnerability could not be fixed in ${escapeHtml(b.auto_minor_from)}">auto-minor ${escapeHtml(b.auto_minor_from)}&rarr;${escapeHtml(to)}</span>`;
+  }
+  if (b.auto_patched_from) {
+    return ` <span class="badge badge-running" title="Raised automatically from ${escapeHtml(b.auto_patched_from)}">auto-patched</span>`;
+  }
+  return "";
+}
+
+function fmtUtc(iso: string | null | undefined): string {
+  if (!iso) return "?";
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "?";
+}
+
+/** Dashboard banner: apps in a KEV grace term or quarantined. */
+function renderQuarantineSummary(apps: App[]): string {
+  const byId = new Map(listQuarantine().map((r) => [r.app_id, r]));
+  const termMs = getQuarantineTermDays() * 86_400_000;
+  const items = apps
+    .filter((a) => byId.has(a.id))
+    .map((a) => {
+      const q = byId.get(a.id)!;
+      const cves = Object.keys(q.kev_first_seen).join(", ");
+      const ex = getActiveExemption(a.id);
+      const what =
+        q.state === "quarantined"
+          ? `<strong style="color:var(--status-error)">QUARANTINED</strong> since ${escapeHtml(fmtUtc(q.quarantined_at))}`
+          : `term ends ${escapeHtml(fmtUtc(deadlineOf(q, termMs)))}`;
+      return `<li><a href="/apps/${encodeURIComponent(a.id)}#quarantine">${escapeHtml(a.name ?? a.id)}</a>: ${what} &middot; actively exploited ${escapeHtml(cves)}${ex ? ` &middot; exempt until ${escapeHtml(fmtUtc(ex.until))}` : ""}</li>`;
+    });
+  if (items.length === 0) return "";
+  return `<div class="card" style="border-color:var(--status-error);margin-bottom:1rem">
+    <strong>Security attention</strong>
+    <p class="meta" style="margin:0.25rem 0">Actively exploited vulnerabilities (CISA KEV) in running apps. Fix by rebuilding or deploying; after the term an app is taken offline until fixed.</p>
+    <ul style="margin:0.5rem 0 0 1.25rem">${items.join("")}</ul>
+  </div>`;
+}
+
+/** App-page section: quarantine status, exemption, owner notices. */
+function renderQuarantineSection(app: App, admin: boolean): string {
+  const q = getQuarantine(app.id);
+  const ex = getExemption(app.id);
+  const exActive = !!getActiveExemption(app.id);
+  const notices = listNotices(app.id, 10);
+  if (!q && !ex && notices.length === 0) return "";
+  const termMs = getQuarantineTermDays() * 86_400_000;
+
+  const status = q
+    ? q.state === "quarantined"
+      ? `<p><span class="badge badge-quarantined">quarantined</span> since ${escapeHtml(fmtUtc(q.quarantined_at))}. Visitors see a maintenance page; the container is stopped, data and volumes are kept. It comes back online automatically when a rebuild or deploy resolves ${escapeHtml(Object.keys(q.kev_first_seen).join(", "))}.</p>`
+      : `<p><span class="badge badge-building">term running</span> Actively exploited: ${escapeHtml(Object.keys(q.kev_first_seen).join(", "))}. Fix it before ${escapeHtml(fmtUtc(deadlineOf(q, termMs)))} or the app is taken offline.</p>`
+    : "";
+  const exemption = ex
+    ? `<p class="meta">Exemption ${exActive ? "active" : "expired"}: until ${escapeHtml(fmtUtc(ex.until))}, by ${escapeHtml(ex.granted_by)}. Reason: ${escapeHtml(ex.reason)}</p>`
+    : "";
+  const forms =
+    admin && (q || ex)
+      ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/quarantine-exception" style="display:grid;gap:0.5rem;max-width:32rem;margin:0.5rem 0">
+          <input type="text" name="reason" required minlength="5" maxlength="500" placeholder="Reason (required, kept in the audit log)" />
+          <label class="meta">Until <input type="date" name="until" required /></label>
+          <div><button type="submit" style="width:auto">${exActive ? "Update" : "Grant"} exemption</button></div>
+        </form>
+        ${ex ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/quarantine-exception/remove" style="margin:0"><button type="submit" class="ghost" style="width:auto">Remove exemption</button></form>` : ""}`
+      : "";
+  const list = notices.length
+    ? `<ul style="margin:0.5rem 0 0 1.25rem">${notices
+        .map((n) => `<li><span class="meta">${escapeHtml(formatRelative(n.created_at))}</span> ${escapeHtml(n.message)}</li>`)
+        .join("")}</ul>`
+    : "";
+  return `<div class="card" id="quarantine">
+    <h2>Security notices</h2>
+    ${status}${exemption}${forms}${list}
+  </div>`;
+}
+
 /**
  * HTML for the apps area of the dashboard. Rendered inline on first
  * page load and swapped in every few seconds via
@@ -839,7 +933,7 @@ async function renderAppsLive(
       : `<div class="app-grid">${appCards}</div>
          <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your search.</p>`;
 
-  return `${header}${body}`;
+  return `${renderQuarantineSummary(apps)}${header}${body}`;
 }
 
 webRoutes.get("/", async (c) => {
@@ -1031,10 +1125,7 @@ function renderDeployHistory(
         ? bases
             .map((b) => {
               const short = b.image.replace(/^docker\.io\/(library\/)?/, "");
-              const patched = b.auto_patched_from
-                ? ` <span class="badge badge-running" title="Raised automatically from ${escapeHtml(b.auto_patched_from)}">auto-patched</span>`
-                : "";
-              return `<div style="font-family:monospace;font-size:0.72rem" title="${escapeHtml(describeBaseImage(b))} — ${escapeHtml(b.digest)}">${escapeHtml(short)}${patched}</div>`;
+              return `<div style="font-family:monospace;font-size:0.72rem" title="${escapeHtml(describeBaseImage(b))} — ${escapeHtml(b.digest)}">${escapeHtml(short)}${baseBadge(b)}</div>`;
             })
             .join("")
         : '<span class="meta" style="font-size:0.75rem">—</span>';
@@ -1180,6 +1271,10 @@ function renderScanSection(
           <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-patch" style="margin:0" title="On rebuild, raise exact patch pins in FROM (nginx:1.30.6-alpine to the newest 1.30.x-alpine) in a build-time copy. Your source is never changed.">
             <input type="hidden" name="enabled" value="${app.auto_patch_base ? "0" : "1"}" />
             <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-patch base image on rebuild: ${app.auto_patch_base ? "on (turn off)" : "off (turn on)"}</button>
+          </form>
+          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-minor" style="margin:0" title="If an actively exploited / fixable critical CVE survives the patch bump, try the lowest newer minor line (nginx 1.30 to 1.31) of the same major and variant. Majors are never automatic.">
+            <input type="hidden" name="enabled" value="${app.auto_minor_base ? "0" : "1"}" />
+            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-minor escalation: ${app.auto_minor_base ? "on (turn off)" : "off (turn on)"}</button>
           </form>
         </div>`
       : "";
@@ -1461,7 +1556,12 @@ function renderAppCard(
   // Status badge: use live container state when available, otherwise
   // fall back to the DB status + hx-get so the first render without
   // prefetched stats still catches up.
-  const badgeState = stats ? stats.containerState ?? app.status : app.status;
+  const badgeState =
+    app.status === "quarantined"
+      ? "quarantined"
+      : stats
+        ? stats.containerState ?? app.status
+        : app.status;
   const badgeHtml = stats
     ? `<span class="badge badge-${escapeHtml(badgeState)}">${escapeHtml(badgeState)}</span>`
     : `<span class="badge badge-${escapeHtml(app.status)}" hx-get="/apps/${encodeURIComponent(app.id)}/badge" hx-trigger="load" hx-swap="outerHTML">${escapeHtml(app.status)}</span>`;
@@ -1538,7 +1638,8 @@ webRoutes.get("/apps/:id/badge", async (c) => {
   const app = getApp(c.req.param("id"));
   if (!app) return c.text("");
   const stats = await getAppStats(app);
-  const state = stats.containerState ?? app.status;
+  const state =
+    app.status === "quarantined" ? "quarantined" : (stats.containerState ?? app.status);
   return c.html(
     `<span class="badge badge-${escapeHtml(state)}">${escapeHtml(state)}</span>`
   );
@@ -1631,6 +1732,7 @@ webRoutes.get("/apps/:id", (c) => {
           <!-- ── Deploys tab ────────────────────────── -->
           <div class="tab-panel panel-deploys">
             ${renderDeployHistory(app)}
+            ${renderQuarantineSection(app, isAdmin(user))}
             ${renderScanSection(app, isAdmin(user))}
           </div>
 
@@ -2565,10 +2667,24 @@ function renderCounts(x: RebuildAppResult["before"]): string {
   return `${c.critical}C / ${c.high}H / ${c.medium}M &middot; <strong>${x.kev} KEV</strong>`;
 }
 
+function renderEscalation(r: RebuildAppResult): string {
+  return (r.escalation ?? [])
+    .map((e) => {
+      const tag =
+        e.kind === "minor" && e.outcome === "applied"
+          ? '<span class="badge badge-running">auto-minor</span>'
+          : e.kind === "major"
+            ? '<span class="badge badge-building">major available</span>'
+            : `<span class="badge badge-stopped">minor ${escapeHtml(e.outcome)}</span>`;
+      return `<div style="margin-bottom:0.25rem">${tag} ${escapeHtml(e.detail)}</div>`;
+    })
+    .join("");
+}
+
 function renderBases(r: RebuildAppResult): string {
   const lines = (r.base_images ?? []).map((b) => {
     const short = b.image.replace(/^docker\.io\/(library\/)?/, "");
-    return `<div style="font-family:monospace;font-size:0.72rem" title="${escapeHtml(b.digest)}">${escapeHtml(short)}${b.auto_patched_from ? ` <span class="badge badge-running">auto-patched from ${escapeHtml(b.auto_patched_from)}</span>` : ""}</div>`;
+    return `<div style="font-family:monospace;font-size:0.72rem" title="${escapeHtml(b.digest)}">${escapeHtml(short)}${baseBadge(b)}</div>`;
   });
   if (lines.length === 0 && r.patched?.length) {
     // Build never produced a log (e.g. failed): still say what we tried.
@@ -2589,7 +2705,7 @@ function renderRebuildResults(run: RebuildRun): string {
         <td>${renderCounts(r.before)}</td>
         <td>${renderCounts(r.after)}</td>
         <td class="meta">${renderBases(r)}</td>
-        <td class="meta">${escapeHtml(r.detail ?? "")}${r.duration_s !== undefined ? ` (${r.duration_s}s)` : ""}</td>
+        <td class="meta">${renderEscalation(r)}${escapeHtml(r.detail ?? "")}${r.duration_s !== undefined ? ` (${r.duration_s}s)` : ""}</td>
       </tr>`
     )
     .join("");
@@ -2619,6 +2735,24 @@ webRoutes.get("/rebuild", async (c) => {
       (r) => `<details style="margin-top:0.5rem"><summary class="meta">Run #${r.id} &middot; ${escapeHtml(r.trigger)} &middot; ${escapeHtml(formatRelative(r.started_at))}</summary>${renderRebuildResults(r)}</details>`
     )
     .join("");
+
+  const termMs = getQuarantineTermDays() * 86_400_000;
+  const qRows = listQuarantine();
+  const quarantineTable = qRows.length
+    ? `<table style="margin-top:1rem"><thead><tr><th>App</th><th>State</th><th>Actively exploited</th><th>Term ends</th><th>Exemption</th></tr></thead><tbody>${qRows
+        .map((q) => {
+          const a = getApp(q.app_id);
+          const ex = getActiveExemption(q.app_id);
+          return `<tr>
+            <td><a href="/apps/${encodeURIComponent(q.app_id)}#quarantine">${escapeHtml(a?.name ?? q.app_id)}</a></td>
+            <td><span class="badge ${q.state === "quarantined" ? "badge-quarantined" : "badge-building"}">${q.state === "quarantined" ? "quarantined" : "term running"}</span></td>
+            <td class="meta">${escapeHtml(Object.keys(q.kev_first_seen).join(", "))}</td>
+            <td class="meta">${escapeHtml(fmtUtc(deadlineOf(q, termMs)))}</td>
+            <td class="meta">${ex ? escapeHtml(`until ${fmtUtc(ex.until)}: ${ex.reason}`) : "&mdash;"}</td>
+          </tr>`;
+        })
+        .join("")}</tbody></table>`
+    : '<p class="meta" style="margin-top:1rem">No app has an actively exploited vulnerability right now.</p>';
 
   return c.html(
     layout(
@@ -2669,6 +2803,22 @@ webRoutes.get("/rebuild", async (c) => {
             </div>
             <button type="submit" style="width:auto">Save schedule</button>
           </form>
+        </div>
+
+        <div class="card">
+          <h2>KEV quarantine</h2>
+          <p class="meta">
+            An actively exploited CVE (CISA KEV) in a running app's runtime packages starts a term and notifies the
+            owner and the webhook on day 0. If it is still there when the term ends and one last rebuild (with minor
+            escalation) did not fix it, the app is quarantined: visitors get a maintenance page and the container is
+            stopped (data and volumes stay). It returns automatically once a rebuild or deploy resolves it. Admins can
+            grant a time-boxed exemption on the app page. Ordinary criticals never quarantine.
+          </p>
+          <form method="POST" action="/rebuild/quarantine-term" style="display:flex;gap:0.5rem;align-items:center">
+            <label>Term (days) <input type="number" name="days" step="any" min="0.001" max="90" value="${escapeHtml(String(getQuarantineTermDays()))}" style="width:7rem" required /></label>
+            <button type="submit" style="width:auto">Save</button>
+          </form>
+          ${quarantineTable}
         </div>
       </div>`,
       { username: user.username, csrf: csrfField(c), isAdmin: true }
@@ -2774,6 +2924,93 @@ webRoutes.get("/admin/api/rebuild-runs", (c) =>
 webRoutes.get("/admin/api/rebuild-runs/:id", (c) => {
   const run = getRebuildRun(parseInt(c.req.param("id"), 10));
   return run ? c.json(run) : c.json({ error: "Run not found" }, 404);
+});
+
+webRoutes.post("/rebuild/quarantine-term", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const days = parseFloat((body["days"] as string | undefined) ?? "");
+  if (Number.isFinite(days)) {
+    const clamped = clampQuarantineTermDays(days);
+    setSetting("quarantine_term_days", String(clamped));
+    logAudit(user.id, user.username, "quarantine_term_changed", { detail: `${clamped} day(s)` });
+  }
+  return c.redirect("/rebuild?saved=1");
+});
+
+webRoutes.post("/apps/:id/auto-minor", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_minor_base: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_minor_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+const MAX_EXEMPTION_DAYS = 90;
+
+webRoutes.post("/apps/:id/quarantine-exception", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const reason = ((body["reason"] as string | undefined) ?? "").trim();
+  const untilRaw = ((body["until"] as string | undefined) ?? "").trim();
+  // A bare date means "through the end of that day (UTC)".
+  const until = /^\d{4}-\d{2}-\d{2}$/.test(untilRaw)
+    ? Date.parse(`${untilRaw}T23:59:59Z`)
+    : Date.parse(untilRaw);
+  const now = Date.now();
+  const back = `/apps/${encodeURIComponent(app.id)}`;
+  if (reason.length < 5 || reason.length > 500) return c.redirect(`${back}?error=exception_reason#quarantine`);
+  if (!Number.isFinite(until) || until <= now || until > now + MAX_EXEMPTION_DAYS * 86_400_000) {
+    return c.redirect(`${back}?error=exception_date#quarantine`);
+  }
+  const untilIso = new Date(until).toISOString();
+  setExemption({ app_id: app.id, reason, until: untilIso, granted_by: user.username });
+  logAudit(user.id, user.username, "quarantine_exemption_granted", {
+    detail: `${app.id} until ${untilIso}: ${reason}`.slice(0, 500),
+  });
+  const msg = `quarantine exemption granted by ${user.username} until ${fmtUtc(untilIso)}: ${reason}`;
+  addNotice(app.id, "exemption", msg);
+  await notifyAdminWebhook(`Runway ${app.name ?? app.id}: ${msg}`, { app_id: app.id, event: "exemption" });
+  // Apply right away: lifts an existing quarantine instead of waiting for the next tick.
+  const kev = await getKevList();
+  if (kev.fetchedAt !== null) await evaluateAppQuarantine(app, kev.ids, false);
+  return c.redirect(`${back}?saved=1#quarantine`);
+});
+
+webRoutes.post("/apps/:id/quarantine-exception/remove", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  deleteExemption(app.id);
+  logAudit(user.id, user.username, "quarantine_exemption_removed", { detail: app.id });
+  addNotice(app.id, "exemption", `quarantine exemption removed by ${user.username}`);
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#quarantine`);
+});
+
+/**
+ * Public maintenance page. The gateway routes a quarantined app's hosts
+ * here (path rewritten to /maintenance). Deliberately generic: no app
+ * name, no reason, no CVE ids.
+ */
+webRoutes.get("/maintenance", (c) => {
+  c.header("Retry-After", "3600");
+  c.header("Cache-Control", "no-store");
+  c.header("X-Robots-Tag", "noindex");
+  return c.html(
+    `<!doctype html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Temporarily offline</title>
+    <style>body{font-family:system-ui,sans-serif;background:#faf7f2;color:#2b2926;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:1rem}main{max-width:32rem;text-align:center}h1{font-size:1.5rem}p{color:#6b665e;line-height:1.5}@media (prefers-color-scheme:dark){body{background:#1d1b18;color:#ece8e1}p{color:#a39d93}}</style></head>
+    <body><main><h1>Temporarily offline</h1><p>This site is offline for security maintenance. Please check back later.</p></main></body></html>`,
+    503
+  );
 });
 
 webRoutes.post("/settings/oauth/google", async (c) => {

@@ -20,7 +20,8 @@ export type SettingKey =
   | "auto_rebuild_enabled"
   | "auto_rebuild_day"
   | "auto_rebuild_time"
-  | "auto_rebuild_last_date";
+  | "auto_rebuild_last_date"
+  | "quarantine_term_days";
 
 export function getSetting(key: SettingKey): string | undefined {
   const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as
@@ -139,4 +140,23 @@ export function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 63);
+}
+
+/**
+ * Grace period (days) between the first sighting of an actively exploited
+ * (KEV) CVE in a running app's runtime packages and quarantine. Fractions
+ * are allowed (a test setup uses minutes); the floor is one minute so a
+ * bad value can never mean "quarantine immediately".
+ */
+export const DEFAULT_QUARANTINE_TERM_DAYS = 7;
+export const MIN_QUARANTINE_TERM_DAYS = 1 / 1440;
+export const MAX_QUARANTINE_TERM_DAYS = 90;
+
+export function clampQuarantineTermDays(parsed: number): number {
+  if (!Number.isFinite(parsed)) return DEFAULT_QUARANTINE_TERM_DAYS;
+  return Math.min(Math.max(parsed, MIN_QUARANTINE_TERM_DAYS), MAX_QUARANTINE_TERM_DAYS);
+}
+
+export function getQuarantineTermDays(): number {
+  return clampQuarantineTermDays(parseFloat(getSetting("quarantine_term_days") ?? ""));
 }

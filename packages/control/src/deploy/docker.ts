@@ -328,6 +328,20 @@ export async function removeContainerByName(name: string): Promise<void> {
   }
 }
 
+/**
+ * Stop a container but keep it (and its named volumes). Unlike
+ * removeContainerByName, nothing is deleted, and a stopped container with
+ * restart policy `unless-stopped` stays stopped across daemon restarts.
+ * Tolerates "already stopped" and "no such container".
+ */
+export async function stopContainerByName(name: string): Promise<void> {
+  try {
+    await docker.getContainer(name).stop({ t: 10 });
+  } catch (err: any) {
+    if (err.statusCode !== 304 && err.statusCode !== 404) throw err;
+  }
+}
+
 export interface ContainerStatus {
   exists: boolean;
   state?: string;
