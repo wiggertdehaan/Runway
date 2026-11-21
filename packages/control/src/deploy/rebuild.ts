@@ -22,11 +22,20 @@ import {
 import { getContainerStatus } from "./docker.js";
 import { appContainerName } from "./index.js";
 import { getKevList, kevFindings } from "./kev.js";
-import { countSeverity, trivyAvailable, type Finding } from "./scan.js";
+import { countSeverity, scanImage, trivyAvailable, type Finding, type ScanResult } from "./scan.js";
 import { latestSource } from "./source.js";
+import { readDockerfileFromTar } from "./dockerfile.js";
+import { planBasePatches, type BasePlan, type UsedBaseImage } from "./base-images.js";
+import { createTagSource } from "./registry.js";
 import { notifyRebuildSummary } from "../util/webhook.js";
 
 type Logger = Pick<Console, "log" | "warn" | "error">;
+
+let sharedTagSource: ReturnType<typeof createTagSource> | null = null;
+/** One shared registry client so its 10-minute tag cache spans a whole run. */
+function tagSource() {
+  return (sharedTagSource ??= createTagSource());
+}
 
 /** Statuses during which a deploy/build is already in flight. */
 const BUSY_STATUSES = new Set(["building", "scanning", "starting"]);
@@ -66,6 +75,52 @@ export function snapshot(
   };
 }
 
+
+export interface GateVerdict {
+  allow: boolean;
+  reason: string;
+}
+
+/**
+ * Pure: may a rebuilt image replace the running one? Yes iff its scan is
+ * not worse than the running version: no CRITICAL CVE that the running
+ * image doesn't have, and no actively exploited (KEV) CVE it doesn't
+ * have. Fewer or equal findings always pass, even when the app's own
+ * scan threshold would have blocked a fresh deploy of the same image
+ * (the running version carries those findings too). Without a trustworthy
+ * scan on either side we cannot compare, so we refuse.
+ */
+export function evaluateRebuildGate(
+  current: Finding[] | null,
+  next: ScanResult,
+  kev: Set<string>
+): GateVerdict {
+  if (next.status === "skipped") {
+    return { allow: false, reason: "scan of the new build unavailable, cannot verify it is not worse" };
+  }
+  if (current === null) {
+    return { allow: false, reason: "no scan of the running version to compare against" };
+  }
+  const cur = current.filter((f) => f.source === "image");
+  const nxt = next.findings.filter((f) => f.source === "image");
+  const curCrit = new Set(cur.filter((f) => f.severity === "CRITICAL").map((f) => f.id));
+  const curIds = new Set(cur.map((f) => f.id.toUpperCase()));
+
+  const newCrit = [...new Set(nxt.filter((f) => f.severity === "CRITICAL" && !curCrit.has(f.id)).map((f) => f.id))];
+  const newKev = [...new Set(
+    kevFindings(nxt, kev).map((f) => f.id.toUpperCase()).filter((id) => !curIds.has(id))
+  )];
+
+  const list = (ids: string[]) => ids.slice(0, 3).join(", ") + (ids.length > 3 ? `, +${ids.length - 3} more` : "");
+  const problems: string[] = [];
+  if (newCrit.length) problems.push(`${newCrit.length} new critical (${list(newCrit)})`);
+  if (newKev.length) problems.push(`${newKev.length} new actively exploited (${list(newKev)})`);
+  if (problems.length) {
+    return { allow: false, reason: `new build is worse than the running version: ${problems.join("; ")}` };
+  }
+  return { allow: true, reason: "not worse than the running version" };
+}
+
 /** Pure: one-line-per-app text for the admin notification. */
 export function summarizeRun(
   trigger: "manual" | "scheduled",
@@ -86,7 +141,10 @@ export function summarizeRun(
         ? ` (critical ${r.before.counts.critical}→${r.after.counts.critical}, KEV ${r.before.kev}→${r.after.kev})`
         : "";
     const why = r.detail && r.outcome !== "rebuilt" ? `: ${r.detail}` : "";
-    return `- ${name}: ${r.outcome.replace("_", " ")}${delta}${why}`;
+    const patched = r.patched?.length
+      ? ` [base ${r.patched.map((p) => `${p.from}→${p.to}`).join(", ")}]`
+      : "";
+    return `- ${name}: ${r.outcome.replace("_", " ")}${delta}${patched}${why}`;
   });
   return `Runway rebuild (${trigger}): ${head}\n${lines.join("\n")}`;
 }
@@ -131,20 +189,52 @@ export async function rebuildApp(
     return done("skipped", { detail: "no stored source to rebuild from" });
   }
 
-  const beforeFindings = getLatestPeriodicScanFindings(app.id);
-  const hadBaseline = !!getLatestPeriodicScan(app.id);
-  const before = hadBaseline ? snapshot(beforeFindings, kev) : null;
   const previousStatus = app.status;
+
+  // Baseline for "before" and for the gate: a fresh scan of the image that
+  // is running right now (the vuln DB moves daily). If Trivy fails on it,
+  // fall back to the last periodic scan of that same image.
+  let currentFindings: Finding[] | null = null;
+  try {
+    currentFindings = (await scanImage(app.image_tag)).filter((f) => f.source === "image");
+  } catch {
+    const periodic = getLatestPeriodicScan(app.id);
+    if (periodic && periodic.image_tag === app.image_tag) {
+      currentFindings = getLatestPeriodicScanFindings(app.id);
+    }
+  }
+  const before = currentFindings ? snapshot(currentFindings, kev) : null;
+  let plan: BasePlan | undefined;
+  let usedBases: UsedBaseImage[] = [];
 
   try {
     const tar = await readFile(source.path);
+
+    // Raise exact patch pins (nginx:1.30.6-alpine -> 1.30.7-alpine) in a
+    // build-time copy of the Dockerfile. Best effort: any problem here
+    // means "build as the owner wrote it", never a failed rebuild.
+    if (app.auto_patch_base) {
+      try {
+        const dockerfile = readDockerfileFromTar(tar);
+        if (dockerfile) {
+          const planned = await planBasePatches(dockerfile, tagSource());
+          if (planned.patches.length > 0) plan = planned;
+        }
+      } catch (err: any) {
+        log.warn(`[rebuild] ${app.id}: base patch planning failed: ${err?.message ?? err}`);
+      }
+    }
+
     const result = await deployApp({
       app,
       tar,
       noCache: true,
       verifyHealth: true,
       skipSourceSave: true,
+      basePlan: plan,
+      scanGate: (scan) => evaluateRebuildGate(currentFindings, scan, kev),
     });
+    usedBases = result.base_images;
     const imageFindings = result.scan.findings.filter((f) => f.source === "image");
     // The deploy-time scan doubles as the new baseline for the daily
     // rescan, so it diffs against this build and not the old image.
@@ -163,9 +253,15 @@ export async function rebuildApp(
     return done("rebuilt", {
       before,
       after,
+      base_images: usedBases,
+      patched: plan?.patches,
       detail: result.scan.status === "skipped" ? "scan skipped" : undefined,
     });
   } catch (err: any) {
+    const baseExtra = {
+      base_images: (err?.baseImages as UsedBaseImage[] | undefined) ?? usedBases,
+      patched: plan?.patches,
+    };
     if (err instanceof ScanBlockedError) {
       // The old container never stopped, but deployApp left the status
       // on "scanning"; put it back.
@@ -174,12 +270,14 @@ export async function rebuildApp(
         before,
         after: snapshot(err.scan.findings, kev),
         detail: err.message,
+        ...baseExtra,
       });
     }
     if (err instanceof UnhealthyDeployError) {
       return done(err.restored ? "rolled_back" : "failed", {
         before,
         detail: err.message,
+        ...baseExtra,
       });
     }
     if (err instanceof PreflightRejectedError) {
@@ -196,7 +294,7 @@ export async function rebuildApp(
     }
     updateApp(app.id, { status: serving ? previousStatus : "failed" });
     log.warn(`[rebuild] ${app.id}: ${err?.message ?? err}`);
-    return done("failed", { before, detail: err?.message ?? "rebuild failed" });
+    return done("failed", { before, detail: err?.message ?? "rebuild failed", ...baseExtra });
   }
 }
 

@@ -195,6 +195,23 @@ without knowing why.
   Europe/Amsterdam wall-clock; last launch date is persisted in
   settings (`auto_rebuild_last_date`). Per-app opt-out:
   `apps.auto_rebuild`.
+- Base-image auto-patch (`deploy/base-images.ts`, pure; registry
+  access in `deploy/registry.ts`, SSRF-guarded): rebuilds plan bumps of
+  exact patch pins (same major.minor + same variant only) and apply them
+  to a build-time Dockerfile copy (`dockerfileOverride`) or via
+  `--build-arg` for ARG-driven FROMs; the stored source tar is never
+  touched. Tags from a registry are charset-validated before they are
+  written anywhere. Gotcha: BuildKit's incremental context sync compares
+  size+mtime; the override is written with a fresh mtime for that
+  reason.
+- Rebuild gate (`evaluateRebuildGate`) REPLACES the scan-threshold gate
+  for rebuilds only (`deployApp({ scanGate })`): live iff no new
+  CRITICAL and no new KEV vs a fresh scan of the running image, plus
+  health. Fails closed without a baseline or when the new scan is
+  skipped. Plain deploys keep the threshold gate.
+- Used base images come from the BuildKit log (`] FROM ref@sha256:`),
+  not from the Dockerfile, so they are what was really resolved;
+  stored in `deploys.base_images`.
 - The admin JSON API is under `/admin/api/*` (session + admin +
   `X-Requested-With: runway`), deliberately NOT under `/api/` (which
   skips CSRF and uses per-app Bearer keys).

@@ -124,7 +124,8 @@ import {
 } from "../middleware/session.js";
 import { logAudit, getRecentAuditEntries } from "../db/audit.js";
 import { updateApp } from "../db/apps.js";
-import { getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
+import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
+import { describeBaseImage } from "../deploy/base-images.js";
 import { getLatestPeriodicScan } from "../db/periodic-scans.js";
 import { rescanApp } from "../deploy/periodic-scanner.js";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
@@ -1025,6 +1026,18 @@ function renderDeployHistory(
       const tagShort = d.image_tag
         ? escapeHtml(d.image_tag.split(":").pop() ?? d.image_tag)
         : '<span class="meta">—</span>';
+      const bases = parseBaseImages(d);
+      const baseCell = bases.length
+        ? bases
+            .map((b) => {
+              const short = b.image.replace(/^docker\.io\/(library\/)?/, "");
+              const patched = b.auto_patched_from
+                ? ` <span class="badge badge-running" title="Raised automatically from ${escapeHtml(b.auto_patched_from)}">auto-patched</span>`
+                : "";
+              return `<div style="font-family:monospace;font-size:0.72rem" title="${escapeHtml(describeBaseImage(b))} — ${escapeHtml(b.digest)}">${escapeHtml(short)}${patched}</div>`;
+            })
+            .join("")
+        : '<span class="meta" style="font-size:0.75rem">—</span>';
       const sourceCell = hasSourceForDeploy(app.id, d.id)
         ? `<a href="/apps/${encodeURIComponent(app.id)}/source?deploy=${d.id}" class="ghost" style="font-size:0.75rem;padding:0.25rem 0.5rem;text-decoration:none">Download</a>`
         : '<span class="meta" style="font-size:0.75rem">—</span>';
@@ -1042,6 +1055,7 @@ function renderDeployHistory(
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.8rem">#${d.id}</td>
           <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span></td>
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem" title="${escapeHtml(d.image_tag ?? "")}">${tagShort}</td>
+          <td style="padding:0.4rem 0.75rem">${baseCell}</td>
           <td style="padding:0.4rem 0.75rem;font-size:0.8rem" class="meta">${when}</td>
           <td style="padding:0.4rem 0.75rem">${sourceCell}</td>
           <td style="padding:0.4rem 0.75rem;text-align:right">${action}</td>
@@ -1066,6 +1080,7 @@ function renderDeployHistory(
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Deploy</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Status</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Image</th>
+              <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Base image</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">When</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Source</th>
               <th style="padding:0.5rem 0.75rem"></th>
@@ -1161,6 +1176,10 @@ function renderScanSection(
           <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-rebuild" style="margin:0">
             <input type="hidden" name="enabled" value="${app.auto_rebuild ? "0" : "1"}" />
             <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Weekly auto-rebuild: ${app.auto_rebuild ? "on (turn off)" : "off (turn on)"}</button>
+          </form>
+          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-patch" style="margin:0" title="On rebuild, raise exact patch pins in FROM (nginx:1.30.6-alpine to the newest 1.30.x-alpine) in a build-time copy. Your source is never changed.">
+            <input type="hidden" name="enabled" value="${app.auto_patch_base ? "0" : "1"}" />
+            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-patch base image on rebuild: ${app.auto_patch_base ? "on (turn off)" : "off (turn on)"}</button>
           </form>
         </div>`
       : "";
@@ -2546,6 +2565,18 @@ function renderCounts(x: RebuildAppResult["before"]): string {
   return `${c.critical}C / ${c.high}H / ${c.medium}M &middot; <strong>${x.kev} KEV</strong>`;
 }
 
+function renderBases(r: RebuildAppResult): string {
+  const lines = (r.base_images ?? []).map((b) => {
+    const short = b.image.replace(/^docker\.io\/(library\/)?/, "");
+    return `<div style="font-family:monospace;font-size:0.72rem" title="${escapeHtml(b.digest)}">${escapeHtml(short)}${b.auto_patched_from ? ` <span class="badge badge-running">auto-patched from ${escapeHtml(b.auto_patched_from)}</span>` : ""}</div>`;
+  });
+  if (lines.length === 0 && r.patched?.length) {
+    // Build never produced a log (e.g. failed): still say what we tried.
+    return r.patched.map((p) => `<div style="font-family:monospace;font-size:0.72rem">tried ${escapeHtml(p.from)} &rarr; ${escapeHtml(p.to)}</div>`).join("");
+  }
+  return lines.join("") || "&mdash;";
+}
+
 function renderRebuildResults(run: RebuildRun): string {
   if (run.results.length === 0) {
     return `<p class="meta">${run.status === "running" ? "Starting&hellip;" : "No apps needed a rebuild."}</p>`;
@@ -2557,12 +2588,13 @@ function renderRebuildResults(run: RebuildRun): string {
         <td><span class="badge ${OUTCOME_BADGE[r.outcome] ?? ""}">${escapeHtml(r.outcome.replace("_", " "))}</span></td>
         <td>${renderCounts(r.before)}</td>
         <td>${renderCounts(r.after)}</td>
+        <td class="meta">${renderBases(r)}</td>
         <td class="meta">${escapeHtml(r.detail ?? "")}${r.duration_s !== undefined ? ` (${r.duration_s}s)` : ""}</td>
       </tr>`
     )
     .join("");
   return `<table>
-    <thead><tr><th>App</th><th>Result</th><th>Before</th><th>After</th><th>Note</th></tr></thead>
+    <thead><tr><th>App</th><th>Result</th><th>Before</th><th>After</th><th>Base image</th><th>Note</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -2600,7 +2632,10 @@ webRoutes.get("/rebuild", async (c) => {
           <h2>Rebuild all apps</h2>
           <p class="meta">
             Rebuilds every deployed app from its stored source <strong>without the BuildKit cache</strong>,
-            one after another, through the normal scan gate. A new container that fails its health check is
+            one after another. Exact patch pins in <code>FROM</code> (e.g. <code>nginx:1.30.6-alpine</code>) are raised to the newest
+            patch of the same minor in a build-time copy (per-app opt-out). A rebuild goes live only if it is not worse than the
+            running version (no new critical, no new actively exploited CVE) and the new container passes its health check;
+            otherwise the old version keeps running and the reason is shown here. A container that fails its health check is
             replaced by the previous deploy automatically. Takes a few minutes per app; the live apps keep
             serving until their own swap.
           </p>
@@ -2613,7 +2648,7 @@ webRoutes.get("/rebuild", async (c) => {
           <h2>${latest ? `Latest run #${latest.id}` : "No runs yet"}</h2>
           ${
             latest
-              ? `<p class="meta">${escapeHtml(latest.trigger)} &middot; started ${escapeHtml(formatRelative(latest.started_at))} &middot; ${latest.status === "running" ? "<strong>running</strong>" : "finished"}. Before/after = critical / high / medium findings and actively exploited (CISA KEV) CVEs; "before" is the last scan of the old image.</p>${renderRebuildResults(latest)}`
+              ? `<p class="meta">${escapeHtml(latest.trigger)} &middot; started ${escapeHtml(formatRelative(latest.started_at))} &middot; ${latest.status === "running" ? "<strong>running</strong>" : "finished"}. Before/after = critical / high / medium findings and actively exploited (CISA KEV) CVEs; "before" is a fresh scan of the version that was running.</p>${renderRebuildResults(latest)}`
               : '<p class="meta">Nothing has been rebuilt yet.</p>'
           }
           ${history}
@@ -2676,6 +2711,19 @@ webRoutes.post("/apps/:id/rebuild", async (c) => {
     throw err;
   }
   return c.redirect("/rebuild?started=1");
+});
+
+webRoutes.post("/apps/:id/auto-patch", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_patch_base: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_patch_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 
 webRoutes.post("/apps/:id/auto-rebuild", async (c) => {

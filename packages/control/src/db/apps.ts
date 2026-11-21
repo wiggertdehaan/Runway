@@ -40,6 +40,7 @@ export interface App {
   scan_floor_exempt: number;
   sso_enabled: number;
   auto_rebuild: number;
+  auto_patch_base: number;
   basic_auth_enabled: number;
   basic_auth_username: string | null;
   basic_auth_htpasswd: string | null;
@@ -108,6 +109,7 @@ type UpdatableAppFields = Partial<
     | "scan_floor_exempt"
     | "sso_enabled"
     | "auto_rebuild"
+    | "auto_patch_base"
     | "basic_auth_enabled"
     | "basic_auth_username"
     | "basic_auth_htpasswd"

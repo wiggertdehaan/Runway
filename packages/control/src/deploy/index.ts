@@ -33,6 +33,11 @@ import { getKeepImageVersions, getSetting } from "../db/settings.js";
 import { preflightCheckTar, PreflightRejectedError } from "./preflight.js";
 import { saveSource, pruneOldSources, deleteAllSources } from "./source.js";
 import { waitForHealthy } from "./health.js";
+import {
+  extractUsedBaseImages,
+  type BasePlan,
+  type UsedBaseImage,
+} from "./base-images.js";
 export { PreflightRejectedError } from "./preflight.js";
 
 function dockerSafeId(appId: string): string {
@@ -88,6 +93,18 @@ export interface DeployInput {
   verifyHealth?: boolean;
   /** Don't overwrite the stored source snapshot (rebuilds reuse it). */
   skipSourceSave?: boolean;
+  /**
+   * Base-image patch plan (rebuilds only): a build-time Dockerfile copy
+   * and/or build-args. The stored source is never modified.
+   */
+  basePlan?: BasePlan;
+  /**
+   * Rebuild gate. When set it REPLACES the app's scan-threshold gate:
+   * the new image goes live only if the gate allows it (typically "not
+   * worse than what is running now"). Plain deploys leave this unset
+   * and keep the threshold gate.
+   */
+  scanGate?: (scan: ScanResult) => { allow: boolean; reason?: string };
 }
 
 export interface DeployResult {
@@ -98,6 +115,8 @@ export interface DeployResult {
   domain: string | null;
   log_tail: string;
   scan: ScanResult;
+  /** Base images (tag + digest) used by this build. */
+  base_images: UsedBaseImage[];
 }
 
 /**
@@ -109,12 +128,19 @@ export class ScanBlockedError extends Error {
   scan: ScanResult;
   imageTag: string;
   deployId: number;
-  constructor(scan: ScanResult, imageTag: string, deployId: number) {
+  baseImages: UsedBaseImage[] = [];
+  constructor(
+    scan: ScanResult,
+    imageTag: string,
+    deployId: number,
+    reason?: string
+  ) {
     const top = scan.findings[0];
     super(
-      top
-        ? `Deploy blocked by scan: ${top.severity} ${top.id}${top.pkg ? ` in ${top.pkg}` : ""}`
-        : "Deploy blocked by scan"
+      reason ??
+        (top
+          ? `Deploy blocked by scan: ${top.severity} ${top.id}${top.pkg ? ` in ${top.pkg}` : ""}`
+          : "Deploy blocked by scan")
     );
     this.scan = scan;
     this.imageTag = imageTag;
@@ -131,6 +157,7 @@ export class UnhealthyDeployError extends Error {
   imageTag: string;
   restored: boolean;
   scan: ScanResult;
+  baseImages: UsedBaseImage[] = [];
   constructor(reason: string, imageTag: string, restored: boolean, scan: ScanResult) {
     super(
       `New container unhealthy (${reason}); ${restored ? "restored the previous deploy" : "no previous deploy to restore"}`
@@ -230,21 +257,38 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   const build = await buildImageFromTar(tarBuffer ?? tar, {
     imageTag,
     noCache: input.noCache,
+    dockerfileOverride: input.basePlan?.dockerfile,
+    buildArgs: input.basePlan?.buildArgs,
   });
+  const baseImages = extractUsedBaseImages(build.log, input.basePlan?.patches);
 
   updateApp(app.id, { status: "scanning" });
 
   const scan = await runScans(tarBuffer, imageTag, threshold);
+
+  let blockReason: string | undefined;
+  let blocked = scan.status === "blocked";
+  if (input.scanGate) {
+    // The rebuild gate decides instead of the threshold. A threshold-level
+    // "blocked" that the gate let through is just a warning on record.
+    const verdict = input.scanGate(scan);
+    blocked = !verdict.allow;
+    blockReason = verdict.reason;
+    if (!blocked && scan.status === "blocked") scan.status = "warned";
+  }
   const scanSummary = { status: scan.status, counts: scan.counts };
 
-  if (scan.status === "blocked") {
+  if (blocked) {
     const deploy = recordDeploy(app.id, imageTag, "blocked", {
-      log: build.log,
-      scanStatus: scan.status,
-      scanSummary,
-      scanReport: scan,
+      log: blockReason ? `${build.log}\n[runway] blocked: ${blockReason}` : build.log,
+      scanStatus: "blocked",
+      scanSummary: { status: "blocked", counts: scan.counts },
+      scanReport: { ...scan, status: "blocked" },
+      baseImages,
     });
-    throw new ScanBlockedError(scan, imageTag, deploy.id);
+    const err = new ScanBlockedError(scan, imageTag, deploy.id, blockReason);
+    err.baseImages = baseImages;
+    throw err;
   }
 
   updateApp(app.id, { status: "starting" });
@@ -295,9 +339,12 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
         scanStatus: scan.status,
         scanSummary,
         scanReport: scan,
+        baseImages,
       });
       removeImageByTag(imageTag).catch(() => {});
-      throw new UnhealthyDeployError(health.reason, imageTag, restored, scan);
+      const unhealthy = new UnhealthyDeployError(health.reason, imageTag, restored, scan);
+      unhealthy.baseImages = baseImages;
+      throw unhealthy;
     }
   }
 
@@ -324,6 +371,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     scanStatus: scan.status,
     scanSummary,
     scanReport: scan,
+    baseImages,
   });
 
   // Persist the build context per deploy so the project source can later
@@ -352,6 +400,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     domain: app.domain,
     log_tail: logTail,
     scan,
+    base_images: baseImages,
   };
 }
 
@@ -436,6 +485,7 @@ export async function rollbackApp(
       findings: [],
       error: "rollback reuses existing image",
     },
+    base_images: [],
   };
 }
 

@@ -9,6 +9,7 @@ export interface Deploy {
   scan_status: string | null;
   scan_summary: string | null;
   scan_report: string | null;
+  base_images: string | null;
   created_at: string;
 }
 
@@ -17,6 +18,8 @@ export interface RecordDeployOptions {
   scanStatus?: string;
   scanSummary?: unknown;
   scanReport?: unknown;
+  /** Base images (tag + digest) the build used; see deploy/base-images.ts. */
+  baseImages?: unknown;
 }
 
 export function recordDeploy(
@@ -28,8 +31,8 @@ export function recordDeploy(
   const resolved: RecordDeployOptions =
     typeof opts === "string" ? { log: opts } : opts;
   db.prepare(
-    `INSERT INTO deploys (app_id, image_tag, status, log, scan_status, scan_summary, scan_report)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO deploys (app_id, image_tag, status, log, scan_status, scan_summary, scan_report, base_images)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     appId,
     imageTag,
@@ -37,7 +40,8 @@ export function recordDeploy(
     resolved.log ?? null,
     resolved.scanStatus ?? null,
     resolved.scanSummary !== undefined ? JSON.stringify(resolved.scanSummary) : null,
-    resolved.scanReport !== undefined ? JSON.stringify(resolved.scanReport) : null
+    resolved.scanReport !== undefined ? JSON.stringify(resolved.scanReport) : null,
+    resolved.baseImages !== undefined ? JSON.stringify(resolved.baseImages) : null
   );
   return db
     .prepare(
@@ -103,4 +107,17 @@ export function getLatestDeploys(appId: string, limit = 5): Deploy[] {
       `SELECT * FROM deploys WHERE app_id = ? ORDER BY id DESC LIMIT ?`
     )
     .all(appId, limit) as unknown as Deploy[];
+}
+
+/** Parse a deploy's stored base_images JSON (empty list when absent/corrupt). */
+export function parseBaseImages(
+  d: Pick<Deploy, "base_images">
+): Array<{ image: string; digest: string; auto_patched_from?: string }> {
+  if (!d.base_images) return [];
+  try {
+    const v = JSON.parse(d.base_images);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
 }
