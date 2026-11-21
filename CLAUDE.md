@@ -204,6 +204,26 @@ without knowing why.
   written anywhere. Gotcha: BuildKit's incremental context sync compares
   size+mtime; the override is written with a fresh mtime for that
   reason.
+- Minor escalation (`deploy/escalation.ts`, pure helpers in
+  `base-images.ts` + `gate.ts`): after the patch stage went live, targets =
+  KEV or CRITICAL-with-fix still in the scan. Candidates = newest patch of
+  each higher minor (same major + variant + pin style), lowest first, max
+  3; each is a real `deployApp` whose gate = not-worse AND resolves ALL
+  targets (blocked candidates are recorded as `blocked` deploys, visible in
+  history). Unhealthy/failed halts everything (also the major probe). Only
+  the runtime stage's base is retargeted (`findRuntimeFrom`, follows
+  `FROM <stage>` chains). Majors are never deployed: `dryRun` build+scan
+  only, then an owner notice (deduped 7 days).
+- Quarantine (`deploy/quarantine.ts`): `decideQuarantine` is a pure state
+  machine (grace -> final rebuild attempt -> quarantined; resolve/lift);
+  per-KEV first-seen clocks live in `app_quarantine.kev_first_seen`. The
+  1-minute tick only reads DB + the cached KEV list; it judges the latest
+  periodic scan of the CURRENT image_tag (every successful deploy stores
+  its scan as that baseline) and does nothing without KEV data. Quarantine
+  = `stopContainerByName` (keeps container+volumes) + maintenance route
+  (replacePath to control's public `/maintenance`, 503). Rebuilding a
+  quarantined app uses `keepOffline` (never fall back to the old image on
+  unhealthy) and `requireKevFree`.
 - Rebuild gate (`evaluateRebuildGate`) REPLACES the scan-threshold gate
   for rebuilds only (`deployApp({ scanGate })`): live iff no new
   CRITICAL and no new KEV vs a fresh scan of the running image, plus

@@ -111,9 +111,10 @@ export function createTagSource(deps: RegistryDeps = {}): TagSource {
   };
   const cache = new Map<string, { at: number; tags: string[] }>();
 
-  return async (ref: ImageRef): Promise<string[]> => {
+  return async (ref: ImageRef, opts?: { filter?: string }): Promise<string[]> => {
     const exact = ref.tag ? parseExactTag(ref.tag) : null;
-    const filter = exact ? `${exact.prefix}${exact.major}.${exact.minor}.` : "";
+    const filter =
+      opts?.filter ?? (exact ? `${exact.prefix}${exact.major}.${exact.minor}.` : "");
     const key = `${ref.registry}/${ref.repo}/${filter}`;
     const hit = cache.get(key);
     if (hit && d.now() - hit.at < CACHE_TTL_MS) return hit.tags;

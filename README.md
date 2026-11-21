@@ -339,12 +339,40 @@ deploy automatically.
   images used (tag + digest, and whether auto-raised) are recorded per
   deploy and shown in deploy history and the rebuild table. For fewer
   surprises, write minor pins (`nginx:1.30-alpine`) in your Dockerfile.
+- **Automatic minor escalation** (per app, `auto_minor_base`, default
+  on): if, after the patch bump, a rebuild still leaves an actively
+  exploited (KEV) CVE or a CRITICAL that has a fix, runway tries the
+  **lowest newer minor line** of the same major and variant (an exact pin
+  `nginx:1.29.8-alpine` becomes `nginx:1.30.7-alpine`, a minor pin
+  `1.29-alpine` becomes `1.30-alpine`), at most three lines, only for the
+  runtime (final) stage. A minor is used only if it resolves **all**
+  targeted findings, is not worse than the running version, and passes
+  its healthcheck; otherwise the previous version stays. Each jump is
+  announced (webhook + a notice on the app page) and shown in the deploy
+  history as `auto-minor 1.29→1.30`. A newer **major** is never applied:
+  runway only builds and scans it in a dry run and tells the owner
+  "major X resolves Y".
 - **Rebuild gate**: a rebuild goes live only if it is *not worse* than
   the running version (no new CRITICAL and no new actively exploited
   CVE compared with a fresh scan of the running image) **and** the new
   container passes its healthcheck. Otherwise the old version keeps
   running and the reason is reported (rebuild table + webhook). The
   app's `scan_threshold` still gates normal deploys, not rebuilds.
+- **KEV quarantine**: an actively exploited CVE (CISA KEV) in a running
+  app's **runtime** packages (the final image; build stages never count)
+  starts a term (admin setting on the Rebuild page, default 7 days) with a
+  notice on day 0 (app page, dashboard, webhook). When the term ends,
+  runway makes one last rebuild attempt (with minor escalation); if the CVE
+  is still there the app is **quarantined**: its hostnames are routed to a
+  public maintenance page (HTTP 503) through the gateway and the container
+  is stopped. Named volumes and data stay. As soon as a rebuild or deploy
+  produces an image without the CVE the app comes back online by itself
+  (a quarantined app only returns with a KEV-free build, and is never
+  restored to the vulnerable image). An admin can grant a time-boxed
+  **exemption** (reason + end date, max 90 days, audit-logged) on the app
+  page; granting one lifts an active quarantine. Ordinary criticals never
+  quarantine anything. Quarantine state shows on the dashboard, the app
+  page, the Rebuild page and in webhook messages.
 - **Scripting**: `POST /admin/api/rebuild-all` (202 + `run_id`),
   `GET /admin/api/rebuild-runs[/<id>]`. Requires an admin dashboard
   session cookie and the header `X-Requested-With: runway`; per-app API

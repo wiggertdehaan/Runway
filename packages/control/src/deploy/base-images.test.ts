@@ -238,3 +238,140 @@ describe("extractUsedBaseImages / describeBaseImage", () => {
     expect(extractUsedBaseImages("")).toEqual([]);
   });
 });
+
+// ── Escalation helpers ─────────────────────────────────────────────
+
+import {
+  parseVersionTag,
+  pickMinorCandidates,
+  pickMajorProbe,
+  lineOf,
+  findRuntimeFrom,
+} from "./base-images.js";
+
+describe("parseVersionTag", () => {
+  it("classifies exact, minor and major pins with variants", () => {
+    expect(parseVersionTag("1.29.8-alpine")).toMatchObject({ style: "exact", major: 1, minor: 29, patch: 8, variant: "alpine" });
+    expect(parseVersionTag("1.29-alpine")).toMatchObject({ style: "minor", major: 1, minor: 29, variant: "alpine" });
+    expect(parseVersionTag("24-alpine")).toMatchObject({ style: "major", major: 24, variant: "alpine" });
+    expect(parseVersionTag("24")).toMatchObject({ style: "major", variant: "" });
+  });
+  it("rejects names, latest, pre-releases and unsafe tags", () => {
+    for (const t of ["latest", "alpine", "stable", "1.29-rc1", "1-beta", "1.30\nRUN x", "1.30 x"]) {
+      expect(parseVersionTag(t)).toBeNull();
+    }
+  });
+});
+
+describe("lineOf", () => {
+  it("gives major.minor, or major for major pins", () => {
+    expect(lineOf("1.30.7-alpine")).toBe("1.30");
+    expect(lineOf("1.31-alpine")).toBe("1.31");
+    expect(lineOf("24-alpine")).toBe("24");
+    expect(lineOf("latest")).toBeNull();
+  });
+});
+
+describe("pickMinorCandidates", () => {
+  const tags = [
+    "1.28.3-alpine", "1.29.8-alpine", "1.30.6-alpine", "1.30.7-alpine", "1.31.8-alpine", "1.31.9-alpine",
+    "1.32.1-alpine", "1.33.0-alpine", "1.30.7-alpine-slim", "1.30.7", "2.0.1-alpine", "1.30-alpine", "1.31-alpine", "1.32-alpine", "latest",
+  ];
+  it("exact pin: newest patch of each HIGHER minor, same major+variant, lowest first", () => {
+    const cur = parseVersionTag("1.29.8-alpine")!;
+    expect(pickMinorCandidates(cur, tags)).toEqual(["1.30.7-alpine", "1.31.9-alpine", "1.32.1-alpine"]);
+  });
+  it("is capped and never includes the current or lower minors", () => {
+    const cur = parseVersionTag("1.30.7-alpine")!;
+    expect(pickMinorCandidates(cur, tags, 1)).toEqual(["1.31.9-alpine"]);
+    expect(pickMinorCandidates(parseVersionTag("1.33.0-alpine")!, tags)).toEqual([]);
+  });
+  it("minor pin: follows the minor tag style", () => {
+    expect(pickMinorCandidates(parseVersionTag("1.29-alpine")!, tags)).toEqual(["1.30-alpine", "1.31-alpine", "1.32-alpine"]);
+  });
+  it("never crosses major or variant; major pins have no minor to escalate", () => {
+    expect(pickMinorCandidates(parseVersionTag("1.29.8-alpine")!, ["2.0.1-alpine", "1.30.7", "1.30.7-alpine-slim"])).toEqual([]);
+    expect(pickMinorCandidates(parseVersionTag("24-alpine")!, ["24.1.0-alpine", "25-alpine"])).toEqual([]);
+  });
+  it("compares minors numerically (1.10 > 1.9)", () => {
+    expect(pickMinorCandidates(parseVersionTag("1.9.1")!, ["1.10.0", "1.9.5"])).toEqual(["1.10.0"]);
+  });
+});
+
+describe("pickMajorProbe", () => {
+  it("lowest newer major, same style and variant, newest version in it", () => {
+    const tags = ["2.0.1-alpine", "2.1.4-alpine", "3.0.0-alpine", "2.9.9", "1.30.7-alpine"];
+    expect(pickMajorProbe(parseVersionTag("1.30.7-alpine")!, tags)).toBe("2.1.4-alpine");
+  });
+  it("major pins probe the next major tag", () => {
+    expect(pickMajorProbe(parseVersionTag("24-alpine")!, ["25-alpine", "26-alpine", "24-alpine"])).toBe("25-alpine");
+  });
+  it("null when there is no newer major", () => {
+    expect(pickMajorProbe(parseVersionTag("1.30.7-alpine")!, ["1.31.9-alpine"])).toBeNull();
+  });
+});
+
+describe("findRuntimeFrom", () => {
+  it("is the last stage's base, not a build stage", () => {
+    const p = parseDockerfile("FROM node:24.1.0-alpine AS build\nRUN b\nFROM nginx:1.29.8-alpine\nCOPY --from=build /o /h");
+    expect(findRuntimeFrom(p)?.raw).toBe("nginx:1.29.8-alpine");
+  });
+  it("follows a chain of stage references back to an image", () => {
+    const p = parseDockerfile("FROM nginx:1.29.8-alpine AS base\nFROM base AS final\nRUN x");
+    expect(findRuntimeFrom(p)?.raw).toBe("nginx:1.29.8-alpine");
+  });
+  it("null for scratch", () => {
+    expect(findRuntimeFrom(parseDockerfile("FROM golang:1.23.4 AS b\nFROM scratch\nCOPY --from=b /x /x"))).toBeNull();
+  });
+  it("single-stage file", () => {
+    expect(findRuntimeFrom(parseDockerfile("FROM python:3.12.7-slim"))?.raw).toBe("python:3.12.7-slim");
+  });
+});
+
+describe("planBasePatches retarget", () => {
+  const src = source({
+    "library/nginx": ["1.29.8-alpine", "1.30.7-alpine"],
+    "library/node": ["24.1.0-alpine", "24.1.2-alpine"],
+  });
+  const df = "FROM node:24.1.0-alpine AS build\nRUN b\nFROM nginx:1.29.8-alpine\nCOPY --from=build /o /h\n";
+
+  it("forces only the chosen FROM; the other stage keeps its normal patch bump", async () => {
+    const plan = await planBasePatches(df, src, { retarget: { line: 2, tag: "1.30.7-alpine", kind: "minor" } });
+    expect(plan.dockerfile).toBe("FROM node:24.1.2-alpine AS build\nRUN b\nFROM nginx:1.30.7-alpine\nCOPY --from=build /o /h\n");
+    expect(plan.patches).toEqual([
+      { from: "node:24.1.0-alpine", to: "node:24.1.2-alpine" },
+      { from: "nginx:1.29.8-alpine", to: "nginx:1.30.7-alpine", kind: "minor" },
+    ]);
+  });
+  it("works on a minor pin (which normal patching skips)", async () => {
+    const plan = await planBasePatches("FROM nginx:1.29-alpine\n", src, { retarget: { line: 0, tag: "1.30-alpine", kind: "minor" } });
+    expect(plan.dockerfile).toBe("FROM nginx:1.30-alpine\n");
+    const none = await planBasePatches("FROM nginx:1.29-alpine\n", src);
+    expect(none.dockerfile).toBeUndefined();
+  });
+  it("ARG-driven runtime FROM becomes a build-arg", async () => {
+    const plan = await planBasePatches("ARG V=1.29.8-alpine\nFROM nginx:${V}\n", src, { retarget: { line: 1, tag: "1.30.7-alpine", kind: "minor" } });
+    expect(plan.buildArgs).toEqual({ V: "1.30.7-alpine" });
+    expect(plan.dockerfile).toBeUndefined();
+  });
+  it("refuses to retarget a digest-pinned runtime", async () => {
+    const d = "sha256:" + "c".repeat(64);
+    const plan = await planBasePatches(`FROM nginx:1.29.8-alpine@${d}\n`, src, { retarget: { line: 0, tag: "1.30.7-alpine", kind: "minor" } });
+    expect(plan.patches).toEqual([]);
+  });
+  it("major kind is recorded as such", async () => {
+    const plan = await planBasePatches("FROM nginx:1.29.8-alpine\n", src, { retarget: { line: 0, tag: "2.0.1-alpine", kind: "major" } });
+    expect(plan.patches[0].kind).toBe("major");
+  });
+});
+
+describe("minor jumps in the used-image record", () => {
+  const d = "sha256:" + "4".repeat(64);
+  it("marks auto_minor_from and describes it", () => {
+    const used = extractUsedBaseImages(`#5 [1/2] FROM docker.io/library/nginx:1.30.7-alpine@${d}`, [
+      { from: "nginx:1.29.8-alpine", to: "nginx:1.30.7-alpine", kind: "minor" },
+    ]);
+    expect(used[0]).toEqual({ image: "docker.io/library/nginx:1.30.7-alpine", digest: d, auto_minor_from: "1.29" });
+    expect(describeBaseImage(used[0])).toBe("nginx:1.30.7-alpine @444444444444 (auto-minor 1.29→1.30)");
+  });
+});

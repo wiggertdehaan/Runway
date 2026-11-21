@@ -26,6 +26,8 @@ import { countSeverity, scanImage, trivyAvailable, type Finding, type ScanResult
 import { latestSource } from "./source.js";
 import { readDockerfileFromTar } from "./dockerfile.js";
 import { planBasePatches, type BasePlan, type UsedBaseImage } from "./base-images.js";
+import { escalateBase, type EscalationStep } from "./escalation.js";
+import { evaluateRebuildGate, requireKevFree } from "./gate.js";
 import { createTagSource } from "./registry.js";
 import { notifyRebuildSummary } from "../util/webhook.js";
 
@@ -76,50 +78,7 @@ export function snapshot(
 }
 
 
-export interface GateVerdict {
-  allow: boolean;
-  reason: string;
-}
-
-/**
- * Pure: may a rebuilt image replace the running one? Yes iff its scan is
- * not worse than the running version: no CRITICAL CVE that the running
- * image doesn't have, and no actively exploited (KEV) CVE it doesn't
- * have. Fewer or equal findings always pass, even when the app's own
- * scan threshold would have blocked a fresh deploy of the same image
- * (the running version carries those findings too). Without a trustworthy
- * scan on either side we cannot compare, so we refuse.
- */
-export function evaluateRebuildGate(
-  current: Finding[] | null,
-  next: ScanResult,
-  kev: Set<string>
-): GateVerdict {
-  if (next.status === "skipped") {
-    return { allow: false, reason: "scan of the new build unavailable, cannot verify it is not worse" };
-  }
-  if (current === null) {
-    return { allow: false, reason: "no scan of the running version to compare against" };
-  }
-  const cur = current.filter((f) => f.source === "image");
-  const nxt = next.findings.filter((f) => f.source === "image");
-  const curCrit = new Set(cur.filter((f) => f.severity === "CRITICAL").map((f) => f.id));
-  const curIds = new Set(cur.map((f) => f.id.toUpperCase()));
-
-  const newCrit = [...new Set(nxt.filter((f) => f.severity === "CRITICAL" && !curCrit.has(f.id)).map((f) => f.id))];
-  const newKev = [...new Set(
-    kevFindings(nxt, kev).map((f) => f.id.toUpperCase()).filter((id) => !curIds.has(id))
-  )];
-
-  const list = (ids: string[]) => ids.slice(0, 3).join(", ") + (ids.length > 3 ? `, +${ids.length - 3} more` : "");
-  const problems: string[] = [];
-  if (newCrit.length) problems.push(`${newCrit.length} new critical (${list(newCrit)})`);
-  if (newKev.length) problems.push(`${newKev.length} new actively exploited (${list(newKev)})`);
-  if (problems.length) {
-    return { allow: false, reason: `new build is worse than the running version: ${problems.join("; ")}` };
-  }
-  return { allow: true, reason: "not worse than the running version" };
-}
+export { evaluateRebuildGate, type GateVerdict } from "./gate.js";
 
 /** Pure: one-line-per-app text for the admin notification. */
 export function summarizeRun(
@@ -144,7 +103,16 @@ export function summarizeRun(
     const patched = r.patched?.length
       ? ` [base ${r.patched.map((p) => `${p.from}→${p.to}`).join(", ")}]`
       : "";
-    return `- ${name}: ${r.outcome.replace("_", " ")}${delta}${patched}${why}`;
+    const esc = (r.escalation ?? [])
+      .map((e) =>
+        e.kind === "major" && e.outcome === "notice"
+          ? ` [${e.detail.split(".")[0]}]`
+          : e.outcome === "applied"
+            ? ` [auto-minor ${e.from}→${e.to}]`
+            : ` [minor ${e.to} ${e.outcome}: ${e.detail}]`
+      )
+      .join("");
+    return `- ${name}: ${r.outcome.replace("_", " ")}${delta}${patched}${esc}${why}`;
   });
   return `Runway rebuild (${trigger}): ${head}\n${lines.join("\n")}`;
 }
@@ -190,6 +158,7 @@ export async function rebuildApp(
   }
 
   const previousStatus = app.status;
+  const quarantined = app.status === "quarantined";
 
   // Baseline for "before" and for the gate: a fresh scan of the image that
   // is running right now (the vuln DB moves daily). If Trivy fails on it,
@@ -207,8 +176,10 @@ export async function rebuildApp(
   let plan: BasePlan | undefined;
   let usedBases: UsedBaseImage[] = [];
 
+  let tarForEscalation: Buffer | undefined;
   try {
     const tar = await readFile(source.path);
+    tarForEscalation = tar;
 
     // Raise exact patch pins (nginx:1.30.6-alpine -> 1.30.7-alpine) in a
     // build-time copy of the Dockerfile. Best effort: any problem here
@@ -225,29 +196,54 @@ export async function rebuildApp(
       }
     }
 
-    const result = await deployApp({
+    let result = await deployApp({
       app,
       tar,
       noCache: true,
       verifyHealth: true,
       skipSourceSave: true,
       basePlan: plan,
-      scanGate: (scan) => evaluateRebuildGate(currentFindings, scan, kev),
+      // A quarantined app may only come back with a KEV-free build.
+      keepOffline: quarantined,
+      scanGate: (scan) => {
+        const v = evaluateRebuildGate(currentFindings, scan, kev);
+        return quarantined ? requireKevFree(v, scan, kev) : v;
+      },
     });
     usedBases = result.base_images;
-    const imageFindings = result.scan.findings.filter((f) => f.source === "image");
-    // The deploy-time scan doubles as the new baseline for the daily
-    // rescan, so it diffs against this build and not the old image.
-    if (result.scan.status !== "skipped") {
-      insertPeriodicScan({
-        app_id: app.id,
-        image_tag: result.image_tag,
-        scan_status: result.scan.status,
-        counts: countSeverity(imageFindings),
-        findings: imageFindings,
-        error: null,
-      });
+
+    // Patch stage is live. If an actively exploited / fixable-critical
+    // finding survived it, escalate to a newer minor line (lowest first).
+    let escalation: EscalationStep[] | undefined;
+    if (app.auto_minor_base && result.scan.status !== "skipped") {
+      try {
+        const dockerfile = readDockerfileFromTar(tar);
+        if (dockerfile) {
+          const esc = await escalateBase({
+            app,
+            tar,
+            dockerfile,
+            plan,
+            liveFindings: result.scan.findings.filter((f) => f.source === "image"),
+            kev,
+            tagSource: tagSource(),
+            quarantined,
+            log,
+          });
+          escalation = esc.steps.length > 0 ? esc.steps : undefined;
+          if (esc.result) {
+            result = esc.result;
+            usedBases = esc.baseImages ?? result.base_images;
+            plan = esc.plan ?? plan;
+          }
+        }
+      } catch (err: any) {
+        // Stage 1 is already live; escalation problems never fail the rebuild.
+        log.warn(`[rebuild] ${app.id}: escalation failed: ${err?.message ?? err}`);
+      }
     }
+
+    const imageFindings = result.scan.findings.filter((f) => f.source === "image");
     const after =
       result.scan.status === "skipped" ? null : snapshot(imageFindings, kev);
     return done("rebuilt", {
@@ -255,6 +251,7 @@ export async function rebuildApp(
       after,
       base_images: usedBases,
       patched: plan?.patches,
+      escalation,
       detail: result.scan.status === "skipped" ? "scan skipped" : undefined,
     });
   } catch (err: any) {
@@ -266,14 +263,52 @@ export async function rebuildApp(
       // The old container never stopped, but deployApp left the status
       // on "scanning"; put it back.
       updateApp(app.id, { status: previousStatus });
+
+      // A quarantined app's plain rebuild is blocked while the KEV is still
+      // there. That is exactly when a newer minor line may be the fix, so
+      // escalate from the current image instead of giving up.
+      let escalation: EscalationStep[] | undefined;
+      if (quarantined && app.auto_minor_base && currentFindings && tarForEscalation) {
+        try {
+          const dockerfile = readDockerfileFromTar(tarForEscalation);
+          if (dockerfile) {
+            const esc = await escalateBase({
+              app,
+              tar: tarForEscalation,
+              dockerfile,
+              plan: undefined,
+              liveFindings: currentFindings,
+              kev,
+              tagSource: tagSource(),
+              quarantined: true,
+              log,
+            });
+            escalation = esc.steps.length > 0 ? esc.steps : undefined;
+            if (esc.result) {
+              const fresh = esc.result.scan.findings.filter((f) => f.source === "image");
+              return done("rebuilt", {
+                before,
+                after: snapshot(fresh, kev),
+                base_images: esc.baseImages ?? esc.result.base_images,
+                patched: esc.plan?.patches,
+                escalation,
+              });
+            }
+          }
+        } catch (e: any) {
+          log.warn(`[rebuild] ${app.id}: escalation from quarantine failed: ${e?.message ?? e}`);
+        }
+      }
       return done("blocked", {
         before,
         after: snapshot(err.scan.findings, kev),
         detail: err.message,
+        escalation,
         ...baseExtra,
       });
     }
     if (err instanceof UnhealthyDeployError) {
+      if (quarantined) updateApp(app.id, { status: "quarantined" });
       return done(err.restored ? "rolled_back" : "failed", {
         before,
         detail: err.message,
@@ -292,7 +327,8 @@ export async function rebuildApp(
     } catch {
       /* treat as not serving */
     }
-    updateApp(app.id, { status: serving ? previousStatus : "failed" });
+    // A quarantined app is deliberately not serving: it stays quarantined.
+    updateApp(app.id, { status: quarantined ? "quarantined" : serving ? previousStatus : "failed" });
     log.warn(`[rebuild] ${app.id}: ${err?.message ?? err}`);
     return done("failed", { before, detail: err?.message ?? "rebuild failed", ...baseExtra });
   }
@@ -362,7 +398,9 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
     const reasons = new Map<string, string>();
     if (opts.onlyVulnerable) {
       apps = apps.filter((a) => {
-        if (!a.auto_rebuild) return false;
+        // A quarantined app is always retried, whatever its opt-out says:
+        // a successful rebuild is how it gets back online.
+        if (!a.auto_rebuild && a.status !== "quarantined") return false;
         const reason = rebuildReason(
           getLatestPeriodicScanFindings(a.id),
           kevList.ids

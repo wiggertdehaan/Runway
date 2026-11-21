@@ -367,6 +367,37 @@ export function migrate() {
   if (!deployCols.some((c) => c.name === "base_images")) {
     db.exec(`ALTER TABLE deploys ADD COLUMN base_images TEXT`);
   }
+  // Minor-line escalation opt-out + KEV quarantine (see deploy/quarantine.ts).
+  if (!appCols.some((c) => c.name === "auto_minor_base")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_minor_base INTEGER NOT NULL DEFAULT 1`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_quarantine (
+      app_id TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,
+      state TEXT NOT NULL,
+      kev_first_seen TEXT NOT NULL DEFAULT '{}',
+      attempt_at TEXT,
+      quarantined_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS quarantine_exemptions (
+      app_id TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,
+      reason TEXT NOT NULL,
+      until TEXT NOT NULL,
+      granted_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS app_notices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_app_notices_app
+      ON app_notices(app_id, id DESC);
+  `);
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS rebuild_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -41,6 +41,7 @@ export interface App {
   sso_enabled: number;
   auto_rebuild: number;
   auto_patch_base: number;
+  auto_minor_base: number;
   basic_auth_enabled: number;
   basic_auth_username: string | null;
   basic_auth_htpasswd: string | null;
@@ -110,6 +111,7 @@ type UpdatableAppFields = Partial<
     | "sso_enabled"
     | "auto_rebuild"
     | "auto_patch_base"
+    | "auto_minor_base"
     | "basic_auth_enabled"
     | "basic_auth_username"
     | "basic_auth_htpasswd"

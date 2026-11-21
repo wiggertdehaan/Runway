@@ -60,3 +60,28 @@ export async function notifyRebuildSummary(
     // Best-effort — a webhook failure must not affect the run.
   }
 }
+
+/**
+ * Generic admin notice over the configured webhook (quarantine events,
+ * automatic minor jumps, major-available notices). Same SSRF re-check and
+ * best-effort behaviour as the other notices.
+ */
+export async function notifyAdminWebhook(
+  text: string,
+  extra: Record<string, unknown> = {}
+): Promise<void> {
+  const url = getSetting("webhook_url");
+  if (!url) return;
+  const check = await assertSafeOutboundUrl(url);
+  if (!check.ok) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, ...extra, timestamp: new Date().toISOString() }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    // Best-effort — never break the caller.
+  }
+}
