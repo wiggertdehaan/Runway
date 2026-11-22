@@ -74,6 +74,15 @@ function readCache(): CacheFile | null {
   }
 }
 
+/**
+ * What the cached list holds, read from disk only. For views that render
+ * often: unlike getKevList this never goes to the network.
+ */
+export function kevCacheInfo(): { fetchedAt: string; count: number } | null {
+  const cached = readCache();
+  return cached ? { fetchedAt: cached.fetchedAt, count: cached.ids.length } : null;
+}
+
 function writeCache(c: CacheFile): void {
   try {
     mkdirSync(dirname(CACHE_PATH), { recursive: true });

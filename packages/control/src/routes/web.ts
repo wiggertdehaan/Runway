@@ -137,10 +137,16 @@ import {
   setExemption,
 } from "../db/quarantine.js";
 import { deadlineOf, evaluateAppQuarantine } from "../deploy/quarantine.js";
-import { getKevList } from "../deploy/kev.js";
+import { getKevList, kevCacheInfo } from "../deploy/kev.js";
 import { notifyAdminWebhook } from "../util/webhook.js";
 import { clampQuarantineTermDays, getQuarantineTermDays } from "../db/settings.js";
-import { getLatestPeriodicScan } from "../db/periodic-scans.js";
+import { getLatestPeriodicScan, listPeriodicScanAppIds } from "../db/periodic-scans.js";
+import {
+  renderKevStatus,
+  renderRiskBadge,
+  renderSecurityAttention,
+  type AtRiskApp,
+} from "./security-view.js";
 import { rescanApp } from "../deploy/periodic-scanner.js";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
@@ -779,28 +785,29 @@ function fmtUtc(iso: string | null | undefined): string {
   return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "?";
 }
 
-/** Dashboard banner: apps in a KEV grace term or quarantined. */
-function renderQuarantineSummary(apps: App[]): string {
-  const byId = new Map(listQuarantine().map((r) => [r.app_id, r]));
+/**
+ * Apps (out of the given ones) that are in a KEV grace term or
+ * quarantined, keyed by app id, in the shape the dashboard views take.
+ */
+function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
+  const rows = new Map(listQuarantine().map((r) => [r.app_id, r]));
   const termMs = getQuarantineTermDays() * 86_400_000;
-  const items = apps
-    .filter((a) => byId.has(a.id))
-    .map((a) => {
-      const q = byId.get(a.id)!;
-      const cves = Object.keys(q.kev_first_seen).join(", ");
-      const ex = getActiveExemption(a.id);
-      const what =
-        q.state === "quarantined"
-          ? `<strong style="color:var(--status-error)">QUARANTINED</strong> since ${escapeHtml(fmtUtc(q.quarantined_at))}`
-          : `term ends ${escapeHtml(fmtUtc(deadlineOf(q, termMs)))}`;
-      return `<li><a href="/apps/${encodeURIComponent(a.id)}#quarantine">${escapeHtml(a.name ?? a.id)}</a>: ${what} &middot; actively exploited ${escapeHtml(cves)}${ex ? ` &middot; exempt until ${escapeHtml(fmtUtc(ex.until))}` : ""}</li>`;
+  const out = new Map<string, AtRiskApp>();
+  for (const a of apps) {
+    const q = rows.get(a.id);
+    if (!q) continue;
+    out.set(a.id, {
+      id: a.id,
+      name: a.name ?? a.id,
+      owner: a.created_by,
+      state: q.state,
+      cves: Object.keys(q.kev_first_seen),
+      deadline: deadlineOf(q, termMs),
+      quarantinedAt: q.quarantined_at,
+      exemptUntil: getActiveExemption(a.id)?.until ?? null,
     });
-  if (items.length === 0) return "";
-  return `<div class="card" style="border-color:var(--status-error);margin-bottom:1rem">
-    <strong>Security attention</strong>
-    <p class="meta" style="margin:0.25rem 0">Actively exploited vulnerabilities (CISA KEV) in running apps. Fix by rebuilding or deploying; after the term an app is taken offline until fixed.</p>
-    <ul style="margin:0.5rem 0 0 1.25rem">${items.join("")}</ul>
-  </div>`;
+  }
+  return out;
 }
 
 /** App-page section: quarantine status, exemption, owner notices. */
@@ -867,12 +874,20 @@ async function renderAppsLive(
     apps.map((a) => a.id),
     SPARKLINE_HOURS
   );
+  const now = Date.now();
+  const atRisk = collectAtRisk(apps);
   const appCards = apps
     .map((app, i) =>
-      renderAppCard(app, dashboardDomain, allStats[i] ?? null, {
-        lastRequestAt: app.last_request_at,
-        buckets: buckets.get(app.id) ?? [],
-      })
+      renderAppCard(
+        app,
+        dashboardDomain,
+        allStats[i] ?? null,
+        {
+          lastRequestAt: app.last_request_at,
+          buckets: buckets.get(app.id) ?? [],
+        },
+        renderRiskBadge(atRisk.get(app.id), now)
+      )
     )
     .join("");
 
@@ -933,7 +948,20 @@ async function renderAppsLive(
       : `<div class="app-grid">${appCards}</div>
          <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your search.</p>`;
 
-  return `${renderQuarantineSummary(apps)}${header}${body}`;
+  const scannedIds = listPeriodicScanAppIds();
+  const runningApps = apps.filter((a) => a.status === "running");
+  const kevStatus = renderKevStatus(
+    kevCacheInfo(),
+    {
+      running: runningApps.length,
+      scanned: runningApps.filter((a) => scannedIds.has(a.id)).length,
+    },
+    atRisk.size,
+    now,
+    admin
+  );
+
+  return `${renderSecurityAttention([...atRisk.values()], now)}${header}${kevStatus}${body}`;
 }
 
 webRoutes.get("/", async (c) => {
@@ -1513,7 +1541,8 @@ function renderAppCard(
   app: ReturnType<typeof listApps>[number],
   dashboardDomain: string,
   stats: AppStats | null = null,
-  activity: { lastRequestAt: string | null; buckets: number[] } | null = null
+  activity: { lastRequestAt: string | null; buckets: number[] } | null = null,
+  riskBadge = ""
 ): string {
   const configured = !!(app.name && app.runtime);
   const title = configured
@@ -1608,6 +1637,7 @@ function renderAppCard(
           ${avatar}
           <h2 style="font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</h2>
           ${badgeHtml}
+          ${riskBadge}
           ${configured ? renderScanBadge(app) : ""}
         </div>
         ${overflowMenu}
