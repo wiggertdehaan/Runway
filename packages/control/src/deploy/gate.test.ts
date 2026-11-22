@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { escalationTargets, evaluateEscalationGate, requireKevFree } from "./gate.js";
+import { escalationTargets, evaluateEscalationGate, requireKevFree, evaluateDepGate } from "./gate.js";
 import type { Finding, ScanResult } from "./scan.js";
 
 const f = (id: string, severity: Finding["severity"], fixedVersion?: string, source: Finding["source"] = "image"): Finding => ({
@@ -53,5 +53,32 @@ describe("requireKevFree", () => {
   it("keeps an existing block untouched", () => {
     const blocked = { allow: false, reason: "worse" };
     expect(requireKevFree(blocked, scan([]), kev)).toBe(blocked);
+  });
+});
+
+describe("evaluateDepGate", () => {
+  const current = [f("CVE-A", "CRITICAL", "2"), f("CVE-B", "HIGH", "2")];
+  it("a batch passes when at least one targeted finding is gone", () => {
+    const v = evaluateDepGate(current, scan([f("CVE-B", "HIGH", "2")]), kev, ["CVE-A", "CVE-B"], false);
+    expect(v.allow).toBe(true);
+    expect(v.reason).toContain("1 of 2");
+  });
+  it("a batch that removed nothing is refused", () => {
+    const v = evaluateDepGate(current, scan(current), kev, ["CVE-A", "CVE-B"], false);
+    expect(v.allow).toBe(false);
+    expect(v.reason).toContain("removed none");
+  });
+  it("a major update must remove everything it was for", () => {
+    expect(evaluateDepGate(current, scan([f("CVE-B", "HIGH", "2")]), kev, ["CVE-A", "CVE-B"], true).allow).toBe(false);
+    expect(evaluateDepGate(current, scan([]), kev, ["CVE-A", "CVE-B"], true).allow).toBe(true);
+  });
+  it("is never more lenient than the rebuild gate", () => {
+    const worse = scan([f("CVE-NEW", "CRITICAL", "9")]);
+    expect(evaluateDepGate(current, worse, kev, ["CVE-A"], false).allow).toBe(false);
+    expect(evaluateDepGate(null, scan([]), kev, ["CVE-A"], true).allow).toBe(false);
+    expect(evaluateDepGate(current, scan([], "skipped"), kev, ["CVE-A"], true).allow).toBe(false);
+  });
+  it("matches finding ids case-insensitively", () => {
+    expect(evaluateDepGate(current, scan([f("cve-a", "CRITICAL", "2")]), kev, ["CVE-A"], true).allow).toBe(false);
   });
 });

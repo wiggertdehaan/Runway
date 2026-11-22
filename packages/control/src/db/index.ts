@@ -371,6 +371,24 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "auto_minor_base")) {
     db.exec(`ALTER TABLE apps ADD COLUMN auto_minor_base INTEGER NOT NULL DEFAULT 1`);
   }
+  // Dependency auto-update on rebuild (see deploy/dep-updates.ts): per-app
+  // opt-out, and a memory of attempts so a version that failed to build or
+  // start is not retried on every weekly run.
+  if (!appCols.some((c) => c.name === "auto_update_deps")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_update_deps INTEGER NOT NULL DEFAULT 1`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dep_update_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      dep_key TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_dep_update_attempts_app
+      ON dep_update_attempts(app_id, id DESC);
+  `);
   db.exec(`
     CREATE TABLE IF NOT EXISTS app_quarantine (
       app_id TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,

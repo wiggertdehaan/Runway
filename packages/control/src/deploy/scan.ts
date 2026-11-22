@@ -21,6 +21,10 @@ export interface Finding {
   fixedVersion?: string;
   title?: string;
   location?: string;
+  /** Trivy package type ("alpine", "python-pkg", "node-pkg", ...). */
+  pkgType?: string;
+  /** Where the package sits in the image, when Trivy reports it. */
+  pkgPath?: string;
 }
 
 export interface ScanCounts {
@@ -107,9 +111,11 @@ function normalizeSeverity(raw: unknown): Severity {
 interface TrivyResult {
   Target?: string;
   Class?: string;
+  Type?: string;
   Vulnerabilities?: Array<{
     VulnerabilityID?: string;
     PkgName?: string;
+    PkgPath?: string;
     InstalledVersion?: string;
     FixedVersion?: string;
     Severity?: string;
@@ -130,7 +136,7 @@ interface TrivyResult {
   }>;
 }
 
-function parseTrivyOutput(raw: string): Finding[] {
+export function parseTrivyOutput(raw: string): Finding[] {
   const findings: Finding[] = [];
   if (!raw.trim()) return findings;
 
@@ -153,6 +159,8 @@ function parseTrivyOutput(raw: string): Finding[] {
         fixedVersion: v.FixedVersion,
         title: v.Title,
         location: target || undefined,
+        pkgType: result.Type || undefined,
+        pkgPath: v.PkgPath || undefined,
       });
     }
     for (const s of result.Secrets ?? []) {

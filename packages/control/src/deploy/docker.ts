@@ -1,6 +1,7 @@
 import Docker from "dockerode";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile, unlink } from "node:fs/promises";
+import { basename } from "node:path";
 import { createReadStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -222,6 +223,50 @@ function loadImage(tarPath: string): Promise<void> {
       }
     });
   });
+}
+
+/**
+ * Read one file out of an image without running it: create a container
+ * (never started), take the file as a tar archive, remove the container.
+ * Used to lift a regenerated lockfile out of a throwaway build.
+ */
+export async function readFileFromImage(
+  imageTag: string,
+  path: string,
+  maxBytes = 20 * 1024 * 1024
+): Promise<Buffer> {
+  const container = await docker.createContainer({
+    Image: imageTag,
+    Cmd: ["/runway-never-started"],
+    NetworkDisabled: true,
+  });
+  const dir = await mkdtemp(join(tmpdir(), "runway-img-"));
+  try {
+    const stream = (await container.getArchive({ path })) as unknown as Readable;
+    const archive = await new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      stream.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > maxBytes * 2) {
+          stream.destroy();
+          return reject(new Error(`${path} in ${imageTag} is too large`));
+        }
+        chunks.push(Buffer.from(chunk));
+      });
+      stream.on("end", () => resolve(Buffer.concat(chunks)));
+      stream.on("error", reject);
+    });
+    const tarPath = join(dir, "file.tar");
+    await writeFile(tarPath, archive);
+    return execFileSync("tar", ["-xOf", tarPath, basename(path)], {
+      maxBuffer: maxBytes,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } finally {
+    await container.remove({ force: true }).catch(() => {});
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function streamToBuffer(stream: Readable): Promise<Buffer> {

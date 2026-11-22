@@ -27,6 +27,9 @@ import { latestSource } from "./source.js";
 import { readDockerfileFromTar } from "./dockerfile.js";
 import { planBasePatches, type BasePlan, type UsedBaseImage } from "./base-images.js";
 import { escalateBase, type EscalationStep } from "./escalation.js";
+import { ecosystemOf, planDepUpdates, type DepPlan } from "./dep-updates.js";
+import { runDepStage, type DepStep } from "./dep-stage.js";
+import { recentDepFailures } from "../db/dep-attempts.js";
 import { evaluateRebuildGate, requireKevFree } from "./gate.js";
 import { createTagSource } from "./registry.js";
 import { notifyRebuildSummary } from "../util/webhook.js";
@@ -39,6 +42,9 @@ function tagSource() {
   return (sharedTagSource ??= createTagSource());
 }
 
+/** Major dependency jumps tried per rebuild; each one is a full build. */
+export const MAX_MAJOR_DEP_UPDATES = 3;
+
 /** Statuses during which a deploy/build is already in flight. */
 const BUSY_STATUSES = new Set(["building", "scanning", "starting"]);
 
@@ -46,11 +52,14 @@ const BUSY_STATUSES = new Set(["building", "scanning", "starting"]);
  * Pure: should the weekly job rebuild this app? Yes when its latest
  * scan shows an actively exploited CVE (CISA KEV), or a CRITICAL that
  * already has a fixed version available (a rebuild can actually pick
- * the fix up). Returns the reason, or null.
+ * the fix up). With `deps` (the app lets Runway raise its dependencies)
+ * a HIGH with a fix in one of the app's own packages counts too: a
+ * rebuild can now fix that as well. Returns the reason, or null.
  */
 export function rebuildReason(
   findings: Finding[],
-  kev: Set<string>
+  kev: Set<string>,
+  opts: { deps?: boolean } = {}
 ): string | null {
   const image = findings.filter((f) => f.source === "image");
   const kevHits = kevFindings(image, kev);
@@ -62,6 +71,14 @@ export function rebuildReason(
   if (criticalFixable.length > 0) {
     const ids = new Set(criticalFixable.map((f) => f.id));
     parts.push(`${ids.size} critical with fix`);
+  }
+  if (opts.deps) {
+    const highDeps = new Set(
+      image
+        .filter((f) => f.severity === "HIGH" && !!f.fixedVersion && ecosystemOf(f) !== null)
+        .map((f) => f.id)
+    );
+    if (highDeps.size > 0) parts.push(`${highDeps.size} high with fix in app dependencies`);
   }
   return parts.length > 0 ? parts.join(", ") : null;
 }
@@ -112,7 +129,14 @@ export function summarizeRun(
             : ` [minor ${e.to} ${e.outcome}: ${e.detail}]`
       )
       .join("");
-    return `- ${name}: ${r.outcome.replace("_", " ")}${delta}${patched}${esc}${why}`;
+    const applied = (r.deps ?? []).filter((d) => d.outcome === "applied");
+    const notApplied = (r.deps ?? []).filter((d) => d.outcome !== "applied" && d.outcome !== "skipped");
+    const deps =
+      (applied.length ? ` [deps ${applied.map((d) => `${d.pkg} ${d.from}→${d.to}`).join(", ")}]` : "") +
+      (notApplied.length
+        ? ` [deps not applied: ${notApplied.map((d) => `${d.pkg} ${d.to} ${d.outcome}`).join(", ")}]`
+        : "");
+    return `- ${name}: ${r.outcome.replace("_", " ")}${delta}${patched}${esc}${deps}${why}`;
   });
   return `Runway rebuild (${trigger}): ${head}\n${lines.join("\n")}`;
 }
@@ -126,7 +150,8 @@ export function summarizeRun(
 export async function rebuildApp(
   appIn: App,
   kev: Set<string>,
-  log: Logger = console
+  log: Logger = console,
+  opts: { retryFailedDeps?: boolean } = {}
 ): Promise<RebuildAppResult> {
   const started = Date.now();
   const base = {
@@ -177,9 +202,34 @@ export async function rebuildApp(
   let usedBases: UsedBaseImage[] = [];
 
   let tarForEscalation: Buffer | undefined;
+  const depSteps: DepStep[] = [];
+  const deps = () => (depSteps.length > 0 ? depSteps : undefined);
   try {
     const tar = await readFile(source.path);
     tarForEscalation = tar;
+    // The source that is live. Starts as the stored tar and becomes the
+    // patched copy once a dependency stage has gone live, so that later
+    // stages build on it instead of quietly undoing it.
+    let liveTar: Buffer = tar;
+    const dockerfileText = readDockerfileFromTar(tar);
+
+    // Which of the app's own packages to raise (see dep-updates.ts).
+    let depPlan: DepPlan | undefined;
+    if (app.auto_update_deps && currentFindings) {
+      try {
+        depPlan = planDepUpdates(currentFindings, kev, {
+          skip: opts.retryFailedDeps ? undefined : recentDepFailures(app.id),
+        });
+        for (const s of depPlan.skipped) {
+          depSteps.push({
+            ecosystem: s.ecosystem, pkg: s.name, from: "", to: "", kind: "compatible",
+            outcome: "skipped", detail: s.reason,
+          });
+        }
+      } catch (err: any) {
+        log.warn(`[rebuild] ${app.id}: dependency planning failed: ${err?.message ?? err}`);
+      }
+    }
 
     // Raise exact patch pins (nginx:1.30.6-alpine -> 1.30.7-alpine) in a
     // build-time copy of the Dockerfile. Best effort: any problem here
@@ -196,20 +246,40 @@ export async function rebuildApp(
       }
     }
 
-    let result = await deployApp({
-      app,
-      tar,
-      noCache: true,
-      verifyHealth: true,
-      skipSourceSave: true,
-      basePlan: plan,
-      // A quarantined app may only come back with a KEV-free build.
-      keepOffline: quarantined,
-      scanGate: (scan) => {
-        const v = evaluateRebuildGate(currentFindings, scan, kev);
-        return quarantined ? requireKevFree(v, scan, kev) : v;
-      },
-    });
+    // Stage 1 with the compatible dependency updates folded in. If that
+    // build does not go live for any reason, fall through to the plain
+    // rebuild below: the app must never be worse off for the attempt.
+    let withDeps: Awaited<ReturnType<typeof deployApp>> | undefined;
+    if (depPlan && depPlan.compatible.length > 0) {
+      const stage = await runDepStage({
+        app, tar, dockerfile: dockerfileText, updates: depPlan.compatible, strict: false,
+        baseline: currentFindings, kev, plan, quarantined, previousStatus,
+        originalDeployId: source.deployId, log,
+      });
+      depSteps.push(...stage.steps);
+      if (stage.result && stage.tar) {
+        withDeps = stage.result;
+        liveTar = stage.tar;
+        tarForEscalation = liveTar;
+      }
+    }
+
+    let result =
+      withDeps ??
+      (await deployApp({
+        app: getApp(app.id) ?? app,
+        tar,
+        noCache: true,
+        verifyHealth: true,
+        skipSourceSave: true,
+        basePlan: plan,
+        // A quarantined app may only come back with a KEV-free build.
+        keepOffline: quarantined,
+        scanGate: (scan) => {
+          const v = evaluateRebuildGate(currentFindings, scan, kev);
+          return quarantined ? requireKevFree(v, scan, kev) : v;
+        },
+      }));
     usedBases = result.base_images;
 
     // Patch stage is live. If an actively exploited / fixable-critical
@@ -217,11 +287,11 @@ export async function rebuildApp(
     let escalation: EscalationStep[] | undefined;
     if (app.auto_minor_base && result.scan.status !== "skipped") {
       try {
-        const dockerfile = readDockerfileFromTar(tar);
+        const dockerfile = dockerfileText;
         if (dockerfile) {
           const esc = await escalateBase({
             app,
-            tar,
+            tar: liveTar,
             dockerfile,
             plan,
             liveFindings: result.scan.findings.filter((f) => f.source === "image"),
@@ -243,6 +313,37 @@ export async function rebuildApp(
       }
     }
 
+    // Major dependency jumps: one package per build, each on top of what
+    // is live, so one that does not build or start costs nothing but time.
+    if (depPlan && depPlan.major.length > 0 && result.scan.status !== "skipped") {
+      let tried = 0;
+      for (const update of depPlan.major) {
+        const live = result.scan.findings.filter((f) => f.source === "image");
+        const present = new Set(live.map((f) => f.id.toUpperCase()));
+        if (!update.cves.some((id) => present.has(id))) continue; // already gone
+        if (tried >= MAX_MAJOR_DEP_UPDATES) {
+          depSteps.push({
+            ecosystem: update.ecosystem, pkg: update.name, from: update.from, to: update.to,
+            kind: "major", outcome: "skipped", detail: "left for the next rebuild",
+          });
+          continue;
+        }
+        tried++;
+        const stage = await runDepStage({
+          app, tar: liveTar, dockerfile: dockerfileText, updates: [update], strict: true,
+          baseline: live, kev, plan, quarantined: false, previousStatus: "running",
+          originalDeployId: source.deployId, log,
+        });
+        depSteps.push(...stage.steps);
+        if (stage.result && stage.tar) {
+          result = stage.result;
+          usedBases = result.base_images;
+          liveTar = stage.tar;
+        }
+        if (stage.halted) break;
+      }
+    }
+
     const imageFindings = result.scan.findings.filter((f) => f.source === "image");
     const after =
       result.scan.status === "skipped" ? null : snapshot(imageFindings, kev);
@@ -252,12 +353,14 @@ export async function rebuildApp(
       base_images: usedBases,
       patched: plan?.patches,
       escalation,
+      deps: deps(),
       detail: result.scan.status === "skipped" ? "scan skipped" : undefined,
     });
   } catch (err: any) {
     const baseExtra = {
       base_images: (err?.baseImages as UsedBaseImage[] | undefined) ?? usedBases,
       patched: plan?.patches,
+      deps: deps(),
     };
     if (err instanceof ScanBlockedError) {
       // The old container never stopped, but deployApp left the status
@@ -292,6 +395,7 @@ export async function rebuildApp(
                 base_images: esc.baseImages ?? esc.result.base_images,
                 patched: esc.plan?.patches,
                 escalation,
+                deps: deps(),
               });
             }
           }
@@ -317,7 +421,7 @@ export async function rebuildApp(
     }
     if (err instanceof PreflightRejectedError) {
       updateApp(app.id, { status: previousStatus });
-      return done("failed", { before, detail: err.message });
+      return done("failed", { before, detail: err.message, deps: deps() });
     }
     // Build or infrastructure failure. The old container may still be
     // serving; only mark the app failed if it is not.
@@ -403,7 +507,8 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
         if (!a.auto_rebuild && a.status !== "quarantined") return false;
         const reason = rebuildReason(
           getLatestPeriodicScanFindings(a.id),
-          kevList.ids
+          kevList.ids,
+          { deps: !!a.auto_update_deps }
         );
         if (reason) reasons.set(a.id, reason);
         return reason !== null;
@@ -411,7 +516,11 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
     }
 
     for (const app of apps) {
-      const r = await rebuildApp(app, kevList.ids, log);
+      // A rebuild someone asked for retries dependency updates that failed
+      // before; the weekly job leaves those alone for a while.
+      const r = await rebuildApp(app, kevList.ids, log, {
+        retryFailedDeps: opts.trigger === "manual",
+      });
       const why = reasons.get(app.id);
       if (why && r.outcome === "rebuilt") r.detail = r.detail ?? `selected: ${why}`;
       results.push(r);
