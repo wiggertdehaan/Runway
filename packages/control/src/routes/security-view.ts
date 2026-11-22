@@ -36,6 +36,11 @@ export interface ScanCoverage {
   scanned: number;
 }
 
+// The dashboard stylesheet has no table rules; tables carry their own.
+const TABLE = 'style="width:100%;border-collapse:collapse"';
+const TH = 'style="text-align:left;padding:0.4rem 0.6rem;font-size:0.8rem;font-weight:500;color:var(--text-muted)"';
+const TD = 'style="padding:0.5rem 0.6rem;vertical-align:top;border-top:1px solid var(--border)"';
+
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 /** The list refreshes daily; past this age something is wrong. */
@@ -143,17 +148,17 @@ export function renderSecurityAttention(apps: AtRiskApp[], now: number): string 
   const rows = sorted
     .map(
       (a) => `<tr>
-        <td><a href="/apps/${encodeURIComponent(a.id)}#quarantine">${esc(a.name)}</a></td>
-        <td class="meta">${a.owner ? esc(a.owner) : "&mdash;"}</td>
-        <td>${statusCell(a, now)}</td>
-        <td class="meta">${esc(a.cves.join(", "))}</td>
+        <td ${TD}><a href="/apps/${encodeURIComponent(a.id)}#quarantine" style="color:var(--brand)">${esc(a.name)}</a></td>
+        <td ${TD} class="meta">${a.owner ? esc(a.owner) : "&mdash;"}</td>
+        <td ${TD}>${statusCell(a, now)}</td>
+        <td ${TD} class="meta">${esc(a.cves.join(", "))}</td>
       </tr>`
     )
     .join("");
   return `<div class="card" style="border-color:var(--status-error);margin-bottom:1rem">
     <strong>Security attention</strong> <span class="meta">&middot; ${esc(counts.join(", "))}</span>
     <p class="meta" style="margin:0.25rem 0 0.5rem">These apps contain a vulnerability that is being actively exploited (CISA KEV). The owner fixes it with a rebuild or a new deploy. If nothing happens, one last automatic rebuild is tried at the time shown and the app is taken offline when that does not fix it.</p>
-    <table><thead><tr><th>App</th><th>Owner</th><th>What happens</th><th>Actively exploited</th></tr></thead><tbody>${rows}</tbody></table>
+    <table ${TABLE}><thead><tr><th ${TH}>App</th><th ${TH}>Owner</th><th ${TH}>What happens</th><th ${TH}>Actively exploited</th></tr></thead><tbody>${rows}</tbody></table>
   </div>`;
 }
 
