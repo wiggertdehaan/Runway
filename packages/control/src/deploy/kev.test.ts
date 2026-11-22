@@ -10,7 +10,7 @@ const CACHE = vi.hoisted(() => {
   return path;
 });
 
-import { parseKevFeed, kevFindings, getKevList, KEV_URL, KEV_MIRROR_URL, KEV_RETRY_BACKOFF_MS } from "./kev.js";
+import { parseKevFeed, kevFindings, getKevList, KEV_URL, KEV_MIRROR_URL, KEV_RETRY_BACKOFF_MS, kevCacheInfo } from "./kev.js";
 import type { Finding } from "./scan.js";
 
 const f = (id: string, source: Finding["source"] = "image"): Finding => ({ id, severity: "HIGH", source });
@@ -147,5 +147,18 @@ describe("getKevList", () => {
     const after = await getKevList(live.fn, log);
     expect(after.stale).toBe(false);
     expect(live.asked).toEqual([KEV_URL]);
+  });
+
+  it("keeps the backoff and the dashboard's cache view consistent", async () => {
+    // No cache and every source failing: the status line must say "off"
+    // (kevCacheInfo null), also while the backoff skips the network.
+    const dead = fetcher({ [KEV_URL]: denied, [KEV_MIRROR_URL]: denied });
+    await getKevList(dead.fn, quiet());
+    await getKevList(dead.fn, quiet());
+    expect(kevCacheInfo()).toBeNull();
+    // An old cache stays visible with its real age; the backoff never rewrites it.
+    const fetchedAt = writeOldCache(["CVE-2023-9", "CVE-2023-8"]);
+    await getKevList(dead.fn, quiet());
+    expect(kevCacheInfo()).toEqual({ fetchedAt, count: 2 });
   });
 });
