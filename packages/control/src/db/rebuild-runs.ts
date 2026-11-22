@@ -43,7 +43,8 @@ export interface RebuildAppResult {
     from: string;
     to: string;
     kind: "compatible" | "major";
-    outcome: "applied" | "blocked" | "unhealthy" | "failed" | "skipped";
+    /** "ineffective": in the source now, but the scan still shows the finding. */
+    outcome: "applied" | "ineffective" | "blocked" | "unhealthy" | "failed" | "skipped";
     detail?: string;
   }>;
   duration_s?: number;

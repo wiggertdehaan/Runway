@@ -227,3 +227,28 @@ describe("runDepStage when the new container could not be started", () => {
     expect([...m.recentDepFailures(c.app.id)]).toEqual(["node:qs@6.16.1"]);
   });
 });
+
+describe("runDepStage reports per package whether it helped", () => {
+  it("marks an edit that left its finding in place as ineffective, and leaves it alone afterwards", async () => {
+    const setuptools: DepUpdate = {
+      ecosystem: "python", name: "setuptools", from: "70.3.0", to: "78.1.1", kind: "compatible", cves: ["CVE-S"],
+    };
+    const c = ctx({
+      strict: false,
+      updates: [{ ...pillow, kind: "compatible" }, setuptools],
+      baseline: [f("CVE-P"), f("CVE-S", "HIGH")],
+      // pillow's finding is gone, setuptools' is still there
+      deploy: fakeDeploy(scanOf([f("CVE-S", "HIGH")])),
+    });
+    const out = await m.runDepStage(c);
+    expect(out.result).toBeDefined();
+    expect(out.steps.map((s) => [s.pkg, s.outcome])).toEqual([
+      ["pillow", "applied"],
+      ["setuptools", "ineffective"],
+    ]);
+    const notice = m.listNotices(c.app.id)[0].message;
+    expect(notice).toContain("pillow");
+    expect(notice).not.toContain("setuptools 70.3.0");
+    expect([...m.recentDepFailures(c.app.id)]).toEqual(["python:setuptools@78.1.1"]);
+  });
+});

@@ -2717,6 +2717,7 @@ function renderEscalation(r: RebuildAppResult): string {
 
 const DEP_OUTCOME_BADGE: Record<string, string> = {
   applied: "badge-running",
+  ineffective: "badge-building",
   blocked: "badge-stopped",
   unhealthy: "badge-stopped",
   failed: "badge-stopped",
@@ -2730,7 +2731,12 @@ function renderDeps(r: RebuildAppResult): string {
         const what = d.to ? `${d.pkg} ${d.to}` : d.pkg;
         return `<div style="margin-bottom:0.25rem"><span class="badge badge-stopped">dependency skipped</span> ${escapeHtml(what)}: ${escapeHtml(d.detail ?? "")}</div>`;
       }
-      const label = d.outcome === "applied" ? "dependency updated" : `dependency ${d.outcome}`;
+      const label =
+        d.outcome === "applied"
+          ? "dependency updated"
+          : d.outcome === "ineffective"
+            ? "dependency raised, finding remains"
+            : `dependency ${d.outcome}`;
       const move = `${escapeHtml(d.pkg)} ${escapeHtml(d.from)} &rarr; ${escapeHtml(d.to)}${d.kind === "major" ? " (major)" : ""}`;
       const why = d.outcome === "applied" || !d.detail ? "" : `: ${escapeHtml(d.detail)}`;
       return `<div style="margin-bottom:0.25rem"><span class="badge ${DEP_OUTCOME_BADGE[d.outcome] ?? ""}">${escapeHtml(label)}</span> ${move}${why}</div>`;

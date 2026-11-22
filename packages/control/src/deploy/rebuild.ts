@@ -45,6 +45,8 @@ function tagSource() {
 
 /** Major dependency jumps tried per rebuild; each one is a full build. */
 export const MAX_MAJOR_DEP_UPDATES = 3;
+/** Single-package retries after a failed batch of compatible updates. */
+export const MAX_SINGLE_DEP_RETRIES = 3;
 
 /** Statuses during which a deploy/build is already in flight. */
 const BUSY_STATUSES = new Set(["building", "scanning", "starting"]);
@@ -135,6 +137,7 @@ export function summarizeRun(
       )
       .join("");
     const applied = (r.deps ?? []).filter((d) => d.outcome === "applied");
+    // "ineffective" is listed with what was not applied: the finding is still there.
     const notApplied = (r.deps ?? []).filter((d) => d.outcome !== "applied" && d.outcome !== "skipped");
     const deps =
       (applied.length ? ` [deps ${applied.map((d) => `${d.pkg} ${d.from}→${d.to}`).join(", ")}]` : "") +
@@ -291,12 +294,53 @@ export async function rebuildApp(
         baseline: currentFindings, kev, plan, quarantined, previousStatus,
         originalDeployId, log,
       });
-      depSteps.push(...stage.steps);
       depsHalted = stage.halted;
       if (stage.result && stage.tar) {
+        depSteps.push(...stage.steps);
         withDeps = stage.result;
         liveTar = stage.tar;
         tarForEscalation = liveTar;
+      } else {
+        // The batch did not go live. With several packages in it, one bad
+        // one would otherwise hold the others back for good: try them one
+        // at a time, each on top of what went live before it.
+        const retry = stage.steps.filter((s) => s.outcome === "blocked" || s.outcome === "failed");
+        const single = retry.length > 1 && !stage.halted;
+        depSteps.push(...stage.steps.filter((s) => !single || !retry.includes(s)));
+        if (single) {
+          let baseline = currentFindings;
+          let stillQuarantined = quarantined;
+          let tried = 0;
+          for (const update of depPlan.compatible) {
+            if (!retry.some((s) => s.pkg === update.name && s.to === update.to)) continue;
+            if (tried >= MAX_SINGLE_DEP_RETRIES) {
+              depSteps.push({
+                ecosystem: update.ecosystem, pkg: update.name, from: update.from, to: update.to,
+                kind: update.kind, outcome: "skipped", detail: "left for the next rebuild",
+              });
+              continue;
+            }
+            tried++;
+            const one = await runDepStage({
+              app, tar: liveTar, dockerfile: dockerfileText, updates: [update], strict: true,
+              baseline, kev, plan, quarantined: stillQuarantined,
+              previousStatus: stillQuarantined ? previousStatus : withDeps ? "running" : previousStatus,
+              originalDeployId, log,
+            });
+            depSteps.push(...one.steps);
+            if (one.result && one.tar) {
+              withDeps = one.result;
+              liveTar = one.tar;
+              tarForEscalation = liveTar;
+              baseline = one.result.scan.findings.filter((f) => f.source === "image");
+              stillQuarantined = false;
+            }
+            if (one.halted) {
+              depsHalted = true;
+              break;
+            }
+          }
+        }
       }
     }
 

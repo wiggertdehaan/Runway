@@ -145,15 +145,29 @@ export async function runDepStage(ctx: DepStageContext): Promise<DepStageOutcome
     });
     out.result = result;
     out.tar = patched.tar;
+    // A batch may go live when only part of it helped. Say per package
+    // whether its findings are really gone: an edit that changed nothing
+    // in the image (the vulnerable copy comes from the base image, say)
+    // must not be reported as a fix, nor retried every week.
+    const present = new Set(
+      result.scan.findings.filter((f) => f.source === "image").map((f) => f.id.toUpperCase())
+    );
+    const effective: DepUpdate[] = [];
     for (const u of patched.applied) {
-      out.steps.push(step(u, "applied"));
+      const helped = result.scan.status === "skipped" || u.cves.some((id) => !present.has(id.toUpperCase()));
+      if (helped) effective.push(u);
+      out.steps.push(
+        helped
+          ? step(u, "applied")
+          : step(u, "ineffective", "the source now asks for it, but the scan still finds the old version: that copy comes from somewhere else")
+      );
       try {
-        recordDepAttempt(app.id, depKey(u), "applied");
+        recordDepAttempt(app.id, depKey(u), helped ? "applied" : "failed", helped ? undefined : "no effect on the scan");
       } catch {
         /* see above */
       }
     }
-    const list = patched.applied.map(describeUpdate).join(", ");
+    const list = (effective.length > 0 ? effective : patched.applied).map(describeUpdate).join(", ");
     const original =
       ctx.originalDeployId !== null
         ? ` Your source as you uploaded it is kept as the snapshot of deploy #${ctx.originalDeployId}.`

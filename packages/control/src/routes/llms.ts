@@ -852,9 +852,12 @@ a published fix (actively exploited, CRITICAL or HIGH):
 
 Updates within the installed major go first, in one build. Major jumps
 follow one package at a time. Every such build goes live only if its
-scan is not worse, the targeted findings are gone, and the container
-passes its healthcheck; otherwise the previous version keeps running
-and the same update is not retried for 14 days.
+scan is not worse, it removes findings it was meant to remove (a single
+package: all of them; several at once: at least one, and a package
+whose finding remains is reported as such), and the container passes
+its healthcheck. Otherwise the previous version keeps running; if
+several packages were tried at once they are retried one at a time, and
+a version that failed is not retried by the weekly job for 14 days.
 
 What this means for you:
 

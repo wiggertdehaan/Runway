@@ -222,8 +222,11 @@ without knowing why.
   (same major; 0.x: same minor) are folded into stage 1 as one build; if
   that build does not go live the plain rebuild runs as before. Majors
   follow, one package per build, max 3 per rebuild. Gate =
-  `evaluateDepGate` (not worse AND the findings are gone), plus
-  healthcheck with restore. This is the ONE place a rebuild changes the
+  `evaluateDepGate` (not worse AND, for one package, all its findings
+  gone; for a batch, at least one gone, with the rest reported per package
+  as `ineffective`), plus healthcheck with restore. A batch that does not
+  go live is retried one package at a time (max 3) so one bad package
+  cannot hold the others back. This is the ONE place a rebuild changes the
   source: the patched tar is saved as that deploy's snapshot
   (`skipSourceSave: false`) so a pull returns the fixed manifests; the
   uploaded source stays in the earlier snapshot (retention 10; a legacy
