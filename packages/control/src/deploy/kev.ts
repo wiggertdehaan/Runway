@@ -8,10 +8,19 @@ import type { Finding } from "./scan.js";
  * user input) and match on CVE id. The list is cached on disk next to
  * the DB for 24h; if CISA is unreachable we fall back to a stale copy
  * rather than silently treating "no data" as "no exploited CVEs".
+ *
+ * www.cisa.gov sits behind a CDN that answers 403 to some hosting
+ * provider address ranges, so a server can be locked out of the feed
+ * through no fault of its own. CISA publishes the same file in its own
+ * GitHub repository; that copy is tried when the primary URL fails.
  */
 
 export const KEV_URL =
   "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
+export const KEV_MIRROR_URL =
+  "https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json";
+/** Tried in order; the first source that yields a non-empty list wins. */
+export const KEV_SOURCES: readonly string[] = [KEV_URL, KEV_MIRROR_URL];
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), "runway.db");
 const CACHE_PATH = process.env.KEV_CACHE_PATH || join(dirname(DB_PATH), "kev.json");
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -76,25 +85,65 @@ function writeCache(c: CacheFile): void {
   }
 }
 
+type Logger = Pick<Console, "log" | "warn">;
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+async function fetchFeed(url: string, fetchFn: typeof fetch): Promise<Set<string>> {
+  const res = await fetchFn(url, { signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const ids = parseKevFeed(await res.json());
+  if (ids.size === 0) throw new Error("feed contained no CVEs");
+  return ids;
+}
+
+/**
+ * Callers poll this every minute; without a usable cache every call
+ * refetches. Repeat the same failure only once so a long outage is one
+ * log line, not 1440 a day.
+ */
+let lastFailureLogged: string | null = null;
+
 export async function getKevList(
-  fetchFn: typeof fetch = fetch
+  fetchFn: typeof fetch = fetch,
+  log: Logger = console
 ): Promise<KevList> {
   const cached = readCache();
   if (cached && Date.now() - Date.parse(cached.fetchedAt) < TTL_MS) {
     return { ids: new Set(cached.ids), fetchedAt: cached.fetchedAt, stale: false };
   }
-  try {
-    const res = await fetchFn(KEV_URL, { signal: AbortSignal.timeout(20_000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const ids = parseKevFeed(await res.json());
-    if (ids.size === 0) throw new Error("feed contained no CVEs");
-    const fetchedAt = new Date().toISOString();
-    writeCache({ fetchedAt, ids: [...ids] });
-    return { ids, fetchedAt, stale: false };
-  } catch {
-    if (cached) {
-      return { ids: new Set(cached.ids), fetchedAt: cached.fetchedAt, stale: true };
+  const failures: string[] = [];
+  for (const url of KEV_SOURCES) {
+    try {
+      const ids = await fetchFeed(url, fetchFn);
+      const fetchedAt = new Date().toISOString();
+      writeCache({ fetchedAt, ids: [...ids] });
+      const from = `[kev] list refreshed from ${hostOf(url)} (${ids.size} CVEs)`;
+      if (failures.length > 0) log.warn(`${from}; failed first: ${failures.join("; ")}`);
+      else log.log(from);
+      lastFailureLogged = null;
+      return { ids, fetchedAt, stale: false };
+    } catch (err: any) {
+      failures.push(`${hostOf(url)}: ${err?.message ?? err}`);
     }
-    return { ids: new Set(), fetchedAt: null, stale: true };
   }
+  const summary = failures.join("; ");
+  if (summary !== lastFailureLogged) {
+    lastFailureLogged = summary;
+    log.warn(
+      `[kev] list could not be refreshed (${summary}); ${
+        cached ? `using the copy from ${cached.fetchedAt}` : "no cached copy, KEV checks are off"
+      }`
+    );
+  }
+  if (cached) {
+    return { ids: new Set(cached.ids), fetchedAt: cached.fetchedAt, stale: true };
+  }
+  return { ids: new Set(), fetchedAt: null, stale: true };
 }
