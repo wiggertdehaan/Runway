@@ -851,7 +851,12 @@ a published fix (actively exploited, CRITICAL or HIGH):
   \`pyproject.toml\` and \`Pipfile\` are not handled yet.
 
 Updates within the installed major go first, in one build. Major jumps
-follow one package at a time. Every such build goes live only if its
+(pillow 12 to 13) are **off by default** for every app: an admin turns
+them on per app ("Also allow major version updates", only available
+while the automatic updates are on). With majors off, a rebuild does not
+build them but reports them ("major available: pillow 13.0.0 fixes 2
+findings; enable major updates to apply") in the rebuild result. With
+majors on they follow one package at a time. Every such build goes live only if its
 scan is not worse, it removes findings it was meant to remove (a single
 package: all of them; several at once: at least one, and a package
 whose finding remains is reported as such), and the container passes
@@ -866,9 +871,9 @@ What this means for you:
 - The source as it was uploaded stays available as the snapshot of the
   earlier deploy, as long as it is within the retention window.
 - An admin can turn this off per app ("Auto-update vulnerable
-  dependencies" on the app page).
-- A healthcheck only proves the app starts. If a major update breaks a
-  feature, pin the old version in a new deploy, or roll back.
+  dependencies" on the app page), and turns major jumps on separately.
+- A healthcheck only proves the app starts, which is why majors are an
+  explicit opt-in. If a major update breaks a feature, pin the old version in a new deploy, or roll back.
 
 ## Error handling
 

@@ -171,10 +171,24 @@ describe("rebuildReason and updates that failed recently", () => {
     fixedVersion: "78.1.1", pkgType: "python-pkg",
   };
   it("does not select an app for an update that is being left alone", () => {
-    expect(rebuildReason([high], kev, { deps: true })).toContain("high with fix");
-    expect(rebuildReason([high], kev, { deps: true, skip: new Set(["python:setuptools@78.1.1"]) })).toBeNull();
+    expect(rebuildReason([high], kev, { deps: true, major: true })).toContain("high with fix");
+    expect(rebuildReason([high], kev, { deps: true, major: true, skip: new Set(["python:setuptools@78.1.1"]) })).toBeNull();
   });
   it("does not select for a version it cannot order", () => {
     expect(rebuildReason([{ ...high, version: "70.3.0rc1" }], kev, { deps: true })).toBeNull();
+  });
+});
+
+describe("rebuildReason and major updates", () => {
+  const major: Finding = {
+    id: "CVE-9", severity: "HIGH", source: "image", pkg: "pillow", version: "12.3.0",
+    fixedVersion: "13.0.0", pkgType: "python-pkg",
+  };
+  it("does not select an app for a major it will not build", () => {
+    expect(rebuildReason([major], kev, { deps: true })).toBeNull();
+    expect(rebuildReason([major], kev, { deps: true, major: false })).toBeNull();
+  });
+  it("selects it once the app allows majors", () => {
+    expect(rebuildReason([major], kev, { deps: true, major: true })).toBe("1 high with fix in app dependencies");
   });
 });

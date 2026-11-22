@@ -40,6 +40,35 @@ export interface DepPlan {
   skipped: DepSkip[];
 }
 
+/**
+ * Major jumps only run when the app opted in. Otherwise they are taken out
+ * of the plan and reported as skipped, so the owner can see what is on
+ * offer and turn it on deliberately.
+ */
+export function withholdMajors(plan: DepPlan, allowMajor: boolean): { plan: DepPlan; withheld: DepStepNote[] } {
+  if (allowMajor || plan.major.length === 0) return { plan, withheld: [] };
+  const withheld = plan.major.map((u) => ({
+    ecosystem: u.ecosystem,
+    pkg: u.name,
+    from: u.from,
+    to: u.to,
+    kind: "major" as const,
+    outcome: "skipped" as const,
+    detail: `major available: ${u.name} ${u.to} fixes ${u.cves.length} finding${u.cves.length === 1 ? "" : "s"}; enable major updates to apply`,
+  }));
+  return { plan: { ...plan, major: [] }, withheld };
+}
+
+export interface DepStepNote {
+  ecosystem: Ecosystem;
+  pkg: string;
+  from: string;
+  to: string;
+  kind: "major";
+  outcome: "skipped";
+  detail: string;
+}
+
 const PYTHON_TYPES = new Set(["python-pkg", "pip", "pipenv", "poetry", "uv", "conda-pkg"]);
 const NODE_TYPES = new Set(["node-pkg", "npm", "yarn", "pnpm", "bun"]);
 

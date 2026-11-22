@@ -377,6 +377,11 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "auto_update_deps")) {
     db.exec(`ALTER TABLE apps ADD COLUMN auto_update_deps INTEGER NOT NULL DEFAULT 1`);
   }
+  // Major jumps are a separate, explicit opt-in (default off, also for
+  // apps that existed before): a healthcheck only proves the app starts.
+  if (!appCols.some((c) => c.name === "auto_update_deps_major")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_update_deps_major INTEGER NOT NULL DEFAULT 0`);
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS dep_update_attempts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

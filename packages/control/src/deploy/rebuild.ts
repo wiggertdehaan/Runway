@@ -28,7 +28,7 @@ import { getLatestDeploys } from "../db/deploys.js";
 import { readDockerfileFromTar } from "./dockerfile.js";
 import { planBasePatches, type BasePlan, type UsedBaseImage } from "./base-images.js";
 import { escalateBase, type EscalationStep } from "./escalation.js";
-import { ecosystemOf, planDepUpdates, type DepPlan } from "./dep-updates.js";
+import { ecosystemOf, planDepUpdates, withholdMajors, type DepPlan } from "./dep-updates.js";
 import { runDepStage, type DepStep } from "./dep-stage.js";
 import { recentDepFailures } from "../db/dep-attempts.js";
 import { evaluateRebuildGate, requireKevFree } from "./gate.js";
@@ -62,7 +62,7 @@ const BUSY_STATUSES = new Set(["building", "scanning", "starting"]);
 export function rebuildReason(
   findings: Finding[],
   kev: Set<string>,
-  opts: { deps?: boolean; skip?: Set<string> } = {}
+  opts: { deps?: boolean; major?: boolean; skip?: Set<string> } = {}
 ): string | null {
   const image = findings.filter((f) => f.source === "image");
   const kevHits = kevFindings(image, kev);
@@ -79,7 +79,7 @@ export function rebuildReason(
     // Only what a rebuild would actually try: an update that failed or
     // could not be placed recently (`skip`) is not a reason to rebuild.
     const plan = planDepUpdates(image, kev, { skip: opts.skip });
-    const planned = new Set([...plan.compatible, ...plan.major].flatMap((u) => u.cves));
+    const planned = new Set([...plan.compatible, ...(opts.major ? plan.major : [])].flatMap((u) => u.cves));
     const highDeps = new Set(
       image
         .filter((f) => f.severity === "HIGH" && ecosystemOf(f) !== null && planned.has(f.id.toUpperCase()))
@@ -225,9 +225,12 @@ export async function rebuildApp(
     let depPlan: DepPlan | undefined;
     if (app.auto_update_deps && currentFindings) {
       try {
-        depPlan = planDepUpdates(currentFindings, kev, {
+        const planned = planDepUpdates(currentFindings, kev, {
           skip: opts.retryFailedDeps ? undefined : recentDepFailures(app.id),
         });
+        const split = withholdMajors(planned, !!app.auto_update_deps_major);
+        depPlan = split.plan;
+        depSteps.push(...split.withheld);
         for (const s of depPlan.skipped) {
           depSteps.push({
             ecosystem: s.ecosystem, pkg: s.name, from: "", to: "", kind: "compatible",
@@ -588,7 +591,9 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
         const reason = rebuildReason(
           getLatestPeriodicScanFindings(a.id),
           kevList.ids,
-          a.auto_update_deps ? { deps: true, skip: recentDepFailures(a.id) } : {}
+          a.auto_update_deps
+            ? { deps: true, major: !!a.auto_update_deps_major, skip: recentDepFailures(a.id) }
+            : {}
         );
         if (reason) reasons.set(a.id, reason);
         return reason !== null;

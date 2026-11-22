@@ -221,7 +221,9 @@ without knowing why.
   modules under `lib/node_modules` are not the app's). Compatible updates
   (same major; 0.x: same minor) are folded into stage 1 as one build; if
   that build does not go live the plain rebuild runs as before. Majors
-  follow, one package per build, max 3 per rebuild. Gate =
+  follow, one package per build, max 3 per rebuild, but only when
+  `apps.auto_update_deps_major` is on (default 0, also for existing apps;
+  `withholdMajors` reports them as skipped "major available" steps). Gate =
   `evaluateDepGate` (not worse AND, for one package, all its findings
   gone; for a batch, at least one gone, with the rest reported per package
   as `ineffective`), plus healthcheck with restore. A batch that does not
