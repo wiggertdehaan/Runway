@@ -23,7 +23,8 @@ import { getContainerStatus } from "./docker.js";
 import { appContainerName } from "./index.js";
 import { getKevList, kevFindings } from "./kev.js";
 import { countSeverity, scanImage, trivyAvailable, type Finding, type ScanResult } from "./scan.js";
-import { latestSource } from "./source.js";
+import { latestSource, saveSource } from "./source.js";
+import { getLatestDeploys } from "../db/deploys.js";
 import { readDockerfileFromTar } from "./dockerfile.js";
 import { planBasePatches, type BasePlan, type UsedBaseImage } from "./base-images.js";
 import { escalateBase, type EscalationStep } from "./escalation.js";
@@ -59,7 +60,7 @@ const BUSY_STATUSES = new Set(["building", "scanning", "starting"]);
 export function rebuildReason(
   findings: Finding[],
   kev: Set<string>,
-  opts: { deps?: boolean } = {}
+  opts: { deps?: boolean; skip?: Set<string> } = {}
 ): string | null {
   const image = findings.filter((f) => f.source === "image");
   const kevHits = kevFindings(image, kev);
@@ -73,9 +74,13 @@ export function rebuildReason(
     parts.push(`${ids.size} critical with fix`);
   }
   if (opts.deps) {
+    // Only what a rebuild would actually try: an update that failed or
+    // could not be placed recently (`skip`) is not a reason to rebuild.
+    const plan = planDepUpdates(image, kev, { skip: opts.skip });
+    const planned = new Set([...plan.compatible, ...plan.major].flatMap((u) => u.cves));
     const highDeps = new Set(
       image
-        .filter((f) => f.severity === "HIGH" && !!f.fixedVersion && ecosystemOf(f) !== null)
+        .filter((f) => f.severity === "HIGH" && ecosystemOf(f) !== null && planned.has(f.id.toUpperCase()))
         .map((f) => f.id)
     );
     if (highDeps.size > 0) parts.push(`${highDeps.size} high with fix in app dependencies`);
@@ -249,14 +254,45 @@ export async function rebuildApp(
     // Stage 1 with the compatible dependency updates folded in. If that
     // build does not go live for any reason, fall through to the plain
     // rebuild below: the app must never be worse off for the attempt.
+    // An app last deployed before per-deploy snapshots has one legacy
+    // source file with no deploy id. Once a patched snapshot exists that
+    // file can no longer be downloaded, so give it a deploy id first: the
+    // owner must always be able to get back what they uploaded.
+    let originalDeployId = source.deployId;
+    if (originalDeployId === null && depPlan && depPlan.compatible.length + depPlan.major.length > 0) {
+      try {
+        const running = getLatestDeploys(app.id, 50).find(
+          (d) => d.status === "success" && d.image_tag === app.image_tag
+        );
+        if (running) {
+          saveSource(app.id, running.id, tar);
+          originalDeployId = running.id;
+        }
+      } catch (err: any) {
+        log.warn(`[rebuild] ${app.id}: could not keep the uploaded source: ${err?.message ?? err}`);
+      }
+      // Without a retrievable original we do not change the source at all.
+      if (originalDeployId === null) {
+        for (const u of [...depPlan.compatible, ...depPlan.major]) {
+          depSteps.push({
+            ecosystem: u.ecosystem, pkg: u.name, from: u.from, to: u.to, kind: u.kind,
+            outcome: "skipped", detail: "the uploaded source could not be kept as a snapshot first",
+          });
+        }
+        depPlan = undefined;
+      }
+    }
+
     let withDeps: Awaited<ReturnType<typeof deployApp>> | undefined;
+    let depsHalted = false;
     if (depPlan && depPlan.compatible.length > 0) {
       const stage = await runDepStage({
         app, tar, dockerfile: dockerfileText, updates: depPlan.compatible, strict: false,
         baseline: currentFindings, kev, plan, quarantined, previousStatus,
-        originalDeployId: source.deployId, log,
+        originalDeployId, log,
       });
       depSteps.push(...stage.steps);
+      depsHalted = stage.halted;
       if (stage.result && stage.tar) {
         withDeps = stage.result;
         liveTar = stage.tar;
@@ -315,7 +351,7 @@ export async function rebuildApp(
 
     // Major dependency jumps: one package per build, each on top of what
     // is live, so one that does not build or start costs nothing but time.
-    if (depPlan && depPlan.major.length > 0 && result.scan.status !== "skipped") {
+    if (depPlan && depPlan.major.length > 0 && !depsHalted && result.scan.status !== "skipped") {
       let tried = 0;
       for (const update of depPlan.major) {
         const live = result.scan.findings.filter((f) => f.source === "image");
@@ -332,7 +368,7 @@ export async function rebuildApp(
         const stage = await runDepStage({
           app, tar: liveTar, dockerfile: dockerfileText, updates: [update], strict: true,
           baseline: live, kev, plan, quarantined: false, previousStatus: "running",
-          originalDeployId: source.deployId, log,
+          originalDeployId, log,
         });
         depSteps.push(...stage.steps);
         if (stage.result && stage.tar) {
@@ -508,7 +544,7 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
         const reason = rebuildReason(
           getLatestPeriodicScanFindings(a.id),
           kevList.ids,
-          { deps: !!a.auto_update_deps }
+          a.auto_update_deps ? { deps: true, skip: recentDepFailures(a.id) } : {}
         );
         if (reason) reasons.set(a.id, reason);
         return reason !== null;

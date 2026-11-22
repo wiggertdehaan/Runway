@@ -164,3 +164,17 @@ describe("summarizeRun with dependency updates", () => {
     expect(text).not.toContain("other");
   });
 });
+
+describe("rebuildReason and updates that failed recently", () => {
+  const high: Finding = {
+    id: "CVE-5", severity: "HIGH", source: "image", pkg: "setuptools", version: "70.3.0",
+    fixedVersion: "78.1.1", pkgType: "python-pkg",
+  };
+  it("does not select an app for an update that is being left alone", () => {
+    expect(rebuildReason([high], kev, { deps: true })).toContain("high with fix");
+    expect(rebuildReason([high], kev, { deps: true, skip: new Set(["python:setuptools@78.1.1"]) })).toBeNull();
+  });
+  it("does not select for a version it cannot order", () => {
+    expect(rebuildReason([{ ...high, version: "70.3.0rc1" }], kev, { deps: true })).toBeNull();
+  });
+});

@@ -10,6 +10,7 @@ import {
   parseTarListing,
   requirementFiles,
   requirementsInDockerfile,
+  safeMemberName,
   type LockSync,
 } from "./dep-apply.js";
 import type { DepUpdate } from "./dep-updates.js";
@@ -232,5 +233,61 @@ describe("applyDepUpdates", () => {
     );
     expect(r.applied.map((u) => u.name).sort()).toEqual(["pillow", "qs"]);
     expect(r.files.sort()).toEqual(["package.json", "requirements.txt"]);
+  });
+});
+
+describe("untrusted member names", () => {
+  it("accepts ordinary names", () => {
+    for (const ok of ["requirements.txt", "./requirements.txt", "api/requirements.txt", "./a/b.c/package.json", "my file.txt"]) {
+      expect(safeMemberName(ok)).toBe(true);
+    }
+  });
+  it("rejects names tar would read as an option", () => {
+    expect(safeMemberName("--to-command=sh -c id #/requirements.txt")).toBe(false);
+    expect(safeMemberName("-rf")).toBe(false);
+  });
+  it("rejects absolute paths and parent-directory segments", () => {
+    expect(safeMemberName("/etc/requirements.txt")).toBe(false);
+    expect(safeMemberName("../../requirements.txt")).toBe(false);
+    expect(safeMemberName("./a/../../requirements.txt")).toBe(false);
+    expect(safeMemberName("")).toBe(false);
+    expect(safeMemberName("a\nb")).toBe(false);
+  });
+  it("never treats such a member as a manifest", () => {
+    const members = parseTarListing(
+      [
+        "-rw-r--r-- 0/0 9 2026-11-22 10:00 --to-command=touch /tmp/pwned #/requirements.txt",
+        "-rw-r--r-- 0/0 9 2026-11-22 10:00 ../../requirements.txt",
+        "-rw-r--r-- 0/0 9 2026-11-22 10:00 /abs/requirements.txt",
+      ].join("\n")
+    );
+    expect(members.every((m) => !m.regular)).toBe(true);
+    expect(requirementFiles(members)).toEqual([]);
+  });
+  it("does not run a command smuggled in as a member name", async () => {
+    const marker = join(work, "pwned");
+    const evil = `--to-command=touch ${marker} #`;
+    // Build the tar by hand: a directory whose name is the payload.
+    const dir = join(work, "evilsrc");
+    mkdirSync(join(dir, evil), { recursive: true });
+    writeFileSync(join(dir, evil, "requirements.txt"), "pillow==12.3.0\n");
+    const out = join(work, "evil.tar");
+    execFileSync("tar", ["-cf", out, "-C", dir, "--", `${evil}/requirements.txt`]);
+    const tar = readFileSync(out);
+    const r = await applyDepUpdates(tar, [upd("python", "pillow", "12.3.0", "13.0.0")], {
+      appId: "a1", dockerfile: null, lockSync: noLockSync,
+    });
+    expect(r.applied).toEqual([]);
+    expect(r.tar).toBe(tar);
+    expect(() => readFileSync(marker)).toThrow();
+  });
+  it("says so when the manifest already asks for the fixed version", async () => {
+    const tar = makeTar({ "requirements.txt": "setuptools>=78.1.1\n" });
+    const r = await applyDepUpdates(tar, [upd("python", "setuptools", "70.3.0", "78.1.1")], {
+      appId: "a1", dockerfile: null, lockSync: noLockSync,
+    });
+    expect(r.applied).toEqual([]);
+    expect(r.tar).toBe(tar);
+    expect(r.skipped[0].reason).toContain("already asks for it");
   });
 });

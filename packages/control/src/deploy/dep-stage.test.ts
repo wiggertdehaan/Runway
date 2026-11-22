@@ -70,6 +70,7 @@ function ctx(over: Partial<DepStageContext> = {}): DepStageContext {
     originalDeployId: 41,
     log: { log() {}, warn() {}, error() {} },
     lockSync: async () => { throw new Error("no lockfile expected"); },
+    isServing: async () => true,
     ...over,
   };
 }
@@ -183,5 +184,46 @@ describe("runDepStage", () => {
     expect(m.recentDepFailures(c.app.id).size).toBe(1);
     m.recordDepAttempt(c.app.id, "python:pillow@13.0.0", "applied");
     expect(m.recentDepFailures(c.app.id).size).toBe(0);
+  });
+});
+
+describe("runDepStage when the new container could not be started", () => {
+  const boom = (async () => {
+    throw new Error("no such image");
+  }) as DepStageContext["deploy"];
+
+  it("brings the previous image back instead of reporting 'running'", async () => {
+    const restored: string[] = [];
+    const c = ctx({
+      deploy: boom,
+      isServing: async () => false,
+      restore: (async (app: { id: string; image_tag: string | null }) => {
+        restored.push(app.image_tag!);
+        m.updateApp(app.id, { status: "running" });
+      }) as DepStageContext["restore"],
+    });
+    m.updateApp(c.app.id, { status: "starting" });
+    const out = await m.runDepStage(c);
+    expect(restored).toEqual(["img:old"]);
+    expect(out.halted).toBe(true);
+    expect(out.steps[0].outcome).toBe("failed");
+    expect(m.getApp(c.app.id)!.status).toBe("running");
+  });
+
+  it("marks the app failed when it is down and cannot be restored", async () => {
+    const c = ctx({
+      deploy: boom,
+      isServing: async () => false,
+      restore: (async () => { throw new Error("docker down"); }) as DepStageContext["restore"],
+    });
+    const out = await m.runDepStage(c);
+    expect(out.halted).toBe(true);
+    expect(m.getApp(c.app.id)!.status).toBe("failed");
+  });
+
+  it("remembers an update it could not place, so it is not retried weekly", async () => {
+    const c = ctx({ updates: [{ ...pillow, ecosystem: "node", name: "qs", to: "6.16.1" }] });
+    await m.runDepStage(c);
+    expect([...m.recentDepFailures(c.app.id)]).toEqual(["node:qs@6.16.1"]);
   });
 });

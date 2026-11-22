@@ -14,8 +14,11 @@ import type { BasePlan } from "./base-images.js";
 import { applyDepUpdates, lockSyncViaBuildKit, type LockSync } from "./dep-apply.js";
 import { depKey, describeUpdate, type DepUpdate } from "./dep-updates.js";
 import { evaluateDepGate, requireKevFree } from "./gate.js";
+import { getContainerStatus } from "./docker.js";
 import {
+  appContainerName,
   deployApp,
+  restoreApp,
   PreflightRejectedError,
   ScanBlockedError,
   UnhealthyDeployError,
@@ -47,6 +50,17 @@ export interface DepStageContext {
   /** Injectable for tests. */
   deploy?: typeof deployApp;
   lockSync?: LockSync;
+  /** Is the app's container running? Injectable for tests. */
+  isServing?: (appId: string) => Promise<boolean>;
+  restore?: typeof restoreApp;
+}
+
+async function containerRunning(appId: string): Promise<boolean> {
+  try {
+    return (await getContainerStatus(appContainerName(appId))).state === "running";
+  } catch {
+    return false;
+  }
 }
 
 export interface DepStageOutcome {
@@ -87,7 +101,16 @@ export async function runDepStage(ctx: DepStageContext): Promise<DepStageOutcome
     for (const u of ctx.updates) out.steps.push(step(u, "skipped", "could not read the stored source"));
     return out;
   }
-  for (const s of patched.skipped) out.steps.push(step(s.update, "skipped", s.reason));
+  for (const s of patched.skipped) {
+    out.steps.push(step(s.update, "skipped", s.reason));
+    // Remembered like a failure: an update we cannot place must not make
+    // the weekly job pick this app again next week for the same reason.
+    try {
+      recordDepAttempt(app.id, depKey(s.update), "failed", s.reason);
+    } catch {
+      /* the memory is an optimisation, never a reason to fail */
+    }
+  }
   if (patched.applied.length === 0) return out;
 
   const targets = [...new Set(patched.applied.flatMap((u) => u.cves))];
@@ -163,13 +186,36 @@ export async function runDepStage(ctx: DepStageContext): Promise<DepStageOutcome
       out.halted = true;
       return out;
     }
-    restoreStatus();
     if (err instanceof PreflightRejectedError) {
+      restoreStatus();
       fail("failed", err.message);
       return out;
     }
     log.warn(`[rebuild] ${app.id}: build with dependency updates failed: ${err?.message ?? err}`);
     fail("failed", `${err?.message ?? "build failed"}${lastLogLine(err)}`);
+    // A build failure leaves the running container alone. A failure while
+    // starting the new one does not: the old container is already gone by
+    // then. Never report "running" without looking, and bring the previous
+    // image back if the app is down.
+    if (ctx.quarantined) {
+      updateApp(app.id, { status: "quarantined" });
+      return out;
+    }
+    const serving = await (ctx.isServing ?? containerRunning)(app.id);
+    if (serving) {
+      restoreStatus();
+      return out;
+    }
+    out.halted = true;
+    const current = getApp(app.id);
+    try {
+      if (!current?.image_tag) throw new Error("no image to restore");
+      await (ctx.restore ?? restoreApp)(current);
+      log.warn(`[rebuild] ${app.id}: restored ${current.image_tag} after a failed dependency build`);
+    } catch (e: any) {
+      updateApp(app.id, { status: "failed" });
+      log.error(`[rebuild] ${app.id}: app is down and could not be restored: ${e?.message ?? e}`);
+    }
     return out;
   }
 }

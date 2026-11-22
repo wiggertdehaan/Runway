@@ -34,6 +34,19 @@ export interface TarMember {
   regular: boolean;
 }
 
+/**
+ * Pure: is this member name safe to hand to `tar` and to join onto a
+ * directory? Names come from an untrusted tar. One that starts with "-"
+ * would be read by tar as an option (`--to-command=...` runs a program),
+ * and an absolute path or a ".." segment would land outside the staging
+ * directory. Such members are never read or replaced.
+ */
+export function safeMemberName(name: string): boolean {
+  if (!name || name.startsWith("-") || name.startsWith("/")) return false;
+  if (/[\x00-\x1f\\]/.test(name)) return false;
+  return !name.split("/").some((seg) => seg === "..");
+}
+
 /** Pure: parse `tar -tvf` output. */
 export function parseTarListing(listing: string): TarMember[] {
   const out: TarMember[] = [];
@@ -44,7 +57,7 @@ export function parseTarListing(listing: string): TarMember[] {
     let name = m[2];
     if (type === "l") name = name.split(" -> ")[0];
     if (type === "h") name = name.split(" link to ")[0];
-    out.push({ name, path: name.replace(/^(\.\/)+/, ""), regular: type === "-" });
+    out.push({ name, path: name.replace(/^(\.\/)+/, ""), regular: type === "-" && safeMemberName(name) });
   }
   return out;
 }
@@ -130,7 +143,7 @@ export async function applyDepUpdates(
   try {
     const tarPath = join(dir, "ctx.tar");
     writeFileSync(tarPath, tar);
-    const members = parseTarListing(tarRun(["-tvf", tarPath]).toString("utf8"));
+    const members = parseTarListing(tarRun(["--numeric-owner", "-tvf", tarPath]).toString("utf8"));
     const byPath = new Map<string, TarMember[]>();
     for (const m of members) byPath.set(m.path, [...(byPath.get(m.path) ?? []), m]);
     /** The member for a path, only when it is one regular file. */
@@ -139,7 +152,7 @@ export async function applyDepUpdates(
       return all.length === 1 && all[0].regular ? all[0] : null;
     };
     const read = (m: TarMember): string => {
-      const buf = tarRun(["-xOf", tarPath, m.name], MAX_MANIFEST_BYTES);
+      const buf = tarRun(["-xOf", tarPath, "--", m.name], MAX_MANIFEST_BYTES);
       return buf.toString("utf8");
     };
     const replacements = new Map<TarMember, string>();
@@ -170,10 +183,15 @@ export async function applyDepUpdates(
           const r = rewriteRequirements(texts.get(m)!, us);
           for (const s of r.skipped) skip(us.filter((u) => u.name === s.name), s.reason);
           const done = us.filter((u) => r.applied.includes(u.name));
-          if (done.length > 0 && r.text !== texts.get(m)) {
-            replacements.set(m, r.text);
-            result.applied.push(...done);
+          if (done.length === 0) continue;
+          if (r.text === texts.get(m)) {
+            // Already asked for, yet the scan still finds the old version:
+            // that copy does not come from this file (base image, vendored).
+            skip(done, `${m.path} already asks for it; the vulnerable copy comes from somewhere else`);
+            continue;
           }
+          replacements.set(m, r.text);
+          result.applied.push(...done);
         }
       }
     }
@@ -232,11 +250,13 @@ export async function applyDepUpdates(
     // context sync needs to notice a same-length change.
     const stage = join(dir, "stage");
     for (const [m, text] of replacements) {
+      if (!safeMemberName(m.name)) throw new Error("unsafe member name");
       const target = join(stage, m.name);
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, text);
-      tarRun(["--delete", "-f", tarPath, m.name]);
-      tarRun(["-rf", tarPath, "--owner=0", "--group=0", "-C", stage, m.name]);
+      // `--` ends option parsing: a member name is data, never a flag.
+      tarRun(["--delete", "-f", tarPath, "--", m.name]);
+      tarRun(["-rf", tarPath, "--owner=0", "--group=0", "-C", stage, "--", m.name]);
       result.files.push(m.path);
     }
     result.tar = readFileSync(tarPath);
@@ -279,7 +299,7 @@ export const lockSyncViaBuildKit: LockSync = async (input) => {
     writeFileSync(join(ctx, "Dockerfile"), lockSyncDockerfile(input.nodeImage));
     const tarPath = join(dir, "ctx.tar");
     tarRun(["-cf", tarPath, "-C", ctx, "."]);
-    await buildImageFromTar(readFileSync(tarPath), { imageTag });
+    await buildImageFromTar(readFileSync(tarPath), { imageTag, noCache: true });
     const lock = await readFileFromImage(imageTag, "/package-lock.json", MAX_MANIFEST_BYTES * 4);
     return lock.toString("utf8");
   } finally {
