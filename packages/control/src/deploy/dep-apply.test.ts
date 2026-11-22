@@ -266,13 +266,16 @@ describe("untrusted member names", () => {
   });
   it("does not run a command smuggled in as a member name", async () => {
     const marker = join(work, "pwned");
-    const evil = `--to-command=touch ${marker} #`;
+    // The form that really executes with GNU tar when "--" is missing.
+    const evil = `--checkpoint-action=exec=touch ${marker} #`;
     // Build the tar by hand: a directory whose name is the payload.
     const dir = join(work, "evilsrc");
     mkdirSync(join(dir, evil), { recursive: true });
     writeFileSync(join(dir, evil, "requirements.txt"), "pillow==12.3.0\n");
+    // Checkpoints fire every 10 records, so the tar needs some bulk.
+    writeFileSync(join(dir, "big.bin"), Buffer.alloc(300_000, 7));
     const out = join(work, "evil.tar");
-    execFileSync("tar", ["-cf", out, "-C", dir, "--", `${evil}/requirements.txt`]);
+    execFileSync("tar", ["-cf", out, "-C", dir, "--", "big.bin", `${evil}/requirements.txt`]);
     const tar = readFileSync(out);
     const r = await applyDepUpdates(tar, [upd("python", "pillow", "12.3.0", "13.0.0")], {
       appId: "a1", dockerfile: null, lockSync: noLockSync,
