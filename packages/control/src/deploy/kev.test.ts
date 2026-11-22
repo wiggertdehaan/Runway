@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -10,7 +10,7 @@ const CACHE = vi.hoisted(() => {
   return path;
 });
 
-import { parseKevFeed, kevFindings, getKevList, KEV_URL, KEV_MIRROR_URL } from "./kev.js";
+import { parseKevFeed, kevFindings, getKevList, KEV_URL, KEV_MIRROR_URL, KEV_RETRY_BACKOFF_MS } from "./kev.js";
 import type { Finding } from "./scan.js";
 
 const f = (id: string, source: Finding["source"] = "image"): Finding => ({ id, severity: "HIGH", source });
@@ -57,7 +57,14 @@ describe("getKevList", () => {
     return fetchedAt;
   };
 
-  beforeEach(() => rmSync(CACHE, { force: true }));
+  // The retry backoff is module state; every test starts a fresh "day" past it.
+  let clock = Date.now();
+  beforeEach(() => {
+    rmSync(CACHE, { force: true });
+    clock += 10 * KEV_RETRY_BACKOFF_MS;
+    vi.useFakeTimers({ toFake: ["Date"], now: clock });
+  });
+  afterEach(() => vi.useRealTimers());
   afterAll(() => rmSync(dirname(CACHE), { recursive: true, force: true }));
 
   it("uses the primary feed and does not touch the mirror when it works", async () => {
@@ -122,5 +129,23 @@ describe("getKevList", () => {
     expect(log.warn).toHaveBeenCalledTimes(1);
     expect(log.warn.mock.calls[0][0]).toContain("www.cisa.gov: HTTP 503");
     expect(log.warn.mock.calls[0][0]).toContain("raw.githubusercontent.com: HTTP 403");
+  });
+
+  it("skips the network for a while after every source failed, then retries", async () => {
+    const dead = fetcher({ [KEV_URL]: denied, [KEV_MIRROR_URL]: denied });
+    const log = quiet();
+    await getKevList(dead.fn, log);
+    expect(dead.asked).toEqual([KEV_URL, KEV_MIRROR_URL]);
+    // Within the backoff: no requests, still the stale/empty answer.
+    vi.setSystemTime(clock + KEV_RETRY_BACKOFF_MS - 1000);
+    const during = await getKevList(dead.fn, log);
+    expect(during.stale).toBe(true);
+    expect(dead.asked).toHaveLength(2);
+    // After it: tries again, and a working source recovers the list.
+    vi.setSystemTime(clock + KEV_RETRY_BACKOFF_MS + 1000);
+    const live = fetcher({ [KEV_URL]: () => feed("CVE-2024-1") });
+    const after = await getKevList(live.fn, log);
+    expect(after.stale).toBe(false);
+    expect(live.asked).toEqual([KEV_URL]);
   });
 });

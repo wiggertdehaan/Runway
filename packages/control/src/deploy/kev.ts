@@ -110,6 +110,14 @@ async function fetchFeed(url: string, fetchFn: typeof fetch): Promise<Set<string
  */
 let lastFailureLogged: string | null = null;
 
+/**
+ * After a round in which every source failed, skip the network for a
+ * while. Two time-outs cost ~40 s, and the app page asks for the list on
+ * each request. Reset on success; tests can pass `now` to step past it.
+ */
+export const KEV_RETRY_BACKOFF_MS = 5 * 60 * 1000;
+let retryNotBefore = 0;
+
 export async function getKevList(
   fetchFn: typeof fetch = fetch,
   log: Logger = console
@@ -118,6 +126,11 @@ export async function getKevList(
   if (cached && Date.now() - Date.parse(cached.fetchedAt) < TTL_MS) {
     return { ids: new Set(cached.ids), fetchedAt: cached.fetchedAt, stale: false };
   }
+  const staleResult = (): KevList =>
+    cached
+      ? { ids: new Set(cached.ids), fetchedAt: cached.fetchedAt, stale: true }
+      : { ids: new Set(), fetchedAt: null, stale: true };
+  if (Date.now() < retryNotBefore) return staleResult();
   const failures: string[] = [];
   for (const url of KEV_SOURCES) {
     try {
@@ -128,11 +141,13 @@ export async function getKevList(
       if (failures.length > 0) log.warn(`${from}; failed first: ${failures.join("; ")}`);
       else log.log(from);
       lastFailureLogged = null;
+      retryNotBefore = 0;
       return { ids, fetchedAt, stale: false };
     } catch (err: any) {
       failures.push(`${hostOf(url)}: ${err?.message ?? err}`);
     }
   }
+  retryNotBefore = Date.now() + KEV_RETRY_BACKOFF_MS;
   const summary = failures.join("; ");
   if (summary !== lastFailureLogged) {
     lastFailureLogged = summary;
@@ -142,8 +157,5 @@ export async function getKevList(
       }`
     );
   }
-  if (cached) {
-    return { ids: new Set(cached.ids), fetchedAt: cached.fetchedAt, stale: true };
-  }
-  return { ids: new Set(), fetchedAt: null, stale: true };
+  return staleResult();
 }
