@@ -1304,10 +1304,14 @@ function renderScanSection(
             <input type="hidden" name="enabled" value="${app.auto_minor_base ? "0" : "1"}" />
             <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-minor escalation: ${app.auto_minor_base ? "on (turn off)" : "off (turn on)"}</button>
           </form>
-          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-deps" style="margin:0" title="On rebuild, raise the app's own packages (requirements.txt, package.json) that have a known vulnerability with a fix, including major versions. Each update only goes live if the scan improves and the app still starts; otherwise the previous version stays. The changed files are saved as a new source snapshot; the source you uploaded stays available under Deploys.">
+          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-deps" style="margin:0" title="On rebuild, raise the app's own packages (requirements.txt, package.json) that have a known vulnerability with a fix, within the installed major version (major jumps have their own switch below). Each update only goes live if the scan improves and the app still starts; otherwise the previous version stays. The changed files are saved as a new source snapshot; the source you uploaded stays available under Deploys.">
             <input type="hidden" name="enabled" value="${app.auto_update_deps ? "0" : "1"}" />
             <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-update vulnerable dependencies: ${app.auto_update_deps ? "on (turn off)" : "off (turn on)"}</button>
           </form>
+          ${app.auto_update_deps ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-deps-major" style="margin:0" title="Also allow major version jumps (pillow 12 to 13). Off by default: a healthcheck only proves the app starts, not that a major update leaves it working. When off, a rebuild reports the major update that is available instead of building it.">
+            <input type="hidden" name="enabled" value="${app.auto_update_deps_major ? "0" : "1"}" />
+            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Also allow major version updates: ${app.auto_update_deps_major ? "on (turn off)" : "off (turn on)"}</button>
+          </form>` : ""}
         </div>`
       : "";
 
@@ -3022,6 +3026,19 @@ webRoutes.post("/apps/:id/auto-deps", async (c) => {
   const body = await c.req.parseBody();
   updateApp(app.id, { auto_update_deps: body["enabled"] === "1" ? 1 : 0 });
   logAudit(user.id, user.username, "app_auto_deps_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+webRoutes.post("/apps/:id/auto-deps-major", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_update_deps_major: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_deps_major_toggled", {
     detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
   });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);

@@ -43,6 +43,7 @@ export interface App {
   auto_patch_base: number;
   auto_minor_base: number;
   auto_update_deps: number;
+  auto_update_deps_major: number;
   basic_auth_enabled: number;
   basic_auth_username: string | null;
   basic_auth_htpasswd: string | null;
@@ -114,6 +115,7 @@ type UpdatableAppFields = Partial<
     | "auto_patch_base"
     | "auto_minor_base"
     | "auto_update_deps"
+    | "auto_update_deps_major"
     | "basic_auth_enabled"
     | "basic_auth_username"
     | "basic_auth_htpasswd"

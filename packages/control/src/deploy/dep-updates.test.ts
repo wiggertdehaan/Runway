@@ -13,6 +13,7 @@ import {
   rewritePackageJson,
   rewriteRequirements,
   sameLine,
+  withholdMajors,
 } from "./dep-updates.js";
 import type { Finding } from "./scan.js";
 
@@ -271,5 +272,35 @@ describe("rewritePackageJson", () => {
     const r = rewritePackageJson("{nope", [{ name: "qs", to: "6.16.1" }]);
     expect(r.applied).toEqual([]);
     expect(r.skipped[0].reason).toContain("not valid JSON");
+  });
+});
+
+describe("withholdMajors", () => {
+  const findings = [
+    py("CVE-A", "setuptools", "70.3.0", "70.5.0"),
+    py("CVE-B", "pillow", "12.3.0", "13.0.0"),
+    py("CVE-C", "pillow", "12.3.0", "13.0.0"),
+  ];
+  it("does not build a major by default, but reports it", () => {
+    const { plan, withheld } = withholdMajors(planDepUpdates(findings, none), false);
+    expect(plan.major).toEqual([]);
+    expect(plan.compatible.map((u) => u.name)).toEqual(["setuptools"]);
+    expect(withheld).toEqual([
+      {
+        ecosystem: "python", pkg: "pillow", from: "12.3.0", to: "13.0.0", kind: "major", outcome: "skipped",
+        detail: "major available: pillow 13.0.0 fixes 2 findings; enable major updates to apply",
+      },
+    ]);
+  });
+  it("keeps the major in the plan when the app opted in", () => {
+    const planned = planDepUpdates(findings, none);
+    const { plan, withheld } = withholdMajors(planned, true);
+    expect(plan.major.map((u) => u.name)).toEqual(["pillow"]);
+    expect(withheld).toEqual([]);
+  });
+  it("leaves the compatible path unchanged either way", () => {
+    const planned = planDepUpdates(findings, none);
+    expect(withholdMajors(planned, false).plan.compatible).toEqual(planned.compatible);
+    expect(withholdMajors(planned, true).plan.compatible).toEqual(planned.compatible);
   });
 });
