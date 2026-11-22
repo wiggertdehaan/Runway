@@ -332,6 +332,18 @@ function isRegistryRange(spec: string): boolean {
   return /^[\^~<>=\s\d.xX*|-]+$/.test(spec) || /^[a-z][a-z0-9-]*$/.test(spec);
 }
 
+/**
+ * The new range for a direct dependency, in the style the owner used: an
+ * exact pin stays exact, a tilde range stays a tilde range, everything
+ * else becomes a caret range.
+ */
+export function raiseRange(spec: string, to: string): string {
+  const s = spec.trim();
+  if (/^v?\d+(\.\d+)*$/.test(s)) return to;
+  if (s.startsWith("~")) return `~${to}`;
+  return `^${to}`;
+}
+
 function detectIndent(text: string): string | number {
   const m = /^\{\r?\n([ \t]+)"/.exec(text);
   return m ? m[1] : 2;
@@ -373,7 +385,7 @@ export function rewritePackageJson(
         blocked = "not installed from the npm registry by version";
         break;
       }
-      deps[u.name] = range;
+      deps[u.name] = raiseRange(deps[u.name], u.to);
     }
     if (blocked) {
       out.skipped.push({ name: u.name, reason: blocked });

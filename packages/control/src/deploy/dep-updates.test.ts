@@ -7,6 +7,7 @@ import {
   ecosystemOf,
   parseVersion,
   planDepUpdates,
+  raiseRange,
   raiseSpecifier,
   requirementsMention,
   rewritePackageJson,
@@ -235,6 +236,14 @@ describe("rewritePackageJson", () => {
     expect(r.applied).toEqual(["nodemailer"]);
     expect(JSON.parse(r.text).dependencies.nodemailer).toBe("^10.0.6");
     expect(JSON.parse(r.text).overrides).toBeUndefined();
+  });
+  it("keeps the owner's pin style for a direct dependency", () => {
+    expect(raiseRange("16.2.11", "16.4.1")).toBe("16.4.1");
+    expect(raiseRange("~1.2.3", "1.2.9")).toBe("~1.2.9");
+    expect(raiseRange("^9.0.1", "9.1.0")).toBe("^9.1.0");
+    expect(raiseRange(">=1 <2", "1.5.0")).toBe("^1.5.0");
+    const exact = JSON.stringify({ dependencies: { next: "16.2.11" } });
+    expect(JSON.parse(rewritePackageJson(exact, [{ name: "next", to: "16.4.1" }]).text).dependencies.next).toBe("16.4.1");
   });
   it("forces a transitive dependency through overrides", () => {
     const r = rewritePackageJson(pkg, [{ name: "proxy-addr", to: "2.0.8" }]);
