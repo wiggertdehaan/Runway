@@ -36,6 +36,17 @@ export interface RebuildAppResult {
     outcome: "applied" | "blocked" | "unhealthy" | "failed" | "notice";
     detail: string;
   }>;
+  /** Vulnerable app dependencies the rebuild raised, or tried to. */
+  deps?: Array<{
+    ecosystem: "python" | "node";
+    pkg: string;
+    from: string;
+    to: string;
+    kind: "compatible" | "major";
+    /** "ineffective": in the source now, but the scan still shows the finding. */
+    outcome: "applied" | "ineffective" | "blocked" | "unhealthy" | "failed" | "skipped";
+    detail?: string;
+  }>;
   duration_s?: number;
 }
 

@@ -1304,6 +1304,10 @@ function renderScanSection(
             <input type="hidden" name="enabled" value="${app.auto_minor_base ? "0" : "1"}" />
             <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-minor escalation: ${app.auto_minor_base ? "on (turn off)" : "off (turn on)"}</button>
           </form>
+          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-deps" style="margin:0" title="On rebuild, raise the app's own packages (requirements.txt, package.json) that have a known vulnerability with a fix, including major versions. Each update only goes live if the scan improves and the app still starts; otherwise the previous version stays. The changed files are saved as a new source snapshot; the source you uploaded stays available under Deploys.">
+            <input type="hidden" name="enabled" value="${app.auto_update_deps ? "0" : "1"}" />
+            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-update vulnerable dependencies: ${app.auto_update_deps ? "on (turn off)" : "off (turn on)"}</button>
+          </form>
         </div>`
       : "";
 
@@ -2711,6 +2715,35 @@ function renderEscalation(r: RebuildAppResult): string {
     .join("");
 }
 
+const DEP_OUTCOME_BADGE: Record<string, string> = {
+  applied: "badge-running",
+  ineffective: "badge-building",
+  blocked: "badge-stopped",
+  unhealthy: "badge-stopped",
+  failed: "badge-stopped",
+};
+
+/** Dependency updates of one rebuild: what was raised, and what was not. */
+function renderDeps(r: RebuildAppResult): string {
+  return (r.deps ?? [])
+    .map((d) => {
+      if (d.outcome === "skipped") {
+        const what = d.to ? `${d.pkg} ${d.to}` : d.pkg;
+        return `<div style="margin-bottom:0.25rem"><span class="badge badge-stopped">dependency skipped</span> ${escapeHtml(what)}: ${escapeHtml(d.detail ?? "")}</div>`;
+      }
+      const label =
+        d.outcome === "applied"
+          ? "dependency updated"
+          : d.outcome === "ineffective"
+            ? "dependency raised, finding remains"
+            : `dependency ${d.outcome}`;
+      const move = `${escapeHtml(d.pkg)} ${escapeHtml(d.from)} &rarr; ${escapeHtml(d.to)}${d.kind === "major" ? " (major)" : ""}`;
+      const why = d.outcome === "applied" || !d.detail ? "" : `: ${escapeHtml(d.detail)}`;
+      return `<div style="margin-bottom:0.25rem"><span class="badge ${DEP_OUTCOME_BADGE[d.outcome] ?? ""}">${escapeHtml(label)}</span> ${move}${why}</div>`;
+    })
+    .join("");
+}
+
 function renderBases(r: RebuildAppResult): string {
   const lines = (r.base_images ?? []).map((b) => {
     const short = b.image.replace(/^docker\.io\/(library\/)?/, "");
@@ -2735,7 +2768,7 @@ function renderRebuildResults(run: RebuildRun): string {
         <td>${renderCounts(r.before)}</td>
         <td>${renderCounts(r.after)}</td>
         <td class="meta">${renderBases(r)}</td>
-        <td class="meta">${renderEscalation(r)}${escapeHtml(r.detail ?? "")}${r.duration_s !== undefined ? ` (${r.duration_s}s)` : ""}</td>
+        <td class="meta">${renderEscalation(r)}${renderDeps(r)}${escapeHtml(r.detail ?? "")}${r.duration_s !== undefined ? ` (${r.duration_s}s)` : ""}</td>
       </tr>`
     )
     .join("");
@@ -2976,6 +3009,19 @@ webRoutes.post("/apps/:id/auto-minor", async (c) => {
   const body = await c.req.parseBody();
   updateApp(app.id, { auto_minor_base: body["enabled"] === "1" ? 1 : 0 });
   logAudit(user.id, user.username, "app_auto_minor_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+webRoutes.post("/apps/:id/auto-deps", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_update_deps: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_deps_toggled", {
     detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
   });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);

@@ -821,8 +821,13 @@ curl -sS "${base}/api/v1/app/source?deploy=42" \\
 
 Notes:
 
-- The source is whatever was uploaded on that deploy — the same file
-  set the build saw, post \`.dockerignore\` / \`.gitignore\` filtering.
+- The source is the file set the build of that deploy saw, post
+  \`.dockerignore\` / \`.gitignore\` filtering. That is what was uploaded,
+  with one exception: when Runway rebuilt the app and raised vulnerable
+  dependencies (see "Automatic dependency updates"), the snapshot of that
+  deploy has the edited \`requirements.txt\` / \`package.json\` /
+  \`package-lock.json\`. **Pull the latest source before you continue
+  working on an app**, or your next deploy brings the old versions back.
   **\`.git\` history is not included**; initialize a fresh repo with
   \`git init\` after extracting if you want version control.
 - A snapshot is saved on every successful deploy. The most recent
@@ -831,6 +836,39 @@ Notes:
 - Returns **404** if no matching source exists — no successful deploy
   yet, the app last deployed before this feature was added (redeploy
   once to populate it), or the requested deploy's snapshot was pruned.
+
+## Automatic dependency updates
+
+Runway rebuilds apps on its own (weekly, and before an app with an
+actively exploited vulnerability is taken offline). A rebuild also
+raises the app's own packages when the scan shows a vulnerability with
+a published fix (actively exploited, CRITICAL or HIGH):
+
+- Python: \`requirements*.txt\` (a listed package gets its version
+  raised; a transitive one is appended as a minimum version).
+- Node: \`package.json\` (direct dependency range, or \`overrides\` for a
+  transitive one) and \`package-lock.json\`. yarn, pnpm and bun lockfiles,
+  \`pyproject.toml\` and \`Pipfile\` are not handled yet.
+
+Updates within the installed major go first, in one build. Major jumps
+follow one package at a time. Every such build goes live only if its
+scan is not worse, it removes findings it was meant to remove (a single
+package: all of them; several at once: at least one, and a package
+whose finding remains is reported as such), and the container passes
+its healthcheck. Otherwise the previous version keeps running; if
+several packages were tried at once they are retried one at a time, and
+a version that failed is not retried by the weekly job for 14 days.
+
+What this means for you:
+
+- The app page lists what was changed (owner notice), and the deploy
+  that carries the change has the edited files as its source snapshot.
+- The source as it was uploaded stays available as the snapshot of the
+  earlier deploy, as long as it is within the retention window.
+- An admin can turn this off per app ("Auto-update vulnerable
+  dependencies" on the app page).
+- A healthcheck only proves the app starts. If a major update breaks a
+  feature, pin the old version in a new deploy, or roll back.
 
 ## Error handling
 

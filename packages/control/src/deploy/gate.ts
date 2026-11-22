@@ -86,6 +86,40 @@ export function evaluateEscalationGate(
 }
 
 /**
+ * Gate for a build with raised dependencies: not worse than what runs now
+ * (same rule as any rebuild) AND the update did something. A batch of
+ * compatible updates passes when at least one targeted finding is gone
+ * (one package that could not be raised must not hold back the rest); a
+ * single major update (`strict`) must remove everything it was for,
+ * otherwise the jump was pointless.
+ */
+export function evaluateDepGate(
+  current: Finding[] | null,
+  next: ScanResult,
+  kev: Set<string>,
+  targets: string[],
+  strict: boolean
+): GateVerdict {
+  const base = evaluateRebuildGate(current, next, kev);
+  if (!base.allow) return base;
+  const present = new Set(
+    next.findings.filter((f) => f.source === "image").map((f) => f.id.toUpperCase())
+  );
+  const left = targets.filter((id) => present.has(id.toUpperCase()));
+  const list = left.slice(0, 3).join(", ") + (left.length > 3 ? `, +${left.length - 3} more` : "");
+  if (strict && left.length > 0) {
+    return { allow: false, reason: `dependency update did not remove ${list}` };
+  }
+  if (!strict && targets.length > 0 && left.length === targets.length) {
+    return { allow: false, reason: `dependency updates removed none of the targeted findings (${list})` };
+  }
+  return {
+    allow: true,
+    reason: `dependency update removes ${targets.length - left.length} of ${targets.length} targeted finding(s)`,
+  };
+}
+
+/**
  * A quarantined app may only go back online with a build that is free of
  * actively exploited CVEs; "not worse" is not enough there.
  */

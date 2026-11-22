@@ -130,3 +130,51 @@ describe("summarizeRun with base patches", () => {
     expect(text).toContain("X: blocked: new build is worse");
   });
 });
+
+describe("rebuildReason with dependency updates", () => {
+  const dep = (id: string, severity: Finding["severity"], pkgType: string, fixedVersion?: string): Finding => ({
+    id, severity, source: "image", pkg: "p", version: "1.0.0", fixedVersion, pkgType,
+  });
+  it("selects a fixable HIGH in an app package only when the app allows updates", () => {
+    const findings = [dep("CVE-5", "HIGH", "python-pkg", "1.0.1")];
+    expect(rebuildReason(findings, kev)).toBeNull();
+    expect(rebuildReason(findings, kev, { deps: true })).toBe("1 high with fix in app dependencies");
+  });
+  it("does not select for OS packages, or for a HIGH without a fix", () => {
+    expect(rebuildReason([dep("CVE-5", "HIGH", "alpine", "1.0.1")], kev, { deps: true })).toBeNull();
+    expect(rebuildReason([dep("CVE-5", "HIGH", "node-pkg")], kev, { deps: true })).toBeNull();
+  });
+});
+
+describe("summarizeRun with dependency updates", () => {
+  const base: RebuildAppResult = { app_id: "a", app_name: "meldingen", outcome: "rebuilt", before: null, after: null };
+  it("lists what was raised and what was not", () => {
+    const text = summarizeRun("scheduled", [
+      {
+        ...base,
+        deps: [
+          { ecosystem: "python", pkg: "setuptools", from: "70.3.0", to: "78.1.1", kind: "compatible", outcome: "applied" },
+          { ecosystem: "python", pkg: "pillow", from: "12.3.0", to: "13.0.0", kind: "major", outcome: "unhealthy", detail: "x" },
+          { ecosystem: "python", pkg: "other", from: "", to: "", kind: "compatible", outcome: "skipped", detail: "y" },
+        ],
+      },
+    ]);
+    expect(text).toContain("[deps setuptools 70.3.0→78.1.1]");
+    expect(text).toContain("[deps not applied: pillow 13.0.0 unhealthy]");
+    expect(text).not.toContain("other");
+  });
+});
+
+describe("rebuildReason and updates that failed recently", () => {
+  const high: Finding = {
+    id: "CVE-5", severity: "HIGH", source: "image", pkg: "setuptools", version: "70.3.0",
+    fixedVersion: "78.1.1", pkgType: "python-pkg",
+  };
+  it("does not select an app for an update that is being left alone", () => {
+    expect(rebuildReason([high], kev, { deps: true })).toContain("high with fix");
+    expect(rebuildReason([high], kev, { deps: true, skip: new Set(["python:setuptools@78.1.1"]) })).toBeNull();
+  });
+  it("does not select for a version it cannot order", () => {
+    expect(rebuildReason([{ ...high, version: "70.3.0rc1" }], kev, { deps: true })).toBeNull();
+  });
+});

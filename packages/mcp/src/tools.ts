@@ -178,7 +178,7 @@ export function registerTools(server: McpServer, client: RunwayClient) {
 
   server.tool(
     "runway_pull",
-    "Pull the project source of a deployed Runway app back to a local directory. Useful when starting a fresh Claude Code session and you want to continue developing an app you previously deployed but no longer have a local copy of. The server returns the build context from a successful deploy (no .git history — only the files that were uploaded); defaults to the most recent. Pass 'deploy' to fetch a specific deploy's snapshot (see runway_list_deploys for which ids still have source). Refuses to extract into a non-empty directory unless 'force' is true.",
+    "Pull the project source of a deployed Runway app back to a local directory. Useful when starting a fresh Claude Code session and you want to continue developing an app you previously deployed but no longer have a local copy of. The server returns the build context from a successful deploy (no .git history — only the files that were uploaded, plus any dependency versions Runway raised itself during a rebuild to fix known vulnerabilities, so pull before continuing work on an existing app); defaults to the most recent. Pass 'deploy' to fetch a specific deploy's snapshot (see runway_list_deploys for which ids still have source). Refuses to extract into a non-empty directory unless 'force' is true.",
     {
       target_dir: z
         .string()
