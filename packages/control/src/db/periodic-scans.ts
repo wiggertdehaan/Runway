@@ -60,6 +60,14 @@ export function getLatestPeriodicScan(appId: string): PeriodicScan | undefined {
     .get(appId) as unknown as PeriodicScan | undefined;
 }
 
+/** Ids of every app that has at least one periodic scan on record. */
+export function listPeriodicScanAppIds(): Set<string> {
+  const rows = db
+    .prepare(`SELECT DISTINCT app_id FROM app_periodic_scans`)
+    .all() as unknown as Array<{ app_id: string }>;
+  return new Set(rows.map((r) => r.app_id));
+}
+
 export function getLatestPeriodicScanFindings(appId: string): Finding[] {
   const row = getLatestPeriodicScan(appId);
   if (!row?.scan_report) return [];

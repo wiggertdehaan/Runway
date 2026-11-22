@@ -73,6 +73,12 @@ services:
     command:
       - "--addr"
       - "unix:///run/buildkit/buildkitd.sock"
+      # Cap the build cache. BuildKit defaults to keeping up to 30 GB,
+      # which fills a small server during a rebuild of all apps (20 apps
+      # left 12 GB behind). Format: "reserved,min free,max used" in MB.
+      # Raise it on a large disk with BUILDKIT_GC_KEEPSTORAGE in .env.
+      - "--oci-worker-gc=true"
+      - "--oci-worker-gc-keepstorage=${BUILDKIT_GC_KEEPSTORAGE:-2000,8000,6000}"
     volumes:
       - buildkit-cache:/var/lib/buildkit
       - build-exchange:/exchange
