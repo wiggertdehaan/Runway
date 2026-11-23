@@ -143,9 +143,25 @@ export function countUsers(): number {
   return row.count;
 }
 
-export function deleteUser(id: string): boolean {
-  const result = db.prepare(`DELETE FROM users WHERE id = ?`).run(id);
-  return result.changes > 0;
+/**
+ * Delete a user. Their apps are kept and become ownerless (admin-only) in the
+ * same transaction: a later account with the same username must not inherit
+ * them (S13). Returns how many apps lost their owner, or null when there was
+ * no such user.
+ */
+export function deleteUser(id: string): number | null {
+  db.exec("BEGIN");
+  try {
+    const orphaned = db
+      .prepare(`UPDATE apps SET owner_user_id = NULL, updated_at = datetime('now') WHERE owner_user_id = ?`)
+      .run(id).changes as number;
+    const result = db.prepare(`DELETE FROM users WHERE id = ?`).run(id);
+    db.exec("COMMIT");
+    return result.changes > 0 ? orphaned : null;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }
 
 export async function setPassword(userId: string, password: string): Promise<void> {

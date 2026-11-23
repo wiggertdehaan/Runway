@@ -314,6 +314,18 @@ without knowing why.
   (`oauth_google_client_id`, `oauth_google_client_secret`,
   `oauth_microsoft_client_id`, `oauth_microsoft_client_secret`).
 
+### App ownership is a user id, not a name
+- `apps.owner_user_id` is the only field rights are checked on
+  (`isAppOwner`, `mayRebuild`/`mayRescan`, `requireAppAccess`,
+  `appsVisibleTo`). `apps.created_by` is a historical label that keeps a
+  rollback to an older release working; never compare it with a username.
+- An app with `owner_user_id` NULL has no owner and is admin-only. That is
+  the state after the owner was deleted (`deleteUser` clears it in the same
+  transaction) and for rows that never had an owner.
+- The one-time fill from the old name (`db/owner-migration.ts`) runs only in
+  the transaction that adds the column. Do not make it re-run: it would
+  hand an ownerless app to whoever has since taken that username.
+
 ## Migrations
 
 `packages/control/src/db/index.ts` runs `migrate()` on startup. It

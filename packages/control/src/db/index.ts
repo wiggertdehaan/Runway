@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { ensureUniqueDomainIndexes } from "./domain-index.js";
+import { backfillOwnerUserIds } from "./owner-migration.js";
 
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), "runway.db");
 
@@ -237,6 +238,21 @@ export function migrate() {
   }
   if (!appCols.some((c) => c.name === "created_by")) {
     db.exec(`ALTER TABLE apps ADD COLUMN created_by TEXT`);
+  }
+  // S13: ownership by user id. The column and the one-time fill of it share
+  // a transaction, so a crash cannot leave the column added but empty (the
+  // fill would then never run). See owner-migration.ts for why it must not
+  // be repeated on later starts.
+  if (!appCols.some((c) => c.name === "owner_user_id")) {
+    db.exec("BEGIN");
+    try {
+      db.exec(`ALTER TABLE apps ADD COLUMN owner_user_id TEXT`);
+      backfillOwnerUserIds(db);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   }
   if (!appCols.some((c) => c.name === "scan_threshold")) {
     db.exec(`ALTER TABLE apps ADD COLUMN scan_threshold TEXT NOT NULL DEFAULT 'none'`);

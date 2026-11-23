@@ -26,15 +26,15 @@ const kev = (over: Partial<AtRiskApp> = {}): AtRiskApp => ({
 
 describe("mayRebuild", () => {
   it("lets an admin rebuild any app", () => {
-    expect(mayRebuild({ username: "root", role: "admin" }, { created_by: "alice" })).toBe(true);
-    expect(mayRebuild({ username: "root", role: "admin" }, { created_by: null })).toBe(true);
+    expect(mayRebuild({ id: "u-root", role: "admin" }, { owner_user_id: "u-alice" })).toBe(true);
+    expect(mayRebuild({ id: "u-root", role: "admin" }, { owner_user_id: null })).toBe(true);
   });
   it("lets an owner rebuild their own app only", () => {
-    expect(mayRebuild({ username: "alice", role: "member" }, { created_by: "alice" })).toBe(true);
-    expect(mayRebuild({ username: "bob", role: "member" }, { created_by: "alice" })).toBe(false);
+    expect(mayRebuild({ id: "u-alice", role: "member" }, { owner_user_id: "u-alice" })).toBe(true);
+    expect(mayRebuild({ id: "u-bob", role: "member" }, { owner_user_id: "u-alice" })).toBe(false);
   });
   it("keeps apps without an owner admin-only", () => {
-    expect(mayRebuild({ username: "alice", role: "member" }, { created_by: null })).toBe(false);
+    expect(mayRebuild({ id: "u-alice", role: "member" }, { owner_user_id: null })).toBe(false);
   });
 });
 
@@ -150,14 +150,14 @@ import { mayRescan, rescanBlockedReason } from "./app-page.js";
 
 describe("mayRescan", () => {
   it("allows an admin, the owner, and nobody else", () => {
-    expect(mayRescan({ username: "root", role: "admin" }, { created_by: "alice" })).toBe(true);
-    expect(mayRescan({ username: "alice", role: "member" }, { created_by: "alice" })).toBe(true);
-    expect(mayRescan({ username: "bob", role: "member" }, { created_by: "alice" })).toBe(false);
+    expect(mayRescan({ id: "u-root", role: "admin" }, { owner_user_id: "u-alice" })).toBe(true);
+    expect(mayRescan({ id: "u-alice", role: "member" }, { owner_user_id: "u-alice" })).toBe(true);
+    expect(mayRescan({ id: "u-bob", role: "member" }, { owner_user_id: "u-alice" })).toBe(false);
   });
 
   it("keeps an app without an owner admin-only", () => {
-    expect(mayRescan({ username: "alice", role: "member" }, { created_by: null })).toBe(false);
-    expect(mayRescan({ username: "root", role: "admin" }, { created_by: null })).toBe(true);
+    expect(mayRescan({ id: "u-alice", role: "member" }, { owner_user_id: null })).toBe(false);
+    expect(mayRescan({ id: "u-root", role: "admin" }, { owner_user_id: null })).toBe(true);
   });
 });
 

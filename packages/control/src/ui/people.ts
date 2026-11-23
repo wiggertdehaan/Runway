@@ -83,7 +83,7 @@ function actions(row: PersonRow, ctx: PeopleContext): string {
          </span>
        </form>`
     : "";
-  const deleteForm = `<form method="POST" action="/users/${id}/delete" class="inline-form" onsubmit="return confirm('Delete ${escapeHtml(row.username).replace(/'/g, "&#39;")}? Their sign-in stops working. Their apps stay.')">
+  const deleteForm = `<form method="POST" action="/users/${id}/delete" class="inline-form" onsubmit="return confirm('Delete ${escapeHtml(row.username).replace(/'/g, "&#39;")}? Their sign-in stops working. Their apps stay, with no owner: only admins can manage them.')">
        <button class="danger" type="submit">Delete</button>
      </form>`;
   return `<div class="person-actions">${roleForm}${resetForm}${deleteForm}</div>`;

@@ -31,7 +31,7 @@ const APP_VERSION = (() => {
     return "dev";
   }
 })();
-import { listApps, createApp, deleteApp, getApp, type App } from "../db/apps.js";
+import { listApps, createApp, deleteApp, getApp, ownerUsernameOf, type App } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import {
@@ -251,9 +251,10 @@ function escapeHtml(value: string): string {
 function layout(
   title: string,
   body: string,
-  opts?: { username?: string; csrf?: string; isAdmin?: boolean }
+  opts?: { username?: string; userId?: string; csrf?: string; isAdmin?: boolean }
 ) {
   const username = opts?.username;
+  const userId = opts?.userId;
   const csrf = opts?.csrf;
   const admin = opts?.isAdmin ?? false;
   if (csrf) {
@@ -279,7 +280,7 @@ function layout(
       ].join("")
     : "";
   // One read of the apps this viewer may see feeds the sidebar counter and the palette.
-  const visibleApps = username ? appsVisibleTo(username, admin) : [];
+  const visibleApps = username && userId ? appsVisibleTo(userId, admin) : [];
   const secCount = username ? navCount(collectAtRisk(visibleApps).size) : "";
   const palBtn = paletteButtons();
   const paletteHtml = username ? renderPalette(buildPaletteItems({ admin, apps: visibleApps })) : "";
@@ -674,7 +675,7 @@ function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
     out.set(a.id, {
       id: a.id,
       name: a.name ?? a.id,
-      owner: a.created_by,
+      owner: ownerUsernameOf(a),
       state: q.state,
       cves: Object.keys(q.kev_first_seen),
       deadline: deadlineOf(q, termMs),
@@ -686,8 +687,8 @@ function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
 }
 
 /** The apps this viewer may see: all for an admin, their own for an owner. */
-function appsVisibleTo(username: string, admin: boolean): App[] {
-  return admin ? listApps() : listApps().filter((a) => a.created_by === username);
+function appsVisibleTo(userId: string, admin: boolean): App[] {
+  return admin ? listApps() : listApps().filter((a) => a.owner_user_id === userId);
 }
 
 /** App-page section: quarantine status, exemption, owner notices. */
@@ -748,7 +749,7 @@ async function renderAppsLive(
   const admin = isAdmin(user);
   const apps = admin
     ? listApps()
-    : listApps().filter((a) => a.created_by === user.username);
+    : listApps().filter((a) => a.owner_user_id === user.id);
   // Pre-fetch live container state + memory + image size for every
   // app so each card renders with real values inline. Without this
   // the outer swap would paint "..." placeholders that a second
@@ -834,14 +835,14 @@ async function renderAppsLive(
 webRoutes.get("/security", async (c) => {
   const user = c.get("user");
   const admin = isAdmin(user);
-  const apps = appsVisibleTo(user.username, admin);
+  const apps = appsVisibleTo(user.id, admin);
   const now = Date.now();
   const atRisk = collectAtRisk(apps);
   const allStats = await getAppStatsBulk(apps);
   const rows: SecurityApp[] = apps.map((app, i) => ({
     id: app.id,
     name: app.name ?? app.id,
-    owner: app.created_by,
+    owner: ownerUsernameOf(app),
     kev: atRisk.get(app.id),
     status: statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now),
     hasImage: !!app.image_tag,
@@ -859,7 +860,7 @@ webRoutes.get("/security", async (c) => {
     layout(
       "Security",
       renderSecurityPage({ apps: rows, now, admin, kevStatusHtml, termDays: getQuarantineTermDays() }),
-      { username: user.username, csrf: csrfField(c), isAdmin: admin }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: admin }
     )
   );
 });
@@ -943,7 +944,7 @@ webRoutes.get("/", async (c) => {
         ${appsHtml}
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -970,7 +971,7 @@ webRoutes.post("/apps", async (c) => {
   const enabled = new Set(listEnabledSkills().map((s) => s.id));
   const valid = requested.filter((id) => enabled.has(id));
 
-  const app = createApp(user.username);
+  const app = createApp({ id: user.id, username: user.username });
   if (valid.length > 0) {
     setAppSkillIds(app.id, valid);
   }
@@ -1443,7 +1444,7 @@ function renderAppRow(
   const displayName = app.name ?? app.id;
   const nameCell = configured
     ? `<a class="app-name" href="/apps/${id}">${escapeHtml(displayName)}</a>${
-        admin && app.created_by ? `<div class="meta">${escapeHtml(app.created_by)}</div>` : ""
+        admin ? `<div class="meta">${escapeHtml(ownerUsernameOf(app) ?? "No owner (admin only)")}</div>` : ""
       }`
     : `<a class="app-name" href="/apps/${id}"><span class="meta">Unconfigured</span></a>`;
 
@@ -1636,7 +1637,7 @@ webRoutes.get("/apps/:id", async (c) => {
           ${appUrlHost ? `<a href="https://${escapeHtml(appUrlHost)}" target="_blank" rel="noopener noreferrer">${escapeHtml(appUrlHost)} &#8599;</a>` : "No domain yet"}
           ${app.runtime ? `<span>${escapeHtml(app.runtime)}</span>` : ""}
           <span>${lastDeploy ? `Last deploy ${escapeHtml(formatRelative(lastDeploy.created_at))}` : "Not deployed yet"}</span>
-          ${admin && app.created_by ? `<span>Owner ${escapeHtml(app.created_by)}</span>` : ""}
+          ${admin ? `<span>${ownerUsernameOf(app) ? `Owner ${escapeHtml(ownerUsernameOf(app)!)}` : "No owner (admin only)"}</span>` : ""}
         </p>
       </header>
       ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Saved.</div>' : ""}
@@ -1860,7 +1861,7 @@ webRoutes.get("/apps/:id", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: admin }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: admin }
     )
   );
 });
@@ -2175,7 +2176,7 @@ webRoutes.get("/users", (c) => {
     totpEnabled: isTotpEnabled(u),
     createdAt: u.created_at,
     appNames: allApps
-      .filter((a) => a.created_by === u.username)
+      .filter((a) => a.owner_user_id === u.id)
       .map((a) => a.name ?? a.id),
   }));
   const rows = people.map((p) => renderPersonCard(p, ctx)).join("");
@@ -2199,7 +2200,7 @@ webRoutes.get("/users", (c) => {
       ${renderOAuthAccessCard(error)}
       ${rows}
     `,
-      { username: current.username, csrf: csrfField(c), isAdmin: isAdmin(current) }
+      { username: current.username, userId: current.id, csrf: csrfField(c), isAdmin: isAdmin(current) }
     )
   );
 });
@@ -2304,10 +2305,11 @@ webRoutes.post("/users/:id/delete", (c) => {
   if (target.role === "admin" && countAdmins() <= 1) {
     return c.redirect("/users?error=last_admin");
   }
-  deleteUser(id);
+  const orphaned = deleteUser(id) ?? 0;
   logAudit(current.id, current.username, "user_deleted", {
     targetUserId: target.id,
     targetUsername: target.username,
+    detail: orphaned > 0 ? `${orphaned} app(s) now without an owner (admin-only)` : undefined,
   });
   return c.redirect("/users");
 });
@@ -2557,7 +2559,7 @@ webRoutes.get("/settings", (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -2736,7 +2738,7 @@ webRoutes.get("/rebuild", async (c) => {
           ${quarantineTable}
         </div>
       </div>`,
-      { username: user.username, csrf: csrfField(c), isAdmin: true }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: true }
     )
   );
 });
@@ -3082,7 +3084,7 @@ webRoutes.get("/audit", (c) => {
         </table>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3250,7 +3252,7 @@ webRoutes.get("/skills", (c) => {
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3499,7 +3501,7 @@ webRoutes.get("/health", async (c) => {
       </div>
       <div class="health-grid">${tiles}</div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3652,7 +3654,7 @@ webRoutes.get("/account", (c) => {
       ${twofaCard}
       ${tokensCard}
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3699,7 +3701,7 @@ webRoutes.post("/account/tokens", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3808,7 +3810,7 @@ webRoutes.get("/account/2fa/verify", async (c) => {
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3849,7 +3851,7 @@ webRoutes.post("/account/2fa/verify", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3908,7 +3910,7 @@ webRoutes.post("/account/2fa/regenerate", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });

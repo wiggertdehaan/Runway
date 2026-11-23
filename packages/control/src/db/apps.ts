@@ -36,7 +36,10 @@ export interface App {
   health_check_path: string | null;
   image_tag: string | null;
   container_id: string | null;
+  /** Historical label (the creator's username at the time). Never used for rights. */
   created_by: string | null;
+  /** Who owns the app. NULL = no owner: admin-only. The only field rights are checked on. */
+  owner_user_id: string | null;
   scan_threshold: string;
   scan_floor_exempt: number;
   sso_enabled: number;
@@ -60,14 +63,25 @@ export function isConfigured(app: App): boolean {
 /**
  * Create a fresh app. Only an API key is generated here; name, runtime,
  * and domain are set later via the MCP configure flow.
+ *
+ * `owner` is the user the app belongs to; routes pass the signed-in user.
+ * A bare username string is resolved to that account once, right now, and
+ * never kept as the owner (S13: a name is not an identity). A string that
+ * matches no account gives an app without an owner.
  */
-export function createApp(createdBy?: string): App {
+export function createApp(owner?: { id: string; username: string } | string): App {
   const id = generateAppId();
   const api_key = `rwy_${nanoid(32)}`;
+  const ref =
+    typeof owner === "string"
+      ? (db.prepare(`SELECT id, username FROM users WHERE username = ?`).get(owner) as
+          | { id: string; username: string }
+          | undefined) ?? null
+      : owner ?? null;
 
   db.prepare(
-    `INSERT INTO apps (id, api_key, name, runtime, created_by) VALUES (?, ?, NULL, NULL, ?)`
-  ).run(id, api_key, createdBy ?? null);
+    `INSERT INTO apps (id, api_key, name, runtime, created_by, owner_user_id) VALUES (?, ?, NULL, NULL, ?, ?)`
+  ).run(id, api_key, ref?.username ?? (typeof owner === "string" ? owner : null), ref?.id ?? null);
 
   return getApp(id)!;
 }
@@ -110,6 +124,23 @@ export function isDomainTaken(domain: string, exceptAppId: string): boolean {
     )
     .get(exceptAppId, host, host);
   return !!row;
+}
+
+/** Does this user own the app? An app without an owner is nobody's. */
+export function isAppOwner(
+  user: { id: string },
+  app: { owner_user_id: string | null }
+): boolean {
+  return app.owner_user_id !== null && app.owner_user_id === user.id;
+}
+
+/** Current username of an app's owner, for display only; null when it has none. */
+export function ownerUsernameOf(app: { owner_user_id: string | null }): string | null {
+  if (!app.owner_user_id) return null;
+  const row = db
+    .prepare(`SELECT username FROM users WHERE id = ?`)
+    .get(app.owner_user_id) as { username: string } | undefined;
+  return row?.username ?? null;
 }
 
 export function listApps(): App[] {
