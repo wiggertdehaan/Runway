@@ -12,6 +12,7 @@ import { listApps } from "./db/apps.js";
 import { appContainerName } from "./deploy/index.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
+import { sweepTokenLimits } from "./middleware/token-limit.js";
 import { pruneAttempts } from "./auth/twofa-limit.js";
 import { pruneApiAudit } from "./db/audit.js";
 import { refreshDb } from "./deploy/scan.js";
@@ -37,6 +38,7 @@ startActivityTailer();
 setInterval(() => {
   deleteExpiredSessions();
   cleanupExpiredEntries();
+  sweepTokenLimits();
   pruneAttempts();
   pruneApiAudit();
 }, 60 * 60 * 1000);

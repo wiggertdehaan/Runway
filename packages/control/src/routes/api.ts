@@ -2,6 +2,7 @@ import { resolveHardening } from "../deploy/hardening.js";
 import { Hono } from "hono";
 import { apiAuth } from "../middleware/auth.js";
 import { apiAudit } from "../middleware/api-audit.js";
+import { apiTokenLimit } from "../middleware/token-limit.js";
 import {
   defaultPortForRuntime,
   isConfigured,
@@ -76,6 +77,9 @@ type Env = { Variables: { app: App } };
 export const apiRoutes = new Hono<Env>();
 
 apiRoutes.use("/*", apiAuth);
+// S21: allowance per key (read / write / heavy). A refused request is audited
+// once, as a counted row, by the limiter itself; it never reaches apiAudit.
+apiRoutes.use("/*", apiTokenLimit);
 // S12: every call that changes something (and the two sensitive reads) is
 // audited here, once, for all routes. Keep it directly after apiAuth.
 apiRoutes.use("/*", apiAudit);

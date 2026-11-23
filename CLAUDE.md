@@ -422,6 +422,37 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 - The MCP client sends `X-Runway-Client: runway-mcp`; it is shown in the log as
   a hint and decides nothing.
 
+### Rate limits are per key, plus a cap on wrong keys per source (S21)
+- `middleware/token-limit.ts` + `util/token-limit.ts` (pure). `apiTokenLimit`
+  sits right after `apiAuth` and before `apiAudit` on `/api/v1/*`; `/mcp`
+  calls `enforceTokenLimit` after it has found the token. The counter key is
+  `<actor>|<bucket>` with actor `api-key:<app id>` or `mcp-token:<token id>`
+  (never the secret). Buckets: `read` 120/min, `write` 60/min, `heavy` 10 per
+  10 min (`HEAVY_ROUTES`: deploy, rollback, source download). Anything that is
+  not a GET/HEAD is `write` by default, so a new route is never a free read;
+  put an expensive new route in `HEAVY_ROUTES` (a test fails on a stale entry).
+  User tokens (to come) use the same functions under their own actor prefix.
+- Wrong keys: `guessBlocked` runs BEFORE the key is looked up and refuses a
+  source (429, even for a correct key) that has presented 20 unknown keys in
+  10 minutes; `recordWrongKey` counts only a key that does not exist, not a
+  missing header (a monitor without credentials must not lock itself out).
+  API and `/mcp` share the counter. The source address comes from
+  `getClientIp` (X-Forwarded-For only from a Docker-bridge peer).
+- In memory, one control process: a restart resets the counters, and several
+  control processes would each have their own. `FixedWindowCounter` is capped
+  at 20000 keys (expired first, then oldest) and swept hourly. The older
+  per-address limiter in `rate-limit.ts` (SQLite) stays as a flood guard,
+  600/min by default, because one office address is many people.
+- 429 answers carry `Retry-After` and say only how long to wait. Refusals are
+  one counted audit row (`api_token_rate_limited`, `auth_guess_blocked`) via
+  `logDeniedAudit`; they never reach `apiAudit`. The MCP client reports a 429
+  as "wait N seconds" (`packages/mcp/src/errors.ts`), never retries by itself
+  and masks the key in every error message.
+- Env: `RATE_LIMIT_READ_PER_MIN`, `RATE_LIMIT_WRITE_PER_MIN`,
+  `RATE_LIMIT_HEAVY_PER_10MIN`, `RATE_LIMIT_AUTH_FAIL_PER_10MIN`,
+  `API_IP_RATE_LIMIT`; compose passes them through. They are read on every
+  request, capped at 100000, and a typo falls back to the default.
+
 ### Uploads are streamed to disk and checked before use (S06)
 - `POST /api/v1/app/deploy` streams the body to `UPLOAD_DIR` (default
   `<db dir>/uploads`, on the data volume: `/tmp` is a tmpfs, i.e. RAM) with a

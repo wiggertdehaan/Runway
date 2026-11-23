@@ -12,6 +12,7 @@ import { setSetting } from "../db/settings.js";
 import { apiAudit, AUDITED_READS, MUTATING_METHODS, UNAUDITED_READS } from "../middleware/api-audit.js";
 import { apiAuth } from "../middleware/auth.js";
 import { actionFor } from "../util/audit-detail.js";
+import { apiTokenLimit, resetTokenLimits } from "../middleware/token-limit.js";
 
 let owner = { id: "", key: "" };
 
@@ -28,6 +29,9 @@ beforeEach(() => {
   } catch {
     /* created on first use */
   }
+  resetTokenLimits();
+  delete process.env.API_IP_RATE_LIMIT;
+  delete process.env.RATE_LIMIT_AUTH_FAIL_PER_10MIN;
   setSetting("base_domain", "example.com");
   const a = createApp("alice");
   owner = { id: a.id, key: a.api_key };
@@ -52,14 +56,16 @@ function audit(where = "1=1") {
 }
 
 describe("the audit middleware is in place", () => {
-  it("is registered on the API right after the key check", () => {
+  it("is registered on the API after the key check and the per-key limiter", () => {
     const handlers = app.routes
       .filter((r) => r.path === "/api/v1/*")
       .map((r) => r.handler);
     const auth = handlers.indexOf(apiAuth);
     const aud = handlers.indexOf(apiAudit);
     expect(auth).toBeGreaterThanOrEqual(0);
-    expect(aud).toBe(auth + 1);
+    // S21: the limiter refuses (and audits, once) before this middleware runs.
+    expect(handlers.indexOf(apiTokenLimit)).toBe(auth + 1);
+    expect(aud).toBe(auth + 2);
   });
 
   it("every GET route is consciously audited or not (a new route must pick)", () => {
@@ -191,6 +197,8 @@ describe("what goes into a line", () => {
 
 describe("refused attempts are counted, not listed", () => {
   it("many bad keys from one source are one row", async () => {
+    // The per-source cap on wrong keys (S21) would stop this run at 20.
+    process.env.RATE_LIMIT_AUTH_FAIL_PER_10MIN = "1000";
     for (let i = 0; i < 30; i++) {
       await app.request("/api/v1/app", { headers: { authorization: `Bearer rwy_guess${i}` } });
     }
@@ -211,6 +219,8 @@ describe("refused attempts are counted, not listed", () => {
   });
 
   it("the per-IP rate limit shows up as one counted row", async () => {
+    // The flood guard is generous by default (S21); tighten it for the test.
+    process.env.API_IP_RATE_LIMIT = "60";
     for (let i = 0; i < 66; i++) await call("GET", "/app");
     const rows = audit("action = 'api_rate_limited'");
     expect(rows).toHaveLength(1);

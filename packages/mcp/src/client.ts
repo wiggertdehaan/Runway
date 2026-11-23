@@ -2,6 +2,8 @@
  * HTTP client for communicating with the Runway Control API.
  */
 
+import { apiErrorFromResponse } from "./errors.js";
+
 export type Runtime = "node" | "python" | "go" | "static";
 export type ScanThreshold = "none" | "low" | "medium" | "high" | "critical";
 
@@ -68,10 +70,7 @@ export class RunwayClient {
       },
     });
 
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Runway API error ${res.status}: ${body}`);
-    }
+    if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
 
     return (await res.json()) as T;
   }
@@ -108,10 +107,7 @@ export class RunwayClient {
     }
 
     const res = await fetch(url, { method: "POST", headers, body });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Runway API error ${res.status}: ${text}`);
-    }
+    if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
     return res.json();
   }
 
@@ -253,10 +249,7 @@ export class RunwayClient {
       headers: { Authorization: `Bearer ${this.apiKey}`, "X-Runway-Client": CLIENT_ID },
     });
     if (res.status === 404) return null;
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Runway API error ${res.status}: ${text}`);
-    }
+    if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
     const arrayBuffer = await res.arrayBuffer();
     return Buffer.from(arrayBuffer);
   }

@@ -284,7 +284,7 @@ button for admins.
 - CSRF protection (double-submit cookie with timing-safe comparison)
 - Optional TOTP two-factor authentication with backup codes
 - Login rate limiting (5 attempts / 15 minutes per IP), persisted in SQLite
-- API rate limiting (60 requests / minute per IP)
+- API rate limiting per key (120 reads / 60 writes per minute, 10 deploys per 10 minutes) and per address (see below)
 - Per-app API keys, independent from dashboard sessions
 - Audit log for all admin actions
 - Content Security Policy headers
@@ -458,8 +458,18 @@ isolation.
   same IP within 15 minutes, further login attempts are blocked until the
   window expires. Rate limits are persisted in SQLite and survive restarts.
   Failed attempts are logged in the audit log with the source IP.
-- **API rate limiting** — 60 requests per minute per IP on all `/api/v1/*`
-  endpoints.
+- **API rate limiting** — per key, not per address, so many people behind one
+  office address do not share an allowance. Each app key (and each developer
+  token on `/mcp`) gets its own buckets: 120 reads and 60 writes per minute,
+  and 10 heavy actions (deploy, rollback, source download) per 10 minutes. A
+  refusal is `429` with `Retry-After`. Wrong keys are counted per source
+  address: 20 in 10 minutes blocks that address (even for a correct key) until
+  the window ends; a missing header does not count. On top of that sits a coarse
+  per-address flood guard (600 requests per minute). Counters live in memory of
+  the one control process, so a restart resets them. Tune with
+  `RATE_LIMIT_READ_PER_MIN`, `RATE_LIMIT_WRITE_PER_MIN`,
+  `RATE_LIMIT_HEAVY_PER_10MIN`, `RATE_LIMIT_AUTH_FAIL_PER_10MIN` and
+  `API_IP_RATE_LIMIT` in `.env`. Refusals are audited as counted rows.
 - **OAuth2 / SSO** — authorization code flow with Google and Microsoft.
   ID tokens are decoded (not signature-verified) after a direct HTTPS
   code exchange with the provider, which is safe because the token was

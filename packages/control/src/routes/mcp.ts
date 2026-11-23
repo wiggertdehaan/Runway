@@ -5,6 +5,11 @@ import { getDevTokenByToken, touchDevToken } from "../db/dev-tokens.js";
 import { logDeniedAudit } from "../db/audit.js";
 import { getClientIp } from "../middleware/rate-limit.js";
 import {
+  enforceTokenLimit,
+  guessBlocked,
+  recordWrongKey,
+} from "../middleware/token-limit.js";
+import {
   getSkill,
   getSkillFile,
   listEnabledSkills,
@@ -107,6 +112,10 @@ function mcpDenied(c: Parameters<typeof getClientIp>[0], reason: string) {
 }
 
 mcpRoutes.all("/mcp", async (c) => {
+  // S21: see apiAuth. Same per-source cap on wrong keys.
+  const blocked = guessBlocked(c, "mcp");
+  if (blocked) return blocked;
+
   const header = c.req.header("Authorization");
   if (!header?.startsWith("Bearer ")) {
     mcpDenied(c, "missing_header");
@@ -115,9 +124,14 @@ mcpRoutes.all("/mcp", async (c) => {
   const presented = header.slice(7);
   const tokenRow = getDevTokenByToken(presented);
   if (!tokenRow) {
+    recordWrongKey(c);
     mcpDenied(c, "unknown_token");
     return c.json({ error: "Invalid developer token" }, 401);
   }
+  // S21: everything this route serves is a read of skill text. The actor is
+  // the token's id (not the token), so it is safe to audit and to count by.
+  const limited = enforceTokenLimit(c, `mcp-token:${tokenRow.id}`, "read", "mcp");
+  if (limited) return limited;
   touchDevToken(tokenRow.id);
 
   const transport = new WebStandardStreamableHTTPServerTransport({

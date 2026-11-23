@@ -6,8 +6,20 @@ import { logDeniedAudit } from "../db/audit.js";
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
 
-const API_MAX_REQUESTS = 60;
+// Coarse flood guard per source address. The allowance that matters is the one
+// per key (token-limit.ts); this one only has to stop a single address from
+// hammering the API, and many people can share one address, so it is generous.
+const API_IP_DEFAULT = 600;
 const API_WINDOW_MS = 60 * 1000;
+
+function apiMaxRequests(): number {
+  const raw = process.env.API_IP_RATE_LIMIT;
+  if (raw && /^\d+$/.test(raw.trim())) {
+    const n = Number(raw.trim());
+    if (Number.isSafeInteger(n) && n >= 1) return Math.min(n, 1_000_000);
+  }
+  return API_IP_DEFAULT;
+}
 
 function ensureTable() {
   db.exec(`
@@ -152,14 +164,20 @@ export async function apiRateLimit(c: Context, next: Next) {
   const now = Date.now();
   const entry = getEntry(key, API_WINDOW_MS);
 
-  if (entry && entry.count >= API_MAX_REQUESTS) {
+  if (entry && entry.count >= apiMaxRequests()) {
     // S12: one counted row per source and window, not one line per refusal.
     try {
       logDeniedAudit({ actorType: "api-key", action: "api_rate_limited", ip });
     } catch (err) {
       console.error("audit write failed:", (err as Error).message);
     }
-    return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
+    const retry = Math.max(
+      1,
+      Math.ceil((API_WINDOW_MS - (now - entry.firstAttempt)) / 1000)
+    );
+    return c.json({ error: "Rate limit exceeded. Try again later." }, 429, {
+      "Retry-After": String(retry),
+    });
   }
 
   if (!entry) {

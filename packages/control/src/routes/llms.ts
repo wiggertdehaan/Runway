@@ -920,6 +920,10 @@ What this means for you:
   limit (100 MB by default). Shrink the ignore lists.
 - \`415 Unsupported Media Type\` — the Content-Type was not
   \`application/x-tar\`.
+- \`429 Too Many Requests\` — this key used up its allowance (120 reads or
+  60 writes per minute; 10 deploys, rollbacks and source downloads per 10
+  minutes) or too many wrong keys came from this address. Read the
+  \`Retry-After\` header (seconds), wait that long, and do not retry in a loop.
 - \`500 Internal Server Error\` — the build or container start failed.
   Inspect \`log_tail\` in the response body.
 
