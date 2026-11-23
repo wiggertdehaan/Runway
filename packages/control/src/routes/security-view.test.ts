@@ -117,15 +117,15 @@ describe("renderSecurityAttention", () => {
     expect(html.indexOf("attn-list")).toBeLessThan(html.indexOf("<details"));
     expect(html).toContain("What happens next?");
   });
-  it("is role aware: only an administrator gets a Rebuild button and the owner name", () => {
+  it("offers Rebuild to everybody who sees a row, and the owner name only to an admin", () => {
     const admin = renderSecurityAttention([app()], NOW, true);
     expect(admin).toContain('action="/apps/abc123/rebuild"');
     expect(admin).toContain("owner wiggert");
     expect(admin).toContain("A rebuild or a new deploy");
     const owner = renderSecurityAttention([app()], NOW, false);
-    expect(owner).not.toContain("/rebuild");
+    expect(owner).toContain('action="/apps/abc123/rebuild"');
     expect(owner).not.toContain("owner wiggert");
-    expect(owner).toContain("your agent can do this");
+    expect(owner).toContain("your agent can do the second");
   });
   it("counts offline and pending apps separately and lists offline first", () => {
     const html = renderSecurityAttention(

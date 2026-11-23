@@ -8,6 +8,14 @@ import { APP_CSS } from "../ui/styles.js";
 import { CLIENT_JS, PREPAINT_JS } from "../ui/client.js";
 import { appStatus, countStates, type AppStatus } from "../ui/status.js";
 import { homeChips, needsAttention, renderChips } from "../ui/home.js";
+import {
+  deployReason,
+  mayRebuild,
+  rebuildBlockedReason,
+  rebuildLine,
+  renderKevBlock,
+  renderRebuildLine,
+} from "../ui/app-page.js";
 
 const APP_VERSION = (() => {
   try {
@@ -105,6 +113,7 @@ import {
 import { runCachePrune } from "../deploy/cache-pruner.js";
 import {
   RebuildBusyError,
+  activeRebuildRun,
   activeRebuildRunId,
   startRebuildRun,
 } from "../deploy/rebuild.js";
@@ -667,12 +676,16 @@ function renderQuarantineSection(app: App, admin: boolean): string {
     : "";
   const forms =
     admin && (q || ex)
-      ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/quarantine-exception" style="display:grid;gap:0.5rem;max-width:32rem;margin:0.5rem 0">
-          <input type="text" name="reason" required minlength="5" maxlength="500" placeholder="Reason (required, kept in the audit log)" />
-          <label class="meta">Until <input type="date" name="until" required /></label>
-          <div><button type="submit" style="width:auto">${exActive ? "Update" : "Grant"} exemption</button></div>
-        </form>
-        ${ex ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/quarantine-exception/remove" style="margin:0"><button type="submit" class="ghost" style="width:auto">Remove exemption</button></form>` : ""}`
+      ? `<details class="exempt"${ex && exActive ? " open" : ""}>
+          <summary>${exActive ? "Change or remove the exemption" : "Give this app more time (exemption)"}</summary>
+          <p class="hint">An exemption postpones taking the app offline until the date you pick. It needs a reason and is kept in the audit log.</p>
+          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/quarantine-exception" style="display:grid;gap:0.5rem;max-width:32rem;margin:0.5rem 0">
+            <input type="text" name="reason" required minlength="5" maxlength="500" placeholder="Reason (required, kept in the audit log)" />
+            <label class="meta">Until <input type="date" name="until" required /></label>
+            <div><button type="submit" style="width:auto">${exActive ? "Update" : "Grant"} exemption</button></div>
+          </form>
+          ${ex ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/quarantine-exception/remove" style="margin:0"><button type="submit" class="ghost" style="width:auto">Remove exemption</button></form>` : ""}
+        </details>`
       : "";
   const list = notices.length
     ? `<ul style="margin:0.5rem 0 0 1.25rem">${notices
@@ -1006,10 +1019,11 @@ function renderDeployHistory(
              <button type="submit" class="ghost" style="font-size:0.75rem;padding:0.25rem 0.5rem">Restore</button>
            </form>`
         : "";
+      const reason = deployReason(d);
       return `
         <tr style="border-bottom:1px solid var(--line)">
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.8rem">#${d.id}</td>
-          <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span></td>
+          <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span>${reason ? `<div class="meta deploy-reason">${escapeHtml(reason)}${d.status === "blocked" ? ' <a href="#scan">See findings</a>' : ""}</div>` : ""}</td>
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem" title="${escapeHtml(d.image_tag ?? "")}">${tagShort}</td>
           <td style="padding:0.4rem 0.75rem">${baseCell}</td>
           <td style="padding:0.4rem 0.75rem;font-size:0.8rem" class="meta">${when}</td>
@@ -1030,7 +1044,7 @@ function renderDeployHistory(
         (the last ${SOURCE_RETENTION} snapshots are kept).
       </p>
       <div style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse">
+        <table class="deploys-table" style="width:100%;border-collapse:collapse">
           <thead>
             <tr style="text-align:left;border-bottom:1px solid var(--line)">
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Deploy</th>
@@ -1051,7 +1065,9 @@ function renderDeployHistory(
 
 function renderScanSection(
   app: ReturnType<typeof listApps>[number],
-  admin: boolean
+  admin: boolean,
+  canRebuild = false,
+  rebuildDisabledReason: string | null = null
 ): string {
   const thresholdOptions = THRESHOLDS.map((t) => {
     const selected = app.scan_threshold === t ? " selected" : "";
@@ -1123,12 +1139,18 @@ function renderScanSection(
         </form>`
       : "";
 
+  // Rebuild is for the owner as well as the admin; the switches below stay admin-only.
+  const rebuildButton = canRebuild
+    ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/rebuild" style="margin:0 0 0.5rem" onsubmit="return confirm('Rebuild this app from source without cache? It can take a few minutes.')">
+        <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Rebuild (no cache)</button>
+      </form>`
+    : rebuildDisabledReason
+      ? `<p class="meta" style="margin:0 0 0.5rem;font-size:0.8rem">${escapeHtml(rebuildDisabledReason)}</p>`
+      : "";
+
   const rebuildControls =
     admin && app.image_tag
       ? `<div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin:0 0 0.5rem">
-          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/rebuild" style="margin:0" onsubmit="return confirm('Rebuild this app from source without cache?')">
-            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Rebuild (no cache)</button>
-          </form>
           <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-rebuild" style="margin:0">
             <input type="hidden" name="enabled" value="${app.auto_rebuild ? "0" : "1"}" />
             <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Weekly auto-rebuild: ${app.auto_rebuild ? "on (turn off)" : "off (turn on)"}</button>
@@ -1276,6 +1298,7 @@ function renderScanSection(
       ${exemptToggle}
       ${periodicHtml}
       ${rescanButton}
+      ${rebuildButton}
       ${rebuildControls}
       ${reportHtml}
     </div>
@@ -1487,10 +1510,29 @@ webRoutes.post("/apps/:id/delete", async (c) => {
 
 // ── App detail (env vars + volumes) ─────────────────────
 
-webRoutes.get("/apps/:id", (c) => {
+webRoutes.get("/apps/:id", async (c) => {
   const user = c.get("user");
   const app = getApp(c.req.param("id"));
   if (!app) return c.redirect("/");
+  const admin = isAdmin(user);
+  const now = Date.now();
+  const stats = app.runtime ? await getAppStats(app).catch(() => null) : null;
+  const kev = collectAtRisk([app]).get(app.id);
+  const status = statusOf(app, stats, kev, now);
+  const running = activeRebuildRun();
+  const blockedReason =
+    rebuildBlockedReason(app) ??
+    (running ? "A rebuild is already running. Only one runs at a time." : null);
+  const canRebuild = mayRebuild(user, app) && blockedReason === null;
+  const rebuildFlag = c.req.query("rebuild");
+  const rebuildNote =
+    rebuildFlag === "busy"
+      ? '<div class="error">A rebuild is already running. Only one runs at a time; try again when it is done.</div>'
+      : rebuildFlag === "blocked"
+        ? `<div class="error">${escapeHtml(rebuildBlockedReason(app) ?? "This app cannot be rebuilt yet.")}</div>`
+        : "";
+  const appUrlHost = app.custom_domain || app.domain;
+  const lastDeploy = getLatestDeploys(app.id, 1)[0];
 
   const env = getEnvVars(app.id);
   const volumes = getVolumes(app.id);
@@ -1546,25 +1588,57 @@ webRoutes.get("/apps/:id", (c) => {
     layout(
       app.name ?? "App",
       `
-      <p style="margin-bottom:1.5rem"><a href="/" style="color:var(--tx);text-decoration:none">&larr; Back to apps</a></p>
-      <h1>${escapeHtml(app.name ?? app.id)}</h1>
+      <p class="crumb"><a href="/">&larr; Apps</a></p>
+      <header class="app-head">
+        <div class="app-head-top">
+          <h1>${escapeHtml(app.name ?? app.id)}</h1>
+          ${renderStatusChip(status)}
+          ${renderSecurityChip(app.id, status)}
+        </div>
+        <p class="app-head-meta meta">
+          ${appUrlHost ? `<a href="https://${escapeHtml(appUrlHost)}" target="_blank" rel="noopener noreferrer">${escapeHtml(appUrlHost)} &#8599;</a>` : "No domain yet"}
+          ${app.runtime ? `<span>${escapeHtml(app.runtime)}</span>` : ""}
+          <span>${lastDeploy ? `Last deploy ${escapeHtml(formatRelative(lastDeploy.created_at))}` : "Not deployed yet"}</span>
+          ${admin && app.created_by ? `<span>Owner ${escapeHtml(app.created_by)}</span>` : ""}
+        </p>
+      </header>
       ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Saved.</div>' : ""}
+      ${rebuildNote}
+      ${
+        kev
+          ? renderKevBlock({
+              app: { id: app.id, name: app.name ?? app.id },
+              kev,
+              now,
+              canRebuild,
+              rebuildDisabledReason: mayRebuild(user, app) ? blockedReason : "Only the app's owner or an admin can rebuild it.",
+              isAdmin: admin,
+            })
+          : ""
+      }
       ${rollbackError ? `<div class="card" style="border-color:var(--err);color:var(--err)"><strong>Rollback failed:</strong> ${escapeHtml(rollbackError)}</div>` : ""}
 
       <div class="tabs">
         <input type="radio" name="app-tab" id="tab-deploys" checked />
         <label for="tab-deploys">Deploys</label>
-        <input type="radio" name="app-tab" id="tab-access" />
-        <label for="tab-access">Access</label>
+        <input type="radio" name="app-tab" id="tab-security" />
+        <label for="tab-security">Security${status.security && status.security.tone !== "ok" && status.security.tone !== "neutral" ? ' <span class="tab-dot" aria-label="needs attention"></span>' : ""}</label>
         <input type="radio" name="app-tab" id="tab-config" />
         <label for="tab-config">Config</label>
+        <input type="radio" name="app-tab" id="tab-access" />
+        <label for="tab-access">Access</label>
 
         <div class="tab-panels" style="width:100%">
           <!-- ── Deploys tab ────────────────────────── -->
           <div class="tab-panel panel-deploys">
+            ${renderRebuildLine(rebuildLine(listRebuildRuns(10), app.id, running), app.id, (iso) => (iso ? formatRelative(iso) : ""))}
             ${renderDeployHistory(app)}
-            ${renderQuarantineSection(app, isAdmin(user))}
-            ${renderScanSection(app, isAdmin(user))}
+          </div>
+
+          <!-- ── Security tab ───────────────────────── -->
+          <div class="tab-panel panel-security">
+            ${renderQuarantineSection(app, admin)}
+            ${renderScanSection(app, admin, canRebuild, mayRebuild(user, app) ? blockedReason : null)}
           </div>
 
           <!-- ── Access tab ─────────────────────────── -->
@@ -1747,7 +1821,7 @@ webRoutes.get("/apps/:id", (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, csrf: csrfField(c), isAdmin: admin }
     )
   );
 });
@@ -2708,19 +2782,55 @@ webRoutes.post("/rebuild/schedule", async (c) => {
   return c.redirect("/rebuild?saved=1");
 });
 
+/**
+ * Rebuild one app from its stored source. An admin, or the app's owner:
+ * requireAppAccess already turned every other member away for
+ * /apps/:id/*, and mayRebuild() says the same again here so the rule
+ * survives a reordering of the middleware. Same limit for everyone: one
+ * run at a time. Every run is audited when it starts and when it ends.
+ */
 webRoutes.post("/apps/:id/rebuild", async (c) => {
   const user = c.get("user");
-  if (!isAdmin(user)) return c.redirect("/");
   const app = getApp(c.req.param("id"));
-  if (!app) return c.redirect("/");
+  if (!app || !mayRebuild(user, app)) return c.redirect("/?forbidden=1");
+  const admin = isAdmin(user);
+  const back = (flag: string) =>
+    admin && flag !== "blocked"
+      ? c.redirect(flag === "busy" ? "/rebuild?busy=1" : "/rebuild?started=1")
+      : c.redirect(`/apps/${encodeURIComponent(app.id)}?rebuild=${flag}#deploys`);
+  if (rebuildBlockedReason(app)) return back("blocked");
   try {
-    const id = startRebuildRun({ trigger: "manual", appIds: [app.id] });
-    logAudit(user.id, user.username, "app_rebuild_started", { detail: `${app.id} run ${id}` });
+    const id = startRebuildRun({
+      trigger: "manual",
+      appIds: [app.id],
+      onFinished: (results) => {
+        const r = results.find((x) => x.app_id === app.id) ?? results[0];
+        logAudit(user.id, user.username, "app_rebuild_finished", {
+          detail: `${app.id} run ${id}: ${r?.outcome ?? "no result"}${r?.detail ? ` (${r.detail.slice(0, 200)})` : ""}`,
+        });
+      },
+    });
+    logAudit(user.id, user.username, "app_rebuild_started", {
+      detail: `${app.id} run ${id}${admin ? "" : " (by owner)"}`,
+    });
   } catch (err) {
-    if (err instanceof RebuildBusyError) return c.redirect("/rebuild?busy=1");
+    if (err instanceof RebuildBusyError) return back("busy");
     throw err;
   }
-  return c.redirect("/rebuild?started=1");
+  return back("started");
+});
+
+/** Rebuild line of one app, polled while a run is busy. Same access rule as the page. */
+webRoutes.get("/apps/:id/rebuild-status", (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.text("", 404);
+  return c.html(
+    renderRebuildLine(
+      rebuildLine(listRebuildRuns(10), app.id, activeRebuildRun()),
+      app.id,
+      (iso) => (iso ? formatRelative(iso) : "")
+    )
+  );
 });
 
 webRoutes.post("/apps/:id/auto-patch", async (c) => {

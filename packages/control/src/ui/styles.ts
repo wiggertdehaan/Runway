@@ -185,6 +185,41 @@ a.tag:hover{filter:brightness(0.95)}
 .tabs label:hover{color:var(--tx)}
 .tabs input:checked + label{color:var(--tx);border-bottom-color:var(--inv)}
 .tabs input:focus-visible + label{outline:2px solid var(--ring);outline-offset:-2px}
+@media(max-width:560px){
+  .tabs label{flex:1 1 0;text-align:center;padding:0.6rem 0.25rem;font-size:0.9rem}
+  .deploys-table th:nth-child(3),.deploys-table td:nth-child(3),.deploys-table th:nth-child(4),.deploys-table td:nth-child(4),.deploys-table th:nth-child(6),.deploys-table td:nth-child(6){display:none}
+  .deploys-table th,.deploys-table td{padding-left:0.4rem!important;padding-right:0.4rem!important}
+  .kev-prompt textarea{min-height:13rem}
+}
+.crumb{margin:0 0 0.75rem;font-size:0.85rem}
+.crumb a{color:var(--mu);text-decoration:none}
+.crumb a:hover{color:var(--tx)}
+.app-head{margin-bottom:1rem}
+.app-head-top{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 0.9rem}
+.app-head-top h1{margin:0;overflow-wrap:anywhere}
+.app-head-meta{display:flex;flex-wrap:wrap;gap:0.25rem 1rem;margin:0.4rem 0 0;font-size:0.85rem}
+.app-head-meta a{color:var(--tx)}
+.tab-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--err);margin-left:0.35rem;vertical-align:middle}
+.kev{border:1px solid var(--warn);border-left-width:4px;border-radius:var(--r3);background:var(--bg);padding:1rem 1.25rem;margin-bottom:1rem}
+.kev-err{border-color:var(--err)}
+.kev-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:0.25rem 0.9rem}
+.kev-count{margin:0;font-size:1.25rem;color:var(--warn)}
+.kev-err .kev-count{color:var(--err)}
+.kev-why{margin:0.5rem 0 0.75rem;max-width:46rem}
+.kev-steps{margin:0;padding-left:1.25rem;display:grid;gap:0.9rem;max-width:46rem}
+.kev-steps form{margin:0.5rem 0 0}
+.kev-steps button{width:auto}
+.kev-prompt{display:grid;gap:0.5rem;margin-top:0.5rem}
+.kev-prompt textarea{width:100%;font:inherit;font-size:0.85rem;resize:vertical}
+.rb-line{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.75rem;border:1px solid var(--line);border-radius:var(--r3);padding:0.6rem 0.9rem;margin-bottom:1rem;font-size:0.9rem}
+.rb-ok{border-color:var(--ok)}
+.rb-err{border-color:var(--err)}
+.rb-running .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warn)}
+.deploy-reason{font-size:0.75rem;margin-top:0.15rem;max-width:22rem}
+.deploy-reason a{color:var(--tx)}
+.exempt{margin:0.5rem 0}
+.exempt summary{cursor:pointer;color:var(--tx);font-size:0.9rem}
+.kev-steps li::marker{font-weight:600}
 .tab-panel{display:none}
 #tab-deploys:checked ~ .tab-panels .panel-deploys,
 #tab-access:checked ~ .tab-panels .panel-access,

@@ -141,9 +141,10 @@ export function attentionWhen(app: AtRiskApp, now: number): { headline: string; 
  * you can do about it. The long policy text sits behind a disclosure so
  * the app comes first. Empty string when there is nothing to show.
  *
- * `admin` decides the wording and the actions: an administrator can
- * start a rebuild right here; an owner is told to redeploy (or open the
- * app for the steps).
+ * `admin` only decides what else is shown (the owner name). Everybody
+ * who sees a row may rebuild that app: an owner is only ever given their
+ * own apps, an administrator all of them. The server enforces the same
+ * rule on the rebuild route.
  */
 export function renderSecurityAttention(apps: AtRiskApp[], now: number, admin = false): string {
   if (apps.length === 0) return "";
@@ -158,9 +159,7 @@ export function renderSecurityAttention(apps: AtRiskApp[], now: number, admin = 
     .map((a) => {
       const w = attentionWhen(a, now);
       const id = encodeURIComponent(a.id);
-      const rebuild = admin
-        ? `<form method="POST" action="/apps/${id}/rebuild" class="attn-form"><button type="submit" class="ghost">Rebuild</button></form>`
-        : "";
+      const rebuild = `<form method="POST" action="/apps/${id}/rebuild" class="attn-form"><button type="submit" class="ghost">Rebuild</button></form>`;
       return `<li class="attn-row">
         <div class="attn-main">
           <div class="attn-top"><a class="app-name" href="/apps/${id}#quarantine">${esc(a.name)}</a> <strong class="attn-when attn-${w.tone}">${esc(w.headline)}</strong></div>
@@ -170,9 +169,8 @@ export function renderSecurityAttention(apps: AtRiskApp[], now: number, admin = 
       </li>`;
     })
     .join("");
-  const how = admin
-    ? "Each of these apps contains a vulnerability that is being actively exploited (CISA KEV). A rebuild or a new deploy with fixed dependencies clears it. If nothing happens, one last automatic rebuild is tried at the time shown and the app is taken offline when that does not fix it."
-    : "Each of these apps contains a vulnerability that is being actively exploited (CISA KEV). Redeploy it with fixed dependencies (your agent can do this), or open the app for the steps. If nothing happens, one last automatic rebuild is tried at the time shown and the app is taken offline when that does not fix it.";
+  const how =
+    "Each of these apps contains a vulnerability that is being actively exploited (CISA KEV). A rebuild or a new deploy with fixed dependencies clears it, and your agent can do the second. Open an app for the steps. If nothing happens, one last automatic rebuild is tried at the time shown and the app is taken offline when that does not fix it.";
   return `<section class="attn" aria-label="Security attention">
     <div class="attn-head"><strong>${esc(title)}</strong> <span class="meta">&middot; ${esc(counts.join(", "))}</span></div>
     <ul class="attn-list">${rows}</ul>
