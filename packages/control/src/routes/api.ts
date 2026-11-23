@@ -1,12 +1,14 @@
 import { resolveHardening } from "../deploy/hardening.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { apiAuth, type ApiEnv } from "../middleware/auth.js";
 import { apiAuthorize } from "../middleware/api-authorize.js";
 import { apiAudit } from "../middleware/api-audit.js";
 import { apiTokenLimit } from "../middleware/token-limit.js";
 import {
+  appVisibleTo,
   appsVisibleTo,
   createApp,
+  getApp,
   defaultPortForRuntime,
   isAppOwner,
   isConfigured,
@@ -18,6 +20,9 @@ import {
   type Runtime,
 } from "../db/apps.js";
 import { logAudit } from "../db/audit.js";
+import { safeName } from "../util/audit-detail.js";
+import { emitEvent, getEventRowByCursor, listEvents, type EventAudience } from "../db/events.js";
+import { buildEventDetail, decodeCursor, encodeCursor } from "../util/events.js";
 import { getUser } from "../db/users.js";
 import {
   getUserTokenById,
@@ -38,6 +43,7 @@ import {
   getAppStatus,
   rollbackApp,
   ScanBlockedError,
+  UnhealthyDeployError,
   PreflightRejectedError,
 } from "../deploy/index.js";
 import {
@@ -398,6 +404,7 @@ apiRoutes.post("/app/deploy", async (c) => {
       );
     }
     if (err instanceof PreflightRejectedError) {
+      emitEvent({ appId: app.id, code: "deploy_failed:preflight" });
       return c.json(
         {
           status: "rejected",
@@ -409,6 +416,11 @@ apiRoutes.post("/app/deploy", async (c) => {
       );
     }
     updateApp(app.id, { status: "failed" });
+    // A container that never became healthy was already recorded (and reported
+    // as an event) by the deploy itself; anything else is a build failure.
+    if (!(err instanceof UnhealthyDeployError)) {
+      emitEvent({ appId: app.id, code: "deploy_failed:build" });
+    }
     notifyDeployFailure(app.name ?? app.id, app.id, err?.message ?? "Deploy failed");
     return c.json(
       {
@@ -975,6 +987,73 @@ apiRoutes.get("/apps", (c) => {
       },
     })),
   });
+});
+
+/**
+ * Whose events this caller may read: an app key, its own app; a user token,
+ * exactly the apps the person may see on the dashboard (an administrator: all),
+ * decided on this request. `?app=` narrows a user token to one app it may see
+ * (anything else answers 404, like every other app route).
+ */
+function eventAudience(c: Context<ApiEnv>): EventAudience | "not_found" {
+  const actor = c.get("actor");
+  const wanted = c.req.query("app");
+  if (actor.kind === "app-key") {
+    if (wanted && wanted !== actor.appId) return "not_found";
+    return { all: false, appIds: [actor.appId] };
+  }
+  const user = { id: actor.userId, role: actor.role };
+  if (wanted) {
+    const app = getApp(safeName(wanted, 40));
+    return app && appVisibleTo(user, app) ? { all: false, appIds: [app.id] } : "not_found";
+  }
+  if (actor.role === "admin") return { all: true };
+  return { all: false, appIds: appsVisibleTo(actor.userId, false).map((a) => a.id) };
+}
+
+/**
+ * Events since a cursor (S12 follow-up, MCP "events"). Pull, not push: a client
+ * keeps the `next_cursor` and asks again. An event is a type, an app id and a
+ * code; details are on /events/:id. No `since`: the latest events and a cursor.
+ */
+apiRoutes.get("/events", (c) => {
+  const audience = eventAudience(c);
+  if (audience === "not_found") return c.json({ error: "App not found." }, 404);
+
+  const rawSince = c.req.query("since");
+  let since: number | null = null;
+  if (rawSince !== undefined && rawSince !== "") {
+    since = decodeCursor(rawSince);
+    if (since === null) return c.json({ error: "Invalid cursor. Use the next_cursor of an earlier answer." }, 400);
+  }
+  const limit = Math.max(1, Math.min(parseInt(c.req.query("limit") ?? "50", 10) || 50, 200));
+
+  const page = listEvents({ since, limit, audience, initial: 20 });
+  return c.json({
+    events: page.events,
+    next_cursor: encodeCursor(page.nextCursor),
+    has_more: page.hasMore,
+    ...(page.cursorExpired
+      ? {
+          cursor_expired: true,
+          note: "Your cursor is older than the events this server keeps (or was not issued here). Events in between are lost; these are the oldest that remain.",
+        }
+      : {}),
+    ...(since === null ? { initial: true } : {}),
+  });
+});
+
+/** One event in detail: known fields only. The same rights as the list; no such event and not yours look alike. */
+apiRoutes.get("/events/:eventId", (c) => {
+  const row = getEventRowByCursor(c.req.param("eventId"));
+  const audience = eventAudience(c);
+  const visible =
+    row !== undefined &&
+    audience !== "not_found" &&
+    (audience.all || audience.appIds.includes(row.app_id));
+  const detail = visible ? buildEventDetail(row!) : null;
+  if (!detail) return c.json({ error: "Event not found." }, 404);
+  return c.json({ event: detail });
 });
 
 /** Make a new, unconfigured app owned by the person. Configure it with /app/configure. */

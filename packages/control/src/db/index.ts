@@ -1,3 +1,4 @@
+import { ensureEventsTables } from "./events-schema.js";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { ensureUniqueDomainIndexes } from "./domain-index.js";
@@ -573,6 +574,7 @@ export function migrate() {
     );
   }
   ensureUserTokensTable(db);
+  ensureEventsTables(db);
 
   // S02: until now the session cookie was set on `.{base_domain}`, so every
   // deployed app received a valid dashboard session. Those tokens are

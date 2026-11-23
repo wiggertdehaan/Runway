@@ -310,6 +310,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
 
   if (blocked) {
     const deploy = recordDeploy(app.id, imageTag, "blocked", {
+      silentEvent: !!input.scanGate,
       log: blockReason ? `${build.log}\n[runway] blocked: ${blockReason}` : build.log,
       scanStatus: "blocked",
       scanSummary: { status: "blocked", counts: scan.counts },
@@ -375,6 +376,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
         updateApp(app.id, { status: "failed" });
       }
       recordDeploy(app.id, imageTag, "unhealthy", {
+        silentEvent: !!input.scanGate,
         log: `${build.log}\n[runway] unhealthy: ${health.reason}; ${restored ? "restored " + previousTag : "nothing restored"}`,
         scanStatus: scan.status,
         scanSummary,
@@ -407,6 +409,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   });
 
   const deploy = recordDeploy(app.id, imageTag, "success", {
+    silentEvent: !!input.scanGate,
     log: build.log,
     scanStatus: scan.status,
     scanSummary,
@@ -532,7 +535,7 @@ export async function rollbackApp(
     container_id: run.containerId,
   });
 
-  recordDeploy(app.id, prev.image_tag, "success", { log: "Rolled back" });
+  recordDeploy(app.id, prev.image_tag, "success", { log: "Rolled back", rollback: true });
 
   return {
     app_id: app.id,

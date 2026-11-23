@@ -28,6 +28,8 @@ import { getLatestDeploys } from "../db/deploys.js";
 import { readDockerfileFromTar } from "./dockerfile.js";
 import { planBasePatches, type BasePlan, type UsedBaseImage } from "./base-images.js";
 import { escalateBase, type EscalationStep } from "./escalation.js";
+import { emitEvent } from "../db/events.js";
+import { eventsForRebuildResult } from "../util/events.js";
 import { ecosystemOf, planDepUpdates, withholdMajors, type DepPlan } from "./dep-updates.js";
 import { runDepStage, type DepStep } from "./dep-stage.js";
 import { recentDepFailures } from "../db/dep-attempts.js";
@@ -624,6 +626,7 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
       if (why && r.outcome === "rebuilt") r.detail = r.detail ?? `selected: ${why}`;
       results.push(r);
       saveRebuildResults(runId, results);
+      for (const ev of eventsForRebuildResult(r, runId)) emitEvent(ev);
       log.log(`[rebuild] ${app.id}: ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
     }
   } catch (err: any) {

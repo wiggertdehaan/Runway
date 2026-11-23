@@ -146,6 +146,12 @@ services:
       - RATE_LIMIT_HEAVY_PER_10MIN=${RATE_LIMIT_HEAVY_PER_10MIN:-}
       - RATE_LIMIT_AUTH_FAIL_PER_10MIN=${RATE_LIMIT_AUTH_FAIL_PER_10MIN:-}
       - API_IP_RATE_LIMIT=${API_IP_RATE_LIMIT:-}
+      # Events (GET /api/v1/events): how long and how many are kept, and the
+      # health watcher that raises health_unhealthy / health_recovered
+      # (HEALTH_WATCH_INTERVAL_MS=0 turns it off; default one look a minute).
+      - EVENTS_RETENTION_DAYS=${EVENTS_RETENTION_DAYS:-}
+      - EVENTS_MAX_PER_APP=${EVENTS_MAX_PER_APP:-}
+      - HEALTH_WATCH_INTERVAL_MS=${HEALTH_WATCH_INTERVAL_MS:-}
     security_opt:
       - no-new-privileges:true
     tmpfs:

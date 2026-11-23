@@ -150,6 +150,20 @@ claude mcp add runway \
 
 Then just say *"deploy this to Runway"* in any Claude Code session.
 
+#### Events: what happened, without polling
+
+`GET /api/v1/events?since=<cursor>` (and the MCP tools `runway_events` and
+`runway_event_detail`) tell an owner or their agent what happened to an app:
+a deploy ended, health changed, a rebuild finished, an actively exploited
+vulnerability (KEV) deadline is near, a dependency was updated or rolled back,
+an exemption is ending. An event is a type, an app id and a code from a fixed
+list; it never carries logs, environment variables, error messages or text
+from the app. The caller keeps the cursor and asks again (pull, works in every
+client); a user token (`rwu_`) sees exactly the apps that person may see. Events
+are kept 30 days / 500 per app (`EVENTS_RETENTION_DAYS`, `EVENTS_MAX_PER_APP`);
+`HEALTH_WATCH_INTERVAL_MS=0` turns off the health watcher that raises
+`health_unhealthy` / `health_recovered`. Full list of codes: `/llms.txt`.
+
 ## Features
 
 ### Environment variables
@@ -288,6 +302,7 @@ button for admins.
 - Per-app API keys, independent from dashboard sessions, stored as hashes (shown once), rotatable with an optional overlap
 - User tokens (`rwu_`): one token per person for every app they may see, with a scope (read / deploy / admin), an expiry, and revocation by the person or an administrator
 - Audit log for all admin actions
+- Events (a fixed vocabulary, pulled with a cursor): no logs, env or app text in them; text that came from an app is cut short and marked as untrusted
 - Content Security Policy headers
 - Isolated builds via BuildKit (user code never touches the Docker socket)
 - One Docker network per app: apps cannot reach each other or the control plane; optional host egress rules keep them off the cloud metadata address, the host and private networks

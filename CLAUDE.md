@@ -518,6 +518,43 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
   says so) and stops at `RUNWAY_MAX_UPLOAD_MB` (default 100), mirroring the
   server, which would otherwise refuse the whole upload.
 
+### Events are a fixed vocabulary, pulled with a cursor
+- `app_events` (`db/events-schema.ts`, `db/events.ts`) is one table for every app;
+  `util/events.ts` (pure) holds everything that decides what an event IS. An
+  event is a code from `EVENT_CODES` (type, severity and a one-line summary come
+  from that table), an app id and a few validated `facts` (CVE ids, deadlines,
+  counts, ids). It never carries logs, env values, error messages or free text.
+  To add an event: add the code to `EVENT_CODES`, write it with `emitEvent` at
+  the place that already knows the outcome. `emitEvent` never throws (an event
+  must not break a deploy) and has a windowed `dedupeKey`.
+- Text that an app contributed (a package name, a base image) may only travel as
+  `untrusted` and is served as `untrusted_text`, cut to 200 characters, stripped
+  of control/bidi/zero-width characters, with a note that it is data. It is
+  cleaned on the way in and again on the way out. The list never has it; only
+  `GET /events/:id` does. Do not add a free-text field to `EventView`.
+- `GET /api/v1/events?since=` returns events oldest first for exactly the apps
+  the caller may see (an app key: its own; a user token: `appsVisibleTo`, an
+  administrator all; `?app=` narrows, anything else 404). The cursor is `c1_` +
+  the base-36 row id: monotone, opaque to clients. A cursor below the floor
+  (`event_meta.floor`, the highest pruned id) or above anything issued answers
+  `cursor_expired: true` with the oldest events that remain. Residual leak: ids
+  are global, so gaps between the events a caller sees are other apps' events.
+- Where events are written: `recordDeploy` (deploy outcomes; a rebuild's own
+  deploys pass `silentEvent` because the rebuild reports one `rebuild_*` event),
+  the failure branch of `POST /app/deploy`, `executeRun` in `deploy/rebuild.ts`
+  (rebuild result plus dependency/base-image events, via
+  `eventsForRebuildResult`), `announce`/`emitCountdown`/`emitExemptionEvents` in
+  `deploy/quarantine.ts` (KEV; 7/3/1-day countdown once per deadline; exemption
+  ending once per end date) and `deploy/health-watch.ts` (health transitions:
+  one look a minute, a change believed after 3, at most one event per 10
+  minutes per app, in-memory baseline so a restart emits nothing).
+- Retention: `pruneEvents` hourly, 30 days (`EVENTS_RETENTION_DAYS`) and 500 per
+  app (`EVENTS_MAX_PER_APP`). Reads count as `read` for the rate limit and are
+  not audited (`UNAUDITED_READS`).
+- The MCP client (`packages/mcp/src/events.ts`) rebuilds every answer field by
+  field and fences `untrusted_text`; it does not pass server output through. A
+  client that talks to several servers must keep one cursor per server.
+
 ## Migrations
 
 `packages/control/src/db/index.ts` runs `migrate()` on startup. It

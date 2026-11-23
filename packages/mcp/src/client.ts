@@ -3,6 +3,7 @@
  */
 
 import { apiErrorFromResponse } from "./errors.js";
+import { cleanEventDetail, cleanEventsPage, type EventDetailOut, type EventsPage } from "./events.js";
 
 export type Runtime = "node" | "python" | "go" | "static";
 export type ScanThreshold = "none" | "low" | "medium" | "high" | "critical";
@@ -252,6 +253,29 @@ export class RunwayClient {
     if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
     const arrayBuffer = await res.arrayBuffer();
     return Buffer.from(arrayBuffer);
+  }
+
+  /**
+   * Events since a cursor (or the latest ones when there is none). The answer
+   * is rebuilt field by field (see events.ts): nothing the server sends goes to
+   * the model as it came. The cursor is the caller's to keep.
+   */
+  async getEvents(since?: string, limit?: number): Promise<EventsPage> {
+    const q = new URLSearchParams();
+    if (since) q.set("since", since);
+    if (limit !== undefined) q.set("limit", String(limit));
+    const qs = q.toString();
+    return cleanEventsPage(await this.request(`/events${qs ? `?${qs}` : ""}`));
+  }
+
+  /** One event's known fields; null when it does not exist or is not yours. */
+  async getEventDetail(id: string): Promise<EventDetailOut | null> {
+    const res = await fetch(`${this.baseUrl}/api/v1/events/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${this.apiKey}`, "X-Runway-Client": CLIENT_ID },
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
+    return cleanEventDetail(await res.json());
   }
 
   async listDeploys(limit = 20): Promise<{

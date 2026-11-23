@@ -1,4 +1,6 @@
 import { db } from "./index.js";
+import { emitEvent } from "./events.js";
+import { deployEventCode } from "../util/events.js";
 
 export interface Deploy {
   id: number;
@@ -20,6 +22,13 @@ export interface RecordDeployOptions {
   scanReport?: unknown;
   /** Base images (tag + digest) the build used; see deploy/base-images.ts. */
   baseImages?: unknown;
+  /** This record is a rollback to an earlier image (reported as such in the event log). */
+  rollback?: boolean;
+  /**
+   * Do not write an event for it. A rebuild decides its own outcome and reports
+   * it as one rebuild_* event; the deploys inside it must not say it twice.
+   */
+  silentEvent?: boolean;
 }
 
 export function recordDeploy(
@@ -43,11 +52,19 @@ export function recordDeploy(
     resolved.scanReport !== undefined ? JSON.stringify(resolved.scanReport) : null,
     resolved.baseImages !== undefined ? JSON.stringify(resolved.baseImages) : null
   );
-  return db
+  const row = db
     .prepare(
       `SELECT * FROM deploys WHERE app_id = ? ORDER BY id DESC LIMIT 1`
     )
     .get(appId) as unknown as Deploy;
+  if (!resolved.silentEvent) {
+    emitEvent({
+      appId,
+      code: deployEventCode(status, resolved.rollback === true),
+      facts: { deploy_id: row.id },
+    });
+  }
+  return row;
 }
 
 export function getDeploy(appId: string, deployId: number): Deploy | undefined {

@@ -52,6 +52,8 @@ export const UNAUDITED_READS: ReadonlySet<string> = new Set([
   "/api/v1/me", // who am I (user token)
   "/api/v1/apps", // the apps this person may see
   "/api/v1/tokens", // this person's own token list
+  "/api/v1/events", // fixed-vocabulary event list; rate limited as a read
+  "/api/v1/events/:eventId", // one event's known fields
 ]);
 
 /** Largest JSON body the middleware looks at to name the fields. */
