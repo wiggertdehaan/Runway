@@ -9,6 +9,7 @@ import { CLIENT_JS, PREPAINT_JS } from "../ui/client.js";
 import { appStatus, countStates, type AppStatus } from "../ui/status.js";
 import { homeChips, needsAttention, renderChips } from "../ui/home.js";
 import { navCount, renderSecurityPage, type SecurityApp } from "../ui/security-page.js";
+import { PALETTE_CSS, PALETTE_JS, buildPaletteItems, paletteButtons, renderPalette } from "../ui/palette.js";
 import {
   deployReason,
   mayRebuild,
@@ -274,7 +275,11 @@ function layout(
         link("/settings", "Settings", '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
       ].join("")
     : "";
-  const secCount = username ? navCount(securityCountFor(username, admin)) : "";
+  // One read of the apps this viewer may see feeds the sidebar counter and the palette.
+  const visibleApps = username ? appsVisibleTo(username, admin) : [];
+  const secCount = username ? navCount(collectAtRisk(visibleApps).size) : "";
+  const palBtn = paletteButtons();
+  const paletteHtml = username ? renderPalette(buildPaletteItems({ admin, apps: visibleApps })) : "";
   const securityLink = `<a class="nav-link" href="/security" title="Security${secCount ? ` (${secCount} need attention)` : ""}">${icon('<path d="M12 3 4 6v6c0 4.5 3.2 8 8 9 4.8-1 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/>')}<span class="lb">Security</span>${secCount ? `<span class="nav-count" aria-label="${escapeHtml(secCount)} need attention">${escapeHtml(secCount)}</span>` : ""}</a>`;
   const themeBtn = (cls: string) =>
     `<button type="button" class="${cls}" data-act="theme" aria-pressed="false" title="Toggle light/dark theme">
@@ -288,9 +293,11 @@ function layout(
          <aside class="side" aria-label="Sidebar">
            <div class="side-head">
              <a class="brand" href="/">${mark}<span class="lb">Runway</span></a>
+             ${palBtn.top}
              <button type="button" class="menu-btn" id="menubtn" aria-label="Menu" aria-expanded="false" aria-controls="side-body">${icon('<path d="M4 7h16M4 12h16M4 17h16"/>')}</button>
            </div>
            <div class="side-body" id="side-body">
+             ${palBtn.side}
              <nav class="side-nav" aria-label="Main">
                ${link("/", "Apps", '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>')}
                ${securityLink}
@@ -323,12 +330,14 @@ function layout(
         <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0a'/%3E%3Cpath d='M7 16 25 8l-5 17-4-7z' fill='none' stroke='%23fff' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E" />
         <script>${raw(PREPAINT_JS)}</script>
         <script src="${HTMX_PATH}" integrity="${HTMX_INTEGRITY}"></script>
-        <style>${raw(APP_CSS)}</style>
+        <style>${raw(APP_CSS + PALETTE_CSS)}</style>
       </head>
       <body>
         <a class="skip" href="#main">Skip to content</a>
         ${raw(shell)}
+        ${raw(paletteHtml)}
         <script>${raw(CLIENT_JS)}</script>
+        ${username ? html`<script>${raw(PALETTE_JS)}</script>` : ""}
       </body>
     </html>`;
 }
@@ -673,15 +682,6 @@ function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
 /** The apps this viewer may see: all for an admin, their own for an owner. */
 function appsVisibleTo(username: string, admin: boolean): App[] {
   return admin ? listApps() : listApps().filter((a) => a.created_by === username);
-}
-
-/**
- * The sidebar counter next to Security: apps in a KEV term or offline,
- * among the apps this viewer may see (same number as the home page's
- * attention strip, and never a hint about somebody else's apps).
- */
-function securityCountFor(username: string, admin: boolean): number {
-  return collectAtRisk(appsVisibleTo(username, admin)).size;
 }
 
 /** App-page section: quarantine status, exemption, owner notices. */
