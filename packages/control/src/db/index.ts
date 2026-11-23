@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
+import { ensureUniqueDomainIndexes } from "./domain-index.js";
 
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), "runway.db");
 
@@ -209,6 +210,9 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "custom_domain")) {
     db.exec(`ALTER TABLE apps ADD COLUMN custom_domain TEXT`);
   }
+  // S03: one app per hostname. Creates the unique indexes unless the
+  // installation already holds duplicates, which are then reported.
+  ensureUniqueDomainIndexes(db);
   if (!appCols.some((c) => c.name === "health_check_path")) {
     db.exec(`ALTER TABLE apps ADD COLUMN health_check_path TEXT`);
   }

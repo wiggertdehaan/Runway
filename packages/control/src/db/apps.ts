@@ -1,6 +1,7 @@
 import type { SQLInputValue } from "node:sqlite";
 import { customAlphabet, nanoid } from "nanoid";
 import { db } from "./index.js";
+import { normalizeHost } from "./domain-index.js";
 
 // Lowercase alphabet for app ids so they round-trip cleanly into
 // Docker image and container names (which must be lowercase).
@@ -82,10 +83,33 @@ export function getAppByKey(api_key: string): App | undefined {
     .get(api_key) as unknown as App | undefined;
 }
 
+/**
+ * The app answering to a hostname. Hostnames are case-insensitive and a
+ * trailing dot is the same name. With the uniqueness rules there is at most
+ * one; the ORDER BY only matters on an installation that still holds
+ * duplicates from before S03, where the oldest app (the original owner of
+ * the name) wins deterministically instead of whichever row SQLite returns.
+ */
 export function getAppByDomain(domain: string): App | undefined {
+  const host = normalizeHost(domain);
   return db
-    .prepare(`SELECT * FROM apps WHERE domain = ? OR custom_domain = ?`)
-    .get(domain, domain) as unknown as App | undefined;
+    .prepare(
+      `SELECT * FROM apps WHERE lower(domain) = ? OR lower(custom_domain) = ?
+       ORDER BY created_at ASC, id ASC LIMIT 1`
+    )
+    .get(host, host) as unknown as App | undefined;
+}
+
+/** Is this hostname already used by an app other than `exceptAppId`? */
+export function isDomainTaken(domain: string, exceptAppId: string): boolean {
+  const host = normalizeHost(domain);
+  const row = db
+    .prepare(
+      `SELECT 1 AS taken FROM apps
+        WHERE id != ? AND (lower(domain) = ? OR lower(custom_domain) = ?) LIMIT 1`
+    )
+    .get(exceptAppId, host, host);
+  return !!row;
 }
 
 export function listApps(): App[] {
