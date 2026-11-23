@@ -16,6 +16,7 @@ import {
   renderKevBlock,
   renderRebuildLine,
 } from "../ui/app-page.js";
+import { renderMaintenance } from "../ui/maintenance.js";
 
 const APP_VERSION = (() => {
   try {
@@ -1148,31 +1149,9 @@ function renderScanSection(
       ? `<p class="meta" style="margin:0 0 0.5rem;font-size:0.8rem">${escapeHtml(rebuildDisabledReason)}</p>`
       : "";
 
-  const rebuildControls =
-    admin && app.image_tag
-      ? `<div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin:0 0 0.5rem">
-          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-rebuild" style="margin:0">
-            <input type="hidden" name="enabled" value="${app.auto_rebuild ? "0" : "1"}" />
-            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Weekly auto-rebuild: ${app.auto_rebuild ? "on (turn off)" : "off (turn on)"}</button>
-          </form>
-          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-patch" style="margin:0" title="On rebuild, raise exact patch pins in FROM (nginx:1.30.6-alpine to the newest 1.30.x-alpine) in a build-time copy. Your source is never changed.">
-            <input type="hidden" name="enabled" value="${app.auto_patch_base ? "0" : "1"}" />
-            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-patch base image on rebuild: ${app.auto_patch_base ? "on (turn off)" : "off (turn on)"}</button>
-          </form>
-          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-minor" style="margin:0" title="If an actively exploited / fixable critical CVE survives the patch bump, try the lowest newer minor line (nginx 1.30 to 1.31) of the same major and variant. Majors are never automatic.">
-            <input type="hidden" name="enabled" value="${app.auto_minor_base ? "0" : "1"}" />
-            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-minor escalation: ${app.auto_minor_base ? "on (turn off)" : "off (turn on)"}</button>
-          </form>
-          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-deps" style="margin:0" title="On rebuild, raise the app's own packages (requirements.txt, package.json) that have a known vulnerability with a fix, within the installed major version (major jumps have their own switch below). Each update only goes live if the scan improves and the app still starts; otherwise the previous version stays. The changed files are saved as a new source snapshot; the source you uploaded stays available under Deploys.">
-            <input type="hidden" name="enabled" value="${app.auto_update_deps ? "0" : "1"}" />
-            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Auto-update vulnerable dependencies: ${app.auto_update_deps ? "on (turn off)" : "off (turn on)"}</button>
-          </form>
-          ${app.auto_update_deps ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/auto-deps-major" style="margin:0" title="Also allow major version jumps (pillow 12 to 13). Off by default: a healthcheck only proves the app starts, not that a major update leaves it working. When off, a rebuild reports the major update that is available instead of building it.">
-            <input type="hidden" name="enabled" value="${app.auto_update_deps_major ? "0" : "1"}" />
-            <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Also allow major version updates: ${app.auto_update_deps_major ? "on (turn off)" : "off (turn on)"}</button>
-          </form>` : ""}
-        </div>`
-      : "";
+  // Five switches, each posting to the same admin-only endpoint as before.
+  // Owners see the state read-only.
+  const rebuildControls = app.image_tag ? renderMaintenance(app, admin) : "";
 
   const latest = getLatestDeployWithScan(app.id);
   let reportHtml = '<p class="meta">No scan has run yet. Deploy the app to generate a report.</p>';
@@ -2853,6 +2832,9 @@ webRoutes.post("/apps/:id/auto-rebuild", async (c) => {
   if (!app) return c.redirect("/");
   const body = await c.req.parseBody();
   updateApp(app.id, { auto_rebuild: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_rebuild_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 
