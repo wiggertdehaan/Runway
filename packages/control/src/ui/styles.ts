@@ -42,8 +42,8 @@ pre{overflow-x:auto}
 `;
 
 const SHELL = `
-.shell{--sw:232px;display:grid;grid-template-columns:var(--sw) minmax(0,1fr);min-height:100vh}
-.side{position:sticky;top:0;height:100vh;background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:12px 8px;overflow:hidden}
+.shell{--sw:232px;display:grid;grid-template-columns:var(--sw) minmax(0,1fr);min-height:100vh;min-height:100dvh;background:linear-gradient(to right,var(--side) calc(var(--sw) - 1px),var(--line) calc(var(--sw) - 1px),var(--line) var(--sw),transparent var(--sw))}
+.side{position:sticky;top:0;height:100vh;height:100dvh;background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:12px 8px;overflow:hidden}
 .side-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:650;letter-spacing:-.01em;padding:4px 8px 12px;min-height:44px;color:var(--tx);text-decoration:none}
 .mark{width:24px;height:24px;border-radius:var(--r1);background:var(--inv);color:var(--invtx);display:grid;place-items:center;flex:none}
@@ -82,7 +82,7 @@ const SHELL = `
   html[data-side=collapsed] .nav-count{position:absolute;top:1px;right:3px;min-width:16px;height:16px;padding:0 4px;font-size:0.65rem}
 }
 @media (max-width:899px){
-  .shell{display:block}
+  .shell{display:block;background:none}
   .side{height:auto;max-height:100vh;border-right:0;border-bottom:1px solid var(--line);z-index:20;padding:6px 12px}
   .side-head .brand{padding:4px 0}
   .menu-btn{display:grid}
