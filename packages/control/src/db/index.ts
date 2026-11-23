@@ -134,6 +134,25 @@ export function migrate() {
   if (!userColumns.some((c) => c.name === "oauth_provider")) {
     db.exec(`ALTER TABLE users ADD COLUMN oauth_provider TEXT`);
   }
+  // S01: the provider identity (`sub`) an OAuth user first signed in with.
+  // Later logins must present the same one, so a second account that merely
+  // claims the same email address cannot take the account over.
+  if (!userColumns.some((c) => c.name === "oauth_sub")) {
+    db.exec(`ALTER TABLE users ADD COLUMN oauth_sub TEXT`);
+  }
+  // S01: who may create an account by signing in with Google/Microsoft.
+  // Empty by default: nobody new gets in until an admin allows them.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_access (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL CHECK (kind IN ('email','domain')),
+      value TEXT NOT NULL,
+      one_time INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(kind, value)
+    );
+  `);
   if (!userColumns.some((c) => c.name === "totp_secret")) {
     db.exec(`ALTER TABLE users ADD COLUMN totp_secret TEXT`);
   }

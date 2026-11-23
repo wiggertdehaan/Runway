@@ -12,6 +12,7 @@ export interface User {
   password_hash: string;
   email: string | null;
   oauth_provider: string | null;
+  oauth_sub: string | null;
   totp_secret: string | null;
   totp_enabled: number; // 0 | 1 from SQLite
   role: Role;
@@ -64,7 +65,8 @@ export async function createUser(
  */
 export async function createOAuthUser(
   email: string,
-  provider: string
+  provider: string,
+  sub: string | null = null
 ): Promise<User> {
   const id = nanoid(12);
   // Username: email prefix, deduplicated with a numeric suffix
@@ -78,10 +80,21 @@ export async function createOAuthUser(
   }
   const password_hash = await hashPassword(nanoid(64));
   db.prepare(
-    `INSERT INTO users (id, username, password_hash, email, oauth_provider, role)
-     VALUES (?, ?, ?, ?, ?, 'member')`
-  ).run(id, username, password_hash, email.toLowerCase(), provider);
+    `INSERT INTO users (id, username, password_hash, email, oauth_provider, oauth_sub, role)
+     VALUES (?, ?, ?, ?, ?, ?, 'member')`
+  ).run(id, username, password_hash, email.toLowerCase(), provider, sub);
   return getUser(id)!;
+}
+
+/** Pin an account to the provider identity it first signed in with. */
+export function bindOAuthIdentity(
+  userId: string,
+  provider: string,
+  sub: string
+): void {
+  db.prepare(
+    `UPDATE users SET oauth_provider = ?, oauth_sub = ? WHERE id = ? AND oauth_sub IS NULL`
+  ).run(provider, sub, userId);
 }
 
 export function setUserRole(id: string, role: Role): void {

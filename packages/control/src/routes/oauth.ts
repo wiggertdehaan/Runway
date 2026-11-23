@@ -6,6 +6,7 @@ import {
   buildAuthUrl,
   exchangeCode,
   decodeIdToken,
+  isEmailVerified,
   generateState,
   generateNonce,
   generatePkcePair,
@@ -16,8 +17,11 @@ import { getSetting } from "../db/settings.js";
 import {
   getUserByEmail,
   createOAuthUser,
+  bindOAuthIdentity,
   type User,
 } from "../db/users.js";
+import { decideOAuthLogin, safeReturnTo } from "../auth/oauth-access.js";
+import { isAccessAllowed, consumeInvite } from "../db/oauth-access.js";
 import { createSession, getSessionUser } from "../db/sessions.js";
 import { getAppByDomain } from "../db/apps.js";
 import { isEmailAllowedForApp } from "../db/app-emails.js";
@@ -34,6 +38,23 @@ const SESSION_COOKIE = "runway_session";
 function dashboardOrigin(): string {
   const domain = process.env.DASHBOARD_DOMAIN;
   return domain ? `https://${domain}` : "http://localhost:3000";
+}
+
+/**
+ * Hosts we may send a browser to after login: the dashboard, subdomains of
+ * the base domain, and any app's own domain. Everything else is refused.
+ */
+function isOurHost(host: string): boolean {
+  const dash = process.env.DASHBOARD_DOMAIN?.toLowerCase();
+  if (dash && host === dash) return true;
+  if (!dash && (host === "localhost" || host === "127.0.0.1")) return true;
+  const base = getSetting("base_domain")?.toLowerCase();
+  if (base && (host === base || host.endsWith(`.${base}`))) return true;
+  return !!getAppByDomain(host);
+}
+
+export function safeReturn(raw: string | undefined | null): string {
+  return safeReturnTo(raw, isOurHost);
 }
 
 function isSecureRequest(c: { req: { header: (name: string) => string | undefined } }): boolean {
@@ -81,7 +102,8 @@ function startHandler(provider: OAuthProvider) {
     const state = generateState();
     const nonce = generateNonce();
     const pkce = generatePkcePair();
-    const returnTo = c.req.query("return_to") ?? "/";
+    // S17: only a relative path or one of our own hosts survives.
+    const returnTo = safeReturn(c.req.query("return_to"));
 
     const transientCookie = {
       httpOnly: true,
@@ -153,6 +175,8 @@ function callbackHandler(provider: OAuthProvider) {
     }
 
     let email: string;
+    let sub: string;
+    let verified: boolean;
     try {
       const tokens = await exchangeCode(
         provider,
@@ -170,22 +194,49 @@ function callbackHandler(provider: OAuthProvider) {
         return c.redirect("/login?error=oauth_no_email");
       }
       email = claims.email.toLowerCase();
+      sub = claims.sub;
+      verified = isEmailVerified(provider.name, claims);
     } catch (err: any) {
       console.error(`OAuth callback error (${provider.name}):`, err?.message);
       return c.redirect("/login?error=oauth_exchange");
     }
 
-    // Look up or provision user
-    let user: User | undefined = getUserByEmail(email);
-    if (!user) {
+    // S01: an unverified address never signs in or links, and a stranger
+    // only gets an account when an admin allowed their address or domain
+    // (or invited them). Every refusal looks the same to the visitor; the
+    // reason goes to the audit log for the admin.
+    const existing = getUserByEmail(email);
+    const decision = decideOAuthLogin({
+      provider: provider.name,
+      sub,
+      emailVerified: verified,
+      existing: existing
+        ? { oauth_provider: existing.oauth_provider, oauth_sub: existing.oauth_sub }
+        : null,
+      allowed: !existing && verified ? isAccessAllowed(email) : false,
+    });
+    if (decision.action === "deny") {
+      logAudit("unknown", email, "oauth_denied", {
+        detail: `provider=${provider.name} reason=${decision.reason}`,
+      });
+      return c.redirect("/login?error=oauth_denied");
+    }
+
+    let user: User;
+    if (decision.action === "provision") {
       try {
-        user = await createOAuthUser(email, provider.name);
+        user = await createOAuthUser(email, provider.name, sub);
+        consumeInvite(email);
         logAudit(user.id, user.username, "user_created_oauth", { detail: `provider=${provider.name}` });
       } catch (err: any) {
         // Race condition: another request created the user
-        user = getUserByEmail(email);
-        if (!user) throw err;
+        const raced = getUserByEmail(email);
+        if (!raced) throw err;
+        user = raced;
       }
+    } else {
+      user = existing!;
+      if (decision.bindIdentity) bindOAuthIdentity(user.id, provider.name, sub);
     }
 
     // Create session
@@ -194,7 +245,8 @@ function callbackHandler(provider: OAuthProvider) {
 
     logAudit(user.id, user.username, "login_oauth", { detail: `provider=${provider.name}` });
 
-    const returnTo = getCookie(c, RETURN_COOKIE) ?? "/";
+    // Validate again: the cookie is ours, but it is the user's to edit.
+    const returnTo = safeReturn(getCookie(c, RETURN_COOKIE));
     deleteCookie(c, RETURN_COOKIE, { path: "/" });
 
     return c.redirect(returnTo);

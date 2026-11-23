@@ -282,8 +282,18 @@ without knowing why.
 - `packages/control/src/routes/oauth.ts` — mounted in `app.ts`
   before web routes. Contains:
   - `GET /auth/{google,microsoft}` — redirects to provider consent
-  - `GET /auth/{google,microsoft}/callback` — exchanges code, looks
-    up or auto-provisions a Runway user by email, creates session
+  - `GET /auth/{google,microsoft}/callback` — exchanges code, then
+    `decideOAuthLogin` (pure, `auth/oauth-access.ts`) decides: an
+    unverified email never signs in, links or provisions (Google needs
+    `email_verified`; Microsoft only counts with the optional
+    `xms_edov` claim, otherwise fail closed); an existing account signs
+    in and is pinned to the provider `sub` on first use; an unknown
+    address gets an account ONLY if it is on the `oauth_access`
+    allowlist (address or domain) or has a one-use invitation, managed
+    on the Users page. All refusals show the same message and are
+    audited as `oauth_denied` with the reason. `return_to` is validated
+    by `safeReturnTo` (relative path or one of our hosts) at the start
+    and again at the callback.
   - `GET /auth/verify` — Traefik forward-auth endpoint, called on
     every request to SSO-protected app subdomains. Checks session
     cookie + email allowlist.

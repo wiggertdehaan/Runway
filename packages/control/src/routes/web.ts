@@ -85,6 +85,9 @@ import {
   type User,
   ROLES,
 } from "../db/users.js";
+import { safeReturn } from "./oauth.js";
+import { parseAccessEntry } from "../auth/oauth-access.js";
+import { addAccess, listAccess, removeAccess } from "../db/oauth-access.js";
 import { createSession, deleteAllUserSessions, deleteSession, getSessionUser } from "../db/sessions.js";
 import {
   createPreauthSession,
@@ -425,7 +428,8 @@ webRoutes.get("/login", (c) => {
         ? '<div class="error">Invalid username or password.</div>'
         : "";
 
-  const returnTo = c.req.query("return_to") ?? "";
+  // S17: do not even pass an off-site target on to the OAuth start route.
+  const returnTo = c.req.query("return_to") ? safeReturn(c.req.query("return_to")) : "";
   const returnParam = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
 
   const hasGoogle = !!getSetting("oauth_google_client_id");
@@ -440,7 +444,9 @@ webRoutes.get("/login", (c) => {
 
   const oauthError = error === "oauth_state" || error === "oauth_no_code" || error === "oauth_exchange" || error === "oauth_no_email" || error === "oauth_nonce"
     ? '<div class="error">OAuth login failed. Please try again.</div>'
-    : "";
+    : error === "oauth_denied"
+      ? '<div class="error">This account cannot sign in here yet. Ask your administrator for an invitation.</div>'
+      : "";
 
   return c.html(
     authLayout(
@@ -2190,11 +2196,79 @@ webRoutes.get("/users", (c) => {
           <button type="submit">Add user</button>
         </div>
       </form>
+      ${renderOAuthAccessCard(error)}
       ${rows}
     `,
       { username: current.username, csrf: csrfField(c), isAdmin: isAdmin(current) }
     )
   );
+});
+
+function renderOAuthAccessCard(error: string | undefined): string {
+  const configured =
+    !!getSetting("oauth_google_client_id") || !!getSetting("oauth_microsoft_client_id");
+  const rows = listAccess();
+  const list = rows.length
+    ? rows
+        .map((r) => {
+          const label =
+            r.kind === "domain"
+              ? `Everyone at <strong>@${escapeHtml(r.value)}</strong>`
+              : `<strong>${escapeHtml(r.value)}</strong>${r.one_time ? ' <span class="tag">Invitation, one use</span>' : ""}`;
+          return `<li class="flex" style="justify-content:space-between;align-items:center;margin:0.4rem 0">
+            <span>${label}</span>
+            <form method="POST" action="/users/oauth-access/${r.id}/delete"><button type="submit" class="ghost">Remove</button></form>
+          </li>`;
+        })
+        .join("")
+    : '<li class="hint">Nobody yet. People with Google or Microsoft cannot create an account until you add them.</li>';
+  const msg =
+    error === "oauth_access_invalid"
+      ? '<div class="error">Enter an email address (ann@example.com) or a domain (example.com).</div>'
+      : "";
+  return `<div class="card" id="oauth-access">
+      <h2>Sign in with Google or Microsoft</h2>
+      <p class="hint">${
+        configured
+          ? "Only these people can create an account by signing in with Google or Microsoft. Anyone who already has an account keeps signing in as before."
+          : "Google and Microsoft sign-in is not set up (see Settings, Single Sign-On). Once it is, only the people below can create an account."
+      } Adding a whole domain lets everyone with that address in, so use it only for a domain you control (not gmail.com).</p>
+      ${msg}
+      <ul style="list-style:none;padding:0">${list}</ul>
+      <form method="POST" action="/users/oauth-access">
+        <div class="flex">
+          <input type="text" name="entry" placeholder="ann@example.com or example.com" aria-label="Email address or domain" autocomplete="off" autocapitalize="none" spellcheck="false" required style="flex:1" />
+          <label style="white-space:nowrap"><input type="checkbox" name="invite" value="1" /> One use</label>
+          <button type="submit">Allow</button>
+        </div>
+      </form>
+    </div>`;
+}
+
+webRoutes.post("/users/oauth-access", async (c) => {
+  const body = await c.req.parseBody();
+  const entry = parseAccessEntry(String(body["entry"] ?? ""));
+  if (!entry) return c.redirect("/users?error=oauth_access_invalid#oauth-access");
+  const current = c.get("user");
+  const added = addAccess(entry, {
+    invite: body["invite"] === "1",
+    createdBy: current.username,
+  });
+  if (added) {
+    logAudit(current.id, current.username, "oauth_access_added", {
+      detail: `${entry.kind}=${entry.value}${body["invite"] === "1" && entry.kind === "email" ? " (invitation)" : ""}`,
+    });
+  }
+  return c.redirect("/users#oauth-access");
+});
+
+webRoutes.post("/users/oauth-access/:id/delete", (c) => {
+  const id = Number(c.req.param("id"));
+  const current = c.get("user");
+  if (Number.isInteger(id) && removeAccess(id)) {
+    logAudit(current.id, current.username, "oauth_access_removed", { detail: `id=${id}` });
+  }
+  return c.redirect("/users#oauth-access");
 });
 
 webRoutes.post("/users", async (c) => {
