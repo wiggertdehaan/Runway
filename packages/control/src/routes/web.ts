@@ -223,7 +223,7 @@ import {
 import { readFile } from "node:fs/promises";
 import { runHealthChecks, cachedHealth } from "../overview/health.js";
 import { buildOverview, parsePeriod, parseTime as parseOverviewTime, type OverviewApp } from "../overview/build.js";
-import { gatherDbInputs } from "../overview/gather.js";
+import { gatherDbInputs, gatherHostInput } from "../overview/gather.js";
 import { renderOverview } from "../ui/overview.js";
 import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
@@ -997,8 +997,10 @@ webRoutes.get("/overview", async (c) => {
   });
   const dbInputs = gatherDbInputs({ appIds: apps.map((a) => a.id), viewer: { id: user.id, admin }, now });
   const health = admin ? await cachedHealth().catch(() => null) : null;
+  // Server figures are for administrators: an owner's request never touches them.
+  const host = admin ? gatherHostInput(now, period) : null;
   const view = buildOverview(
-    { viewer: { admin }, apps: overviewApps, kev: [...atRisk.values()], health, ...dbInputs },
+    { viewer: { admin }, apps: overviewApps, kev: [...atRisk.values()], health, host, ...dbInputs },
     now,
     period
   );

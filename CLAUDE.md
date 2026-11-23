@@ -443,6 +443,36 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 - The weekly run only rebuilds apps with issues, so the page says "Next rebuild
   of apps with issues", never "all apps".
 
+### Host figures are read from inside the container and distrust themselves
+- `host/collector.ts` reads `/proc/stat` and `/proc/meminfo` (CPU and memory
+  every minute), `statfs(<db dir>)` (disk, every 5 min), `docker system df` and
+  `buildctl du` (Docker data, every 15 min, 20 s time limit) and stores 5-minute
+  means in `host_metrics` (`host/store.ts`, a running mean in SQL so a restart
+  mid-bucket loses nothing; 60 days, pruned hourly). `host_state` holds the
+  last disk reading, MemTotal, the container-view verdicts, the last error per
+  reading and the data note. It needs NO extra right: no mount, no `pid: host`,
+  no compose privilege. Keep it that way; if a number cannot be had without
+  one, say "No data yet", do not widen the container.
+- `host/readings.ts` is pure and holds every rule: parsers (`/proc/stat`,
+  `/proc/meminfo`, cgroup limit, `docker system df` in both shapes,
+  `buildctl du`), and the sanity checks. Memory is a CONTAINER view when a
+  numeric cgroup limit is not smaller than MemTotal (lxcfs-style virtual /proc;
+  a limit smaller than MemTotal is a normal limited container on a host-wide
+  /proc). The disk is a container view when the data volume is tmpfs/ramfs or
+  under 1 GiB. CPU follows the memory verdict (same /proc). A container-view
+  reading is shown grey as "Container view, not the host", never as a host
+  number, and gives one log line and one `host_metrics_container_view` audit
+  line per change. No inbox item for a container-view disk, one quiet info line.
+- A failed or timed-out reading keeps the previous values and stores its
+  reason (`err:<name>`); the page says "No data yet" with the reason as tooltip
+  or "measured N min ago". The BuildKit cache volume is counted once: from
+  `buildctl du`, else from its volume's size (an estimate), else left out with
+  a note. Units are decimal (GB), like `docker system df`.
+- Only `buildOverview` for an administrator uses it (`input.host` is ignored
+  for an owner and the route never reads it for one). Disk 80% = "This week",
+  90% = "Needs you now" (`DISK_WARN_PCT`, `DISK_CRIT_PCT`).
+  `HOST_METRICS_INTERVAL_MS=0` turns the collector off.
+
 ### The Rebuild page has two buttons, one selection rule
 - `selectRebuildCandidates` (`deploy/rebuild.ts`, pure over a findings provider) is
   the ONE place that decides which apps "have issues": a deployed image and a

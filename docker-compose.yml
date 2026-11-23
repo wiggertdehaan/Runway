@@ -152,6 +152,10 @@ services:
       - EVENTS_RETENTION_DAYS=${EVENTS_RETENTION_DAYS:-}
       - EVENTS_MAX_PER_APP=${EVENTS_MAX_PER_APP:-}
       - HEALTH_WATCH_INTERVAL_MS=${HEALTH_WATCH_INTERVAL_MS:-}
+      # Host disk, CPU, memory and Docker data usage for the overview page, read
+      # from inside this container (no extra mount or privilege). Empty = every
+      # minute (disk every 5, Docker data every 15); 0 turns it off.
+      - HOST_METRICS_INTERVAL_MS=${HOST_METRICS_INTERVAL_MS:-}
       # One-time token that /setup asks for until the first admin exists (S19).
       # install.sh writes one into .env. Empty = control generates one on first
       # start and prints it in its log. It does nothing once an admin exists.
