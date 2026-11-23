@@ -26,6 +26,8 @@ export interface DevToken {
   token_hint: string | null;
   name: string;
   expires_at: string | null;
+  /** 1 when the upgrade (not the person) set the expiry on a token that had none. */
+  expiry_assigned: number;
   last_used_at: string | null;
   created_at: string;
 }
@@ -78,7 +80,7 @@ export function createDevToken(
 export function listDevTokens(userId: string): DevTokenSummary[] {
   return db
     .prepare(
-      `SELECT id, user_id, name, token_hint, expires_at, last_used_at, created_at
+      `SELECT id, user_id, name, token_hint, expires_at, expiry_assigned, last_used_at, created_at
        FROM dev_tokens
        WHERE user_id = ?
        ORDER BY created_at DESC`,
@@ -90,7 +92,7 @@ export function listDevTokens(userId: string): DevTokenSummary[] {
 export function listAllDevTokens(): Array<DevTokenSummary & { username: string | null }> {
   return db
     .prepare(
-      `SELECT t.id, t.user_id, t.name, t.token_hint, t.expires_at, t.last_used_at, t.created_at,
+      `SELECT t.id, t.user_id, t.name, t.token_hint, t.expires_at, t.expiry_assigned, t.last_used_at, t.created_at,
               u.username AS username
        FROM dev_tokens t LEFT JOIN users u ON u.id = t.user_id
        ORDER BY t.created_at DESC`,

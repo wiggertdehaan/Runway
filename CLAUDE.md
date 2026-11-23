@@ -369,6 +369,10 @@ without knowing why.
 - The one-time fill from the old name (`db/owner-migration.ts`) runs only in
   the transaction that adds the column. Do not make it re-run: it would
   hand an ownerless app to whoever has since taken that username.
+- An admin gives an ownerless app to a user (or re-assigns, or makes it
+  ownerless again) on the app's Config tab: `POST /apps/:id/owner`, admin
+  only, audited as `app_owner_assigned`; `setAppOwner()` is the one place
+  that moves ownership and refuses a user id that does not exist.
 
 ### App containers are hardened in one place (S08)
 - `deploy/hardening.ts` is the only code that sets capabilities, PID limit,
@@ -451,6 +455,11 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
   a log, an audit detail, a response or a page. `migrateTokenStorage` is
   data-driven and idempotent; `getAppByKey` also adopts a row that still has a
   plaintext key and no hash.
+- Developer tokens (`rwd_`) that predate expiry got one at the upgrade:
+  `expireLegacyDevTokens()` (called from `migrate()`) sets 90 days on rows
+  whose `expires_at` IS NULL and marks them `expiry_assigned = 1`; a date that
+  already exists is never touched, so it is safe on every start. The Account
+  page shows `legacyExpiryNotice()` while such a token is still active.
 - The dashboard cannot show an old key. `util/key-reveal.ts` holds a NEW key in
   memory for 10 minutes for the one person who made it (the home page
   re-renders every 5 s, so a single read is not enough); never persist it.
@@ -615,6 +624,16 @@ for installations that predate the MCP-driven configure flow
 (name/runtime used to be `NOT NULL`). Add new columns with
 `ALTER TABLE ... ADD COLUMN` and bump the rebuild condition if you
 change constraints.
+
+### First-run setup is guarded by a token (S19)
+- While no user exists, `/setup` needs a one-time token (`auth/setup-token.ts`):
+  `SETUP_TOKEN` from the environment (install.sh writes one into `.env` and
+  prints it once; 16+ characters, shorter is ignored), else one control
+  generates and keeps in the settings table (`setup_token`) and prints at
+  every start as `Setup token: ...`. Wrong guesses are counted (5 per address,
+  30 for the server, 15 minutes) and refused even with the right token while
+  locked. The token is deleted when the first account is created; an existing
+  installation never sees it. Never put it in a URL or a redirect.
 
 ## Conventions
 

@@ -129,3 +129,43 @@ export function ensureUserTokensTable(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON user_tokens(user_id);
   `);
 }
+
+/** Days a developer token without an expiry is given when it is first met. */
+export const LEGACY_DEV_TOKEN_DAYS = 90;
+
+function sqliteTime(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+}
+
+/**
+ * Developer tokens (`rwd_`) made before tokens expired have no expiry and
+ * work forever. Give each of them an expiry, `days` from now, and remember
+ * that it was the upgrade that set it (`expiry_assigned = 1`) so the Account
+ * page can say so.
+ *
+ * Idempotent by construction: only rows whose expiry is NULL are touched, so a
+ * token that already expires (earlier OR later) keeps its date, and once all
+ * rows have a date a second run changes nothing. New tokens always get a
+ * date. Existing tokens keep working until then. Returns how many were set.
+ */
+export function expireLegacyDevTokens(
+  db: DatabaseSync,
+  now = Date.now(),
+  days = LEGACY_DEV_TOKEN_DAYS
+): number {
+  db.exec("BEGIN");
+  try {
+    if (!hasColumn(db, "dev_tokens", "expiry_assigned")) {
+      db.exec(`ALTER TABLE dev_tokens ADD COLUMN expiry_assigned INTEGER NOT NULL DEFAULT 0`);
+    }
+    const expires = sqliteTime(now + days * 86_400_000);
+    const result = db
+      .prepare(`UPDATE dev_tokens SET expires_at = ?, expiry_assigned = 1 WHERE expires_at IS NULL`)
+      .run(expires);
+    db.exec("COMMIT");
+    return Number(result.changes);
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}

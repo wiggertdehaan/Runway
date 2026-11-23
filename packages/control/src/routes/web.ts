@@ -182,7 +182,7 @@ import {
 } from "../db/user-tokens.js";
 import { deleteDevTokenAsAdmin, listAllDevTokens } from "../db/dev-tokens.js";
 import { grantableScopes, isScope, USER_TOKEN_DEFAULT_DAYS, USER_TOKEN_MAX_DAYS } from "../util/token-scopes.js";
-import { renderNewTokenForm, renderTokenTable } from "../ui/token-lists.js";
+import { legacyExpiryNotice, renderNewTokenForm, renderTokenTable } from "../ui/token-lists.js";
 import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
 import { describeBaseImage, lineOf, parseImageRef } from "../deploy/base-images.js";
 import {
@@ -2451,6 +2451,7 @@ function renderAdminTokensCard(revoked: string | undefined): string {
     hint: t.token_hint,
     scope: null,
     expires_at: t.expires_at,
+    expiry_assigned: t.expiry_assigned,
     last_used_at: t.last_used_at,
     revoked_at: null,
     username: t.username,
@@ -3962,7 +3963,7 @@ webRoutes.get("/account", (c) => {
             <tr style="border-top:1px solid var(--border)">
               <td style="padding:0.5rem 0.6rem 0.5rem 0">${escapeHtml(t.name)}${t.token_hint ? ` <span class="meta"><code>…${escapeHtml(t.token_hint)}</code></span>` : ""}</td>
               <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.last_used_at ? escapeHtml(formatRelative(t.last_used_at)) : "never"}</td>
-              <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.expires_at ? escapeHtml(t.expires_at.slice(0, 10)) : "never"}</td>
+              <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.expires_at ? escapeHtml(t.expires_at.slice(0, 10)) : "never"}${t.expiry_assigned === 1 ? ' <span class="tag tag-warn" title="This token had no expiry. The upgrade gave it one. Make a new token before then and revoke this one.">set by upgrade</span>' : ""}</td>
               <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${escapeHtml(formatRelative(t.created_at))}</td>
               <td style="padding:0.5rem 0 0.5rem 0.6rem;text-align:right">
                 <form method="POST" action="/account/tokens/${escapeHtml(t.id)}/delete" style="margin:0" onsubmit="return confirm('Revoke this token? Any Claude Code session using it will lose access.')">
@@ -4024,6 +4025,7 @@ webRoutes.get("/account", (c) => {
       "Account",
       `
       <h1>Account</h1>
+      ${legacyExpiryNotice(tokens.map((t) => ({ expires_at: t.expires_at, revoked_at: null, expiry_assigned: t.expiry_assigned })))}
       ${
         error === "locked"
           ? `<div class="error">Too many failed attempts. Try again in ${waitText(lockRemainingSeconds(user.id) || 60)}.</div>`
