@@ -1,4 +1,6 @@
 import { db } from "./index.js";
+import { emitEvent } from "./events.js";
+import { deployEventCode } from "../util/events.js";
 
 export interface Deploy {
   id: number;
@@ -9,6 +11,7 @@ export interface Deploy {
   scan_status: string | null;
   scan_summary: string | null;
   scan_report: string | null;
+  base_images: string | null;
   created_at: string;
 }
 
@@ -17,6 +20,15 @@ export interface RecordDeployOptions {
   scanStatus?: string;
   scanSummary?: unknown;
   scanReport?: unknown;
+  /** Base images (tag + digest) the build used; see deploy/base-images.ts. */
+  baseImages?: unknown;
+  /** This record is a rollback to an earlier image (reported as such in the event log). */
+  rollback?: boolean;
+  /**
+   * Do not write an event for it. A rebuild decides its own outcome and reports
+   * it as one rebuild_* event; the deploys inside it must not say it twice.
+   */
+  silentEvent?: boolean;
 }
 
 export function recordDeploy(
@@ -28,8 +40,8 @@ export function recordDeploy(
   const resolved: RecordDeployOptions =
     typeof opts === "string" ? { log: opts } : opts;
   db.prepare(
-    `INSERT INTO deploys (app_id, image_tag, status, log, scan_status, scan_summary, scan_report)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO deploys (app_id, image_tag, status, log, scan_status, scan_summary, scan_report, base_images)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     appId,
     imageTag,
@@ -37,13 +49,22 @@ export function recordDeploy(
     resolved.log ?? null,
     resolved.scanStatus ?? null,
     resolved.scanSummary !== undefined ? JSON.stringify(resolved.scanSummary) : null,
-    resolved.scanReport !== undefined ? JSON.stringify(resolved.scanReport) : null
+    resolved.scanReport !== undefined ? JSON.stringify(resolved.scanReport) : null,
+    resolved.baseImages !== undefined ? JSON.stringify(resolved.baseImages) : null
   );
-  return db
+  const row = db
     .prepare(
       `SELECT * FROM deploys WHERE app_id = ? ORDER BY id DESC LIMIT 1`
     )
     .get(appId) as unknown as Deploy;
+  if (!resolved.silentEvent) {
+    emitEvent({
+      appId,
+      code: deployEventCode(status, resolved.rollback === true),
+      facts: { deploy_id: row.id },
+    });
+  }
+  return row;
 }
 
 export function getDeploy(appId: string, deployId: number): Deploy | undefined {
@@ -103,4 +124,17 @@ export function getLatestDeploys(appId: string, limit = 5): Deploy[] {
       `SELECT * FROM deploys WHERE app_id = ? ORDER BY id DESC LIMIT ?`
     )
     .all(appId, limit) as unknown as Deploy[];
+}
+
+/** Parse a deploy's stored base_images JSON (empty list when absent/corrupt). */
+export function parseBaseImages(
+  d: Pick<Deploy, "base_images">
+): Array<{ image: string; digest: string; auto_patched_from?: string; auto_minor_from?: string }> {
+  if (!d.base_images) return [];
+  try {
+    const v = JSON.parse(d.base_images);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
 }

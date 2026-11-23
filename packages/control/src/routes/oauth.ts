@@ -6,6 +6,7 @@ import {
   buildAuthUrl,
   exchangeCode,
   decodeIdToken,
+  isEmailVerified,
   generateState,
   generateNonce,
   generatePkcePair,
@@ -16,12 +17,31 @@ import { getSetting } from "../db/settings.js";
 import {
   getUserByEmail,
   createOAuthUser,
+  bindOAuthIdentity,
   type User,
 } from "../db/users.js";
+import { decideOAuthLogin, safeReturnTo } from "../auth/oauth-access.js";
+import { isAccessAllowed, consumeInvite } from "../db/oauth-access.js";
 import { createSession, getSessionUser } from "../db/sessions.js";
+import { createSsoTicket, redeemSsoTicket, createSsoSession, getSsoSession } from "../db/sso-sessions.js";
+import { getUser } from "../db/users.js";
+import {
+  readSessionToken,
+  setSessionCookie,
+  ssoCookieName,
+  ssoCookieOptions,
+} from "../middleware/cookies.js";
 import { getAppByDomain } from "../db/apps.js";
 import { isEmailAllowedForApp } from "../db/app-emails.js";
 import { logAudit } from "../db/audit.js";
+import {
+  decideForwardAuth,
+  normalizeHost,
+  safeAppPath,
+  takeTicket,
+  withTicket,
+  type ForwardAuthDecision,
+} from "../auth/forward-auth.js";
 
 export const oauthRoutes = new Hono();
 
@@ -29,11 +49,27 @@ const STATE_COOKIE = "runway_oauth_state";
 const NONCE_COOKIE = "runway_oauth_nonce";
 const PKCE_COOKIE = "runway_oauth_pkce";
 const RETURN_COOKIE = "runway_oauth_return";
-const SESSION_COOKIE = "runway_session";
 
 function dashboardOrigin(): string {
   const domain = process.env.DASHBOARD_DOMAIN;
   return domain ? `https://${domain}` : "http://localhost:3000";
+}
+
+/**
+ * Hosts we may send a browser to after login: the dashboard, subdomains of
+ * the base domain, and any app's own domain. Everything else is refused.
+ */
+function isOurHost(host: string): boolean {
+  const dash = process.env.DASHBOARD_DOMAIN?.toLowerCase();
+  if (dash && host === dash) return true;
+  if (!dash && (host === "localhost" || host === "127.0.0.1")) return true;
+  const base = getSetting("base_domain")?.toLowerCase();
+  if (base && (host === base || host.endsWith(`.${base}`))) return true;
+  return !!getAppByDomain(host);
+}
+
+export function safeReturn(raw: string | undefined | null): string {
+  return safeReturnTo(raw, isOurHost);
 }
 
 function isSecureRequest(c: { req: { header: (name: string) => string | undefined } }): boolean {
@@ -41,18 +77,6 @@ function isSecureRequest(c: { req: { header: (name: string) => string | undefine
     c.req.header("x-forwarded-proto") === "https" ||
     dashboardOrigin().startsWith("https")
   );
-}
-
-function sessionCookieOptions(c: { req: { header: (name: string) => string | undefined } }) {
-  const baseDomain = getSetting("base_domain");
-  return {
-    httpOnly: true,
-    sameSite: "Lax" as const,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30,
-    secure: isSecureRequest(c),
-    ...(baseDomain ? { domain: `.${baseDomain}` } : {}),
-  };
 }
 
 function getProviderConfig(
@@ -81,7 +105,8 @@ function startHandler(provider: OAuthProvider) {
     const state = generateState();
     const nonce = generateNonce();
     const pkce = generatePkcePair();
-    const returnTo = c.req.query("return_to") ?? "/";
+    // S17: only a relative path or one of our own hosts survives.
+    const returnTo = safeReturn(c.req.query("return_to"));
 
     const transientCookie = {
       httpOnly: true,
@@ -153,6 +178,8 @@ function callbackHandler(provider: OAuthProvider) {
     }
 
     let email: string;
+    let sub: string;
+    let verified: boolean;
     try {
       const tokens = await exchangeCode(
         provider,
@@ -170,31 +197,59 @@ function callbackHandler(provider: OAuthProvider) {
         return c.redirect("/login?error=oauth_no_email");
       }
       email = claims.email.toLowerCase();
+      sub = claims.sub;
+      verified = isEmailVerified(provider.name, claims);
     } catch (err: any) {
       console.error(`OAuth callback error (${provider.name}):`, err?.message);
       return c.redirect("/login?error=oauth_exchange");
     }
 
-    // Look up or provision user
-    let user: User | undefined = getUserByEmail(email);
-    if (!user) {
+    // S01: an unverified address never signs in or links, and a stranger
+    // only gets an account when an admin allowed their address or domain
+    // (or invited them). Every refusal looks the same to the visitor; the
+    // reason goes to the audit log for the admin.
+    const existing = getUserByEmail(email);
+    const decision = decideOAuthLogin({
+      provider: provider.name,
+      sub,
+      emailVerified: verified,
+      existing: existing
+        ? { oauth_provider: existing.oauth_provider, oauth_sub: existing.oauth_sub }
+        : null,
+      allowed: !existing && verified ? isAccessAllowed(email) : false,
+    });
+    if (decision.action === "deny") {
+      logAudit("unknown", email, "oauth_denied", {
+        detail: `provider=${provider.name} reason=${decision.reason}`,
+      });
+      return c.redirect("/login?error=oauth_denied");
+    }
+
+    let user: User;
+    if (decision.action === "provision") {
       try {
-        user = await createOAuthUser(email, provider.name);
+        user = await createOAuthUser(email, provider.name, sub);
+        consumeInvite(email);
         logAudit(user.id, user.username, "user_created_oauth", { detail: `provider=${provider.name}` });
       } catch (err: any) {
         // Race condition: another request created the user
-        user = getUserByEmail(email);
-        if (!user) throw err;
+        const raced = getUserByEmail(email);
+        if (!raced) throw err;
+        user = raced;
       }
+    } else {
+      user = existing!;
+      if (decision.bindIdentity) bindOAuthIdentity(user.id, provider.name, sub);
     }
 
     // Create session
     const session = createSession(user.id);
-    setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+    setSessionCookie(c, session.token);
 
     logAudit(user.id, user.username, "login_oauth", { detail: `provider=${provider.name}` });
 
-    const returnTo = getCookie(c, RETURN_COOKIE) ?? "/";
+    // Validate again: the cookie is ours, but it is the user's to edit.
+    const returnTo = safeReturn(getCookie(c, RETURN_COOKIE));
     deleteCookie(c, RETURN_COOKIE, { path: "/" });
 
     return c.redirect(returnTo);
@@ -205,51 +260,103 @@ oauthRoutes.get("/auth/google/callback", callbackHandler(GOOGLE));
 oauthRoutes.get("/auth/microsoft/callback", callbackHandler(MICROSOFT));
 
 // ── Forward-auth verify ─────────────────────────────────
+//
+// S02: an app host has its own sign-in, separate from the dashboard session.
+//   1. No app cookie: send the visitor to the dashboard (/sso/start), where
+//      the host-only dashboard cookie proves who they are.
+//   2. The dashboard hands back a one-time ticket in the URL of THIS host.
+//   3. Here the ticket is swapped for a cookie that only this host's
+//      forward-auth accepts, and the URL is cleaned.
+// The dashboard cookie is never sent to an app, and the app cookie is no use
+// on the dashboard.
 
 oauthRoutes.get("/auth/verify", (c) => {
   const forwardedHost = c.req.header("x-forwarded-host");
   const forwardedUri = c.req.header("x-forwarded-uri") ?? "/";
   const forwardedProto = c.req.header("x-forwarded-proto") ?? "https";
+  const secure = forwardedProto.split(",")[0]?.trim() === "https";
+  const host = normalizeHost(forwardedHost);
+  const { uri: cleanUri, ticket } = takeTicket(safeAppPath(forwardedUri));
 
-  if (!forwardedHost) {
-    return c.text("OK", 200);
+  // Fail closed: any error while deciding (database, parsing) is a "no".
+  let decision: ForwardAuthDecision;
+  try {
+    const app = host ? getAppByDomain(host) : undefined;
+
+    if (ticket !== null && app && app.sso_enabled) {
+      const grant = redeemSsoTicket(ticket, host);
+      const user = grant && grant.appId === app.id ? getUser(grant.userId) : undefined;
+      if (!grant || !user || !user.email || !isEmailAllowedForApp(app.id, user.email)) {
+        // Used, expired, for another host, or no longer allowed. No bounce
+        // back to the dashboard: with cookies blocked that would loop.
+        return c.text(
+          "This sign-in link has expired or was already used. Open the app again to sign in.",
+          403
+        );
+      }
+      const token = createSsoSession({
+        host,
+        appId: app.id,
+        userId: user.id,
+        parentToken: grant.parentToken,
+      });
+      setCookie(c, ssoCookieName(secure), token, ssoCookieOptions(secure));
+      logAudit(user.id, user.username, "sso_login", { detail: `app=${app.id} host=${host}` });
+      return c.redirect(`${forwardedProto.split(",")[0]?.trim() || "https"}://${host}${cleanUri}`, 302);
+    }
+
+    const raw = getCookie(c, ssoCookieName(secure));
+    const grant = raw && app ? getSsoSession(raw, host) : undefined;
+    const user = grant && app && grant.appId === app.id ? getUser(grant.userId) : undefined;
+    decision = decideForwardAuth({
+      host,
+      app,
+      hasSession: !!user,
+      user,
+      emailAllowed: isEmailAllowedForApp,
+    });
+  } catch (err) {
+    console.error("forward-auth failed, denying:", err);
+    return c.text("Forbidden", 403);
   }
 
-  const app = getAppByDomain(forwardedHost);
-  if (!app || !app.sso_enabled) {
-    return c.text("OK", 200);
+  if (decision.action === "deny") return c.text(decision.message, decision.status);
+  if (decision.action === "login") {
+    return c.redirect(ssoStartUrl(host, cleanUri), 302);
   }
-
-  const token = getCookie(c, SESSION_COOKIE);
-  if (!token) {
-    return redirectToLogin(c, forwardedProto, forwardedHost, forwardedUri);
-  }
-
-  const user = getSessionUser(token);
-  if (!user) {
-    return redirectToLogin(c, forwardedProto, forwardedHost, forwardedUri);
-  }
-
-  if (!user.email) {
-    return c.text("Forbidden: no email linked to your account", 403);
-  }
-
-  if (!isEmailAllowedForApp(app.id, user.email)) {
-    return c.text("Forbidden: your email is not in the allowlist for this app", 403);
-  }
-
-  // Authorized — inject user header for the app
-  c.header("X-Forwarded-User", user.email);
+  c.header("X-Forwarded-User", decision.user);
   return c.text("OK", 200);
 });
 
-function redirectToLogin(
-  c: any,
-  proto: string,
-  host: string,
-  uri: string
-) {
-  const returnTo = `${proto}://${host}${uri}`;
-  const loginUrl = `${dashboardOrigin()}/login?return_to=${encodeURIComponent(returnTo)}`;
-  return c.redirect(loginUrl, 302);
+function ssoStartUrl(host: string, uri: string): string {
+  return `${dashboardOrigin()}${ssoStartPath(host, uri)}`;
 }
+
+function ssoStartPath(host: string, uri: string): string {
+  return `/sso/start?host=${encodeURIComponent(host)}&uri=${encodeURIComponent(uri)}`;
+}
+
+/**
+ * Dashboard side of the handshake. Needs the host-only dashboard session; the
+ * target must be a known SSO app host (its Runway address or its custom
+ * domain), which is what keeps this from being an open redirect.
+ */
+oauthRoutes.get("/sso/start", (c) => {
+  const host = normalizeHost(c.req.query("host"));
+  const uri = safeAppPath(c.req.query("uri"));
+  const app = host ? getAppByDomain(host) : undefined;
+  if (!app || !app.sso_enabled) return c.text("Forbidden", 403);
+
+  const token = readSessionToken(c);
+  const user = token ? getSessionUser(token) : undefined;
+  if (!token || !user) {
+    return c.redirect(`/login?return_to=${encodeURIComponent(ssoStartPath(host, uri))}`, 302);
+  }
+  if (!user.email || !isEmailAllowedForApp(app.id, user.email)) {
+    return c.text("Forbidden: your email is not in the allowlist for this app", 403);
+  }
+
+  const ticket = createSsoTicket({ host, appId: app.id, userId: user.id, dashboardToken: token });
+  const scheme = dashboardOrigin().startsWith("https") ? "https" : "http";
+  return c.redirect(`${scheme}://${host}${withTicket(uri, ticket)}`, 302);
+});

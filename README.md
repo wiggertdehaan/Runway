@@ -148,7 +148,137 @@ claude mcp add runway \
   -- node $(pnpm mcp:path)
 ```
 
-Then just say *"deploy this to Runway"* in any Claude Code session.
+Then just say *"deploy this to Runway"* in any Claude Code session. This
+is the per-app way: the key (`rwy_...`) is one app, and it works exactly as
+it always has. For several apps or several Runway servers use Option D.
+
+#### Events: what happened, without polling
+
+`GET /api/v1/events?since=<cursor>` (and the MCP tools `runway_events` and
+`runway_event_detail`) tell an owner or their agent what happened to an app:
+a deploy ended, health changed, a rebuild finished, an actively exploited
+vulnerability (KEV) deadline is near, a dependency was updated or rolled back,
+an exemption is ending. An event is a type, an app id and a code from a fixed
+list; it never carries logs, environment variables, error messages or text
+from the app. The caller keeps the cursor and asks again (pull, works in every
+client); a user token (`rwu_`) sees exactly the apps that person may see. Events
+are kept 60 days / 500 per app (`EVENTS_RETENTION_DAYS`, `EVENTS_MAX_PER_APP`);
+`HEALTH_WATCH_INTERVAL_MS=0` turns off the health watcher that raises
+`health_unhealthy` / `health_recovered`. Full list of codes: `/llms.txt`.
+
+### The overview page and the server figures
+
+`/overview` (in the sidebar) says in five seconds whether all is well and, if
+not, what to do now. Administrators also see the server's disk, CPU, memory and
+Docker data usage. Runway reads them from inside its own container, without an
+extra mount or privilege: `/proc` for CPU and memory, `statfs` on the data
+volume for the disk, `docker system df` and `buildctl du` over the Docker
+socket it already uses for data. They are kept 60 days. When a reading looks
+like the container's own view instead of the host's (a memory limit equal to
+MemTotal, a tiny or memory-backed data volume), the page shows it grey as
+"Container view, not the host" and writes one line to the audit log
+(`host_metrics_container_view`) instead of showing a false number.
+`HOST_METRICS_INTERVAL_MS=0` turns the measuring off.
+
+### Option D — One MCP connection for all your apps, on several Runways
+
+For power users who manage more than one app, or more than one Runway
+server (say a personal one, a club one and a company one). The local MCP
+server (the same `packages/mcp`) reads a small config file, holds one
+**user token** per server and lets the agent pick the Runway and the app on
+each call. The servers know nothing of each other: only your local MCP
+process bundles them, and each request carries only the token of the server
+it goes to.
+
+**1. Make a token on each server.** Sign in, open **Account > Access
+tokens**, give it a label, pick a scope and an expiry, and copy the token
+(`rwu_...`) once; it is shown only then.
+
+| Scope | Lets the agent |
+|---|---|
+| `read` | list apps, read status, logs, scans and events |
+| `deploy` | everything above, plus deploy, rebuild, rescan, configure, env, domain |
+| `admin` | administrator actions (only works while you are an administrator) |
+
+A token sees the apps you may see (as owner: your own apps; as administrator:
+all of them), with the same rights as the dashboard, decided on every request.
+It expires (90 days by default, one year at most) and you, or an administrator,
+can revoke it at any time on the same page. Pick the smallest scope that does
+the job.
+
+**2. Write the config** to `~/.runway/config.json` (or point `RUNWAY_CONFIG`
+at another file) and keep it private (`chmod 600`; the client warns if other
+users can read it):
+
+```json
+{
+  "runways": [
+    { "name": "home",    "url": "https://runway.example.com",  "token": "rwu_..." },
+    { "name": "club",    "url": "https://apps.example.org",    "token_env": "RUNWAY_TOKEN_CLUB" },
+    { "name": "company", "url": "https://runway.example.net",  "token_env": "RUNWAY_TOKEN_COMPANY" }
+  ]
+}
+```
+
+- `name`: what you and the agent call it (lowercase letters, digits, `-`, `_`).
+- `token` or `token_env`: the token itself, or the name of an environment
+  variable that holds it, so it need not be in the file.
+- `url` must be `https://` (plain `http://` only for `localhost`, or with
+  `"allow_insecure": true` on a network you control).
+- Optional `"app_keys": { "<app id>": "rwy_..." }` gives per-app keys for apps
+  you cannot reach with a token; the key wins for that app.
+- A field the client does not know is an error, not ignored, so a typo cannot
+  silently mean "no token".
+
+One server only? `RUNWAY_URL` plus `RUNWAY_TOKEN` in the environment works
+without a file. Without a file and without `RUNWAY_TOKEN`, the old
+`RUNWAY_URL` + `RUNWAY_APP_KEY` mode (Option C) is used, unchanged.
+
+**3. Register it.** Build once (`pnpm install && pnpm mcp:build`), then:
+
+```bash
+# Claude Code
+claude mcp add runway -s user -- node $(pnpm mcp:path)
+```
+
+```jsonc
+// Claude Desktop: claude_desktop_config.json
+// macOS: ~/Library/Application Support/Claude/claude_desktop_config.json
+// Windows: %APPDATA%\Claude\claude_desktop_config.json
+{
+  "mcpServers": {
+    "runway": {
+      "command": "node",                                  // use the full path to node if Desktop cannot find it
+      "args": ["/path/to/Runway/packages/mcp/dist/index.js"],
+      "env": { "RUNWAY_CONFIG": "/Users/you/.runway/config.json" }
+    }
+  }
+}
+```
+
+Restart the client, then ask *"list my Runways"*.
+
+**Adding another Runway later:** make a token on that server, add an entry
+to `config.json` (or a `token_env` and export the variable), restart the MCP
+connection, ask *"list my Runways"* to see it answer and when its token expires.
+
+**How it is used.** With a config the app tools take two extra arguments,
+`runway` (optional when only one server is configured, required, and never
+guessed, when there are several) and `app` (needed with a user token; ids come
+from `runway_list_apps`). New tools: `runway_list_runways` (name, address,
+whether it answers, whether the token is valid, scope, expiry; never the
+token), `runway_list_apps` (all your apps, grouped by server; one server being
+down does not hide the others), `runway_create_app`, `runway_rebuild` and
+`runway_rescan` (you may rebuild and rescan apps you own). `runway_events`
+asks every server at once and keeps one cursor per server: pass the `next`
+map it returned back as `since`.
+
+What the client guarantees: a token is only ever sent to its own server (a
+redirect is never followed, so it cannot be replayed elsewhere), never appears
+in tool output, error messages or logs, and every server answer is rebuilt field
+by field before the model sees it; text that came from an app stays fenced as
+untrusted. A server that is slow, down or rate limiting (HTTP 429) is
+reported on its own and does not stop the others.
 
 ## Features
 
@@ -221,7 +351,7 @@ form.
 For deployed apps, SSO acts as a gateway-level auth layer. Toggle
 "SSO protection" on the app detail page and manage an email
 allowlist — only users with a matching Runway account can reach the
-app. Traefik's forward-auth middleware checks the session cookie on
+app. Traefik's forward-auth middleware checks a per-app sign-in cookie on
 every request; no code changes in the app needed.
 
 - **Provider support**: Google OAuth2 and Microsoft OAuth2.
@@ -229,9 +359,11 @@ every request; no code changes in the app needed.
   account linked by email.
 - **Email allowlist**: per-app, managed via dashboard, API
   (`PUT /app/sso`), or MCP (`runway_set_sso`).
-- **Cookie scope**: the session cookie is set on `.{base_domain}`
-  so it's shared across the dashboard and all app subdomains.
-  Custom domains are **not** SSO-protected (different cookie scope).
+- **Cookie scope**: the dashboard session cookie is host-only, so a
+  deployed app never receives it. Each SSO app host (the Runway address
+  and a custom domain alike) gets its own short-lived cookie after a
+  one-time redirect through the dashboard, and that cookie is valid for
+  that host only. Signing out of the dashboard ends them all.
 - **Precedence**: when both SSO and basic auth are enabled on an
   app, SSO takes precedence.
 
@@ -282,14 +414,105 @@ button for admins.
 - CSRF protection (double-submit cookie with timing-safe comparison)
 - Optional TOTP two-factor authentication with backup codes
 - Login rate limiting (5 attempts / 15 minutes per IP), persisted in SQLite
-- API rate limiting (60 requests / minute per IP)
-- Per-app API keys, independent from dashboard sessions
+- API rate limiting per key (120 reads / 60 writes per minute, 10 deploys per 10 minutes) and per address (see below)
+- Per-app API keys, independent from dashboard sessions, stored as hashes (shown once), rotatable with an optional overlap
+- User tokens (`rwu_`): one token per person for every app they may see, with a scope (read / deploy / admin), an expiry, and revocation by the person or an administrator
 - Audit log for all admin actions
+- Events (a fixed vocabulary, pulled with a cursor): no logs, env or app text in them; text that came from an app is cut short and marked as untrusted
 - Content Security Policy headers
 - Isolated builds via BuildKit (user code never touches the Docker socket)
+- One Docker network per app: apps cannot reach each other or the control plane; optional host egress rules keep them off the cloud metadata address, the host and private networks
+- Hardened app containers: reduced Linux capabilities, no new privileges, a process limit, no swap, rotated logs, and an opt-in read-only root filesystem per app (`standard` / `strict` / `relaxed` profile; `RUNWAY_HARDENING=relaxed` is the emergency brake, takes effect at an app's next deploy or rebuild)
 - Traefik has zero Docker socket access
 - Per-deploy Trivy scan (image CVEs, hardcoded secrets, Dockerfile misconfigs) with a configurable blocking threshold
 - Two-role access model (admin / member) with per-user ownership of apps
+
+## Keeping Runway and its apps patched
+
+Two separate things go stale: Runway's own containers, and the images
+of the apps it deployed.
+
+**Runway itself** (gateway, BuildKit, control). Images are pinned in
+`docker-compose.yml`: Traefik on a minor tag (`v3.5`, picks up patch
+releases) and BuildKit on an exact release (`moby/buildkit:v0.35.1`,
+never `latest`). To update on the host, from the install directory
+(`/opt/runway`):
+
+```bash
+git pull                        # picks up new pins + control changes
+docker compose pull             # fetch pinned images (patch releases)
+docker compose up -d --build    # recreate what changed, rebuild control
+```
+
+That sequence is safe to put in a scheduled job: `up -d` only recreates
+containers whose image or config changed, and deployed apps live in
+separate containers and are not touched. To move BuildKit or Traefik to
+a newer release, bump the tag in `docker-compose.yml` first.
+
+**Deployed apps.** An app only becomes safe when it is rebuilt, and the
+BuildKit cache (kept 7 days) can replay an old `apt-get upgrade` layer.
+Admin > **Rebuild** rebuilds apps from their stored source with
+`buildctl --no-cache`, through the normal scan gate; a new container
+that is not healthy within two minutes is replaced by the previous
+deploy automatically.
+
+- **Rebuild all apps now**: sequential, with a per-app result
+  (rebuilt / rolled back / blocked / failed) and findings before and
+  after, including actively exploited CVEs from the CISA KEV catalog.
+- **Weekly automatic rebuild** (default Sunday 05:00 Europe/Amsterdam,
+  configurable on the same page): rebuilds only apps with a KEV CVE or
+  a critical finding that has a fix. Individual apps can opt out on
+  their app page. The result goes to the notification webhook.
+- **Automatic base-image patches**: when a `FROM` pins an exact patch
+  (`nginx:1.30.6-alpine`, `python:3.12.7-slim`), a rebuild looks up the
+  newest patch of the **same major.minor and the same variant** in the
+  registry and builds with that tag (`nginx:1.30.7-alpine`) from a
+  build-time copy of the Dockerfile. Your stored source is never
+  modified. Never a different minor/major; digest pins and floating tags
+  (`1.30-alpine`, `node:24`, `latest`) are left alone; `ARG`-driven
+  `FROM`s are supported when one ARG carries the tag or the whole image.
+  Per app: "Auto-patch base image on rebuild" (default on). The base
+  images used (tag + digest, and whether auto-raised) are recorded per
+  deploy and shown in deploy history and the rebuild table. For fewer
+  surprises, write minor pins (`nginx:1.30-alpine`) in your Dockerfile.
+- **Automatic minor escalation** (per app, `auto_minor_base`, default
+  on): if, after the patch bump, a rebuild still leaves an actively
+  exploited (KEV) CVE or a CRITICAL that has a fix, runway tries the
+  **lowest newer minor line** of the same major and variant (an exact pin
+  `nginx:1.29.8-alpine` becomes `nginx:1.30.7-alpine`, a minor pin
+  `1.29-alpine` becomes `1.30-alpine`), at most three lines, only for the
+  runtime (final) stage. A minor is used only if it resolves **all**
+  targeted findings, is not worse than the running version, and passes
+  its healthcheck; otherwise the previous version stays. Each jump is
+  announced (webhook + a notice on the app page) and shown in the deploy
+  history as `auto-minor 1.29→1.30`. A newer **major** is never applied:
+  runway only builds and scans it in a dry run and tells the owner
+  "major X resolves Y".
+- **Rebuild gate**: a rebuild goes live only if it is *not worse* than
+  the running version (no new CRITICAL and no new actively exploited
+  CVE compared with a fresh scan of the running image) **and** the new
+  container passes its healthcheck. Otherwise the old version keeps
+  running and the reason is reported (rebuild table + webhook). The
+  app's `scan_threshold` still gates normal deploys, not rebuilds.
+- **KEV quarantine**: an actively exploited CVE (CISA KEV) in a running
+  app's **runtime** packages (the final image; build stages never count)
+  starts a term (admin setting on the Rebuild page, default 7 days) with a
+  notice on day 0 (app page, dashboard, webhook). When the term ends,
+  runway makes one last rebuild attempt (with minor escalation); if the CVE
+  is still there the app is **quarantined**: its hostnames are routed to a
+  public maintenance page (HTTP 503) through the gateway and the container
+  is stopped. Named volumes and data stay. As soon as a rebuild or deploy
+  produces an image without the CVE the app comes back online by itself
+  (a quarantined app only returns with a KEV-free build, and is never
+  restored to the vulnerable image). An admin can grant a time-boxed
+  **exemption** (reason + end date, max 90 days, audit-logged) on the app
+  page; granting one lifts an active quarantine. Ordinary criticals never
+  quarantine anything. Quarantine state shows on the dashboard, the app
+  page, the Rebuild page and in webhook messages.
+- **Scripting**: `POST /admin/api/rebuild-all` (202 + `run_id`),
+  `GET /admin/api/rebuild-runs[/<id>]`. Requires an admin dashboard
+  session cookie and the header `X-Requested-With: runway`; per-app API
+  keys cannot call it.
 
 ## Dashboard
 
@@ -360,23 +583,33 @@ isolation.
 - **CSRF protection** uses the double-submit cookie pattern with timing-safe
   comparison on all POST forms.
 - **Sessions** are random 32-byte tokens stored in SQLite with a 30-day TTL.
-  Cookies are `HttpOnly` and `SameSite=Lax`. Expired sessions are cleaned
+  Cookies are `HttpOnly`, `Secure` and `SameSite=Lax`; over HTTPS they are
+  host-only with the `__Host-` prefix. Expired sessions are cleaned
   up hourly.
 - **Login rate limiting** — after 5 failed password or 2FA attempts from the
   same IP within 15 minutes, further login attempts are blocked until the
   window expires. Rate limits are persisted in SQLite and survive restarts.
   Failed attempts are logged in the audit log with the source IP.
-- **API rate limiting** — 60 requests per minute per IP on all `/api/v1/*`
-  endpoints.
+- **API rate limiting** — per key, not per address, so many people behind one
+  office address do not share an allowance. Each app key (and each developer
+  token on `/mcp`) gets its own buckets: 120 reads and 60 writes per minute,
+  and 10 heavy actions (deploy, rollback, source download) per 10 minutes. A
+  refusal is `429` with `Retry-After`. Wrong keys are counted per source
+  address: 20 in 10 minutes blocks that address (even for a correct key) until
+  the window ends; a missing header does not count. On top of that sits a coarse
+  per-address flood guard (600 requests per minute). Counters live in memory of
+  the one control process, so a restart resets them. Tune with
+  `RATE_LIMIT_READ_PER_MIN`, `RATE_LIMIT_WRITE_PER_MIN`,
+  `RATE_LIMIT_HEAVY_PER_10MIN`, `RATE_LIMIT_AUTH_FAIL_PER_10MIN` and
+  `API_IP_RATE_LIMIT` in `.env`. Refusals are audited as counted rows.
 - **OAuth2 / SSO** — authorization code flow with Google and Microsoft.
   ID tokens are decoded (not signature-verified) after a direct HTTPS
   code exchange with the provider, which is safe because the token was
   just issued to us. A random `state` cookie prevents CSRF on the OAuth
-  redirect. Session cookies are scoped to `.{base_domain}` when SSO is
-  active so Traefik's forward-auth on app subdomains can read them.
-  Custom domains do not share this cookie and are therefore not
-  SSO-protected. OAuth client secrets are stored in the settings table
-  (SQLite on disk, same trust boundary as password hashes).
+  redirect. The dashboard session cookie is host-only; SSO app hosts
+  sign in through a one-time ticket and get their own host-only cookie.
+  OAuth client secrets are stored in the settings table (SQLite on disk,
+  same trust boundary as password hashes).
 - **Traefik** is configured with the dashboard disabled. Do not add
   `--api.insecure=true` on a public server. Traefik does not have access
   to the Docker socket at all — routing is driven by YAML files in a
@@ -385,6 +618,24 @@ isolation.
   Dockerfiles execute inside BuildKit's containerd sandbox with zero
   access to the Docker socket. The control container still mounts the
   socket for container lifecycle (run/stop/logs).
+- **Apps are isolated from each other.** Every app runs on its own Docker
+  network (`runway-net-<id>`); only Traefik is attached to several of them,
+  so one app cannot reach another by container name and skip its SSO or basic
+  auth. Control and BuildKit are on networks of their own. What the apps may
+  reach *outside* Docker (the cloud metadata address `169.254.169.254`, the
+  host itself, private and Tailscale ranges) is limited by a host firewall
+  step that is not part of the default install:
+
+  ```bash
+  sudo /opt/runway/scripts/egress-rules.sh plan     # shows what it would do, changes nothing
+  sudo /opt/runway/scripts/egress-rules.sh apply    # installs the rules
+  sudo /opt/runway/scripts/egress-rules.sh status
+  sudo /opt/runway/scripts/egress-rules.sh remove   # rollback
+  ```
+
+  Apps deployed before the upgrade stay on the shared `runway-apps` network
+  until their next deploy or rebuild. Set `RUNWAY_APP_NETWORK_MODE=shared` on
+  the control container to go back to the old single network.
 - The **REST API** (`/api/v1/*`) uses Bearer-token auth with per-app keys,
   independent from the session cookie used by the web UI.
 - The **deploy endpoint** accepts up to 100 MB of `application/x-tar` per

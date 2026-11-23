@@ -1,8 +1,31 @@
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { html, raw } from "hono/html";
-import { deleteCookie, setCookie } from "hono/cookie";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
+import { HTMX_INTEGRITY, HTMX_PATH } from "./assets.js";
+import { APP_CSS } from "../ui/styles.js";
+import { CLIENT_JS, PREPAINT_JS } from "../ui/client.js";
+import { appStatus, countStates, type AppStatus } from "../ui/status.js";
+import { homeChips, needsAttention, renderChips } from "../ui/home.js";
+import { navCount, renderSecurityPage, type SecurityApp } from "../ui/security-page.js";
+import { PALETTE_CSS, PALETTE_JS, buildPaletteItems, paletteButtons, renderPalette } from "../ui/palette.js";
+import {
+  deployReason,
+  mayRebuild,
+  mayRescan,
+  rescanBlockedReason,
+  rebuildBlockedReason,
+  rebuildLine,
+  renderKevBlock,
+  renderRebuildLine,
+} from "../ui/app-page.js";
+import { renderMaintenance } from "../ui/maintenance.js";
+import { renderHardening } from "../ui/hardening.js";
+import { renderOwnerCard } from "../ui/owner.js";
+import { clearSetupToken, currentSetupToken, setupTokenMatches } from "../auth/setup-token.js";
+import { parseHardeningMode } from "../deploy/hardening.js";
+import { renderEarlierRun, renderRunResult, runHeading } from "../ui/rebuild-result.js";
 
 const APP_VERSION = (() => {
   try {
@@ -12,7 +35,7 @@ const APP_VERSION = (() => {
     return "dev";
   }
 })();
-import { listApps, createApp, deleteApp, getApp } from "../db/apps.js";
+import { listApps, createApp, deleteApp, getApp, ownerUsernameOf, setAppOwner, type App } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import {
@@ -66,14 +89,29 @@ import {
   type User,
   ROLES,
 } from "../db/users.js";
-import { createSession, deleteAllUserSessions, deleteSession } from "../db/sessions.js";
+import { safeReturn } from "./oauth.js";
+import { safeReturnTo } from "../auth/oauth-access.js";
+import { parseAccessEntry } from "../auth/oauth-access.js";
+import { addAccess, listAccess, removeAccess } from "../db/oauth-access.js";
+import { createSession, deleteAllUserSessions, deleteSession, getSessionUser } from "../db/sessions.js";
 import {
   createPreauthSession,
   deletePreauthSession,
   getPreauthUserId,
+  recordPreauthFailure,
 } from "../db/preauth.js";
 import { generateTotpSecret, totpUri } from "../auth/totp.js";
 import { verifyAndConsumeTotp } from "../db/totp-history.js";
+import {
+  MAX_FAILURES_PER_PREAUTH,
+  SEVERE_AT,
+  beginAttempt,
+  lockRemainingSeconds,
+  lockedUsers,
+  recordSuccess as recordTwoFactorSuccess,
+  unlock as unlockTwoFactor,
+  waitText,
+} from "../auth/twofa-limit.js";
 import { verifyPassword } from "../auth/password.js";
 import {
   consumeBackupCode,
@@ -98,19 +136,81 @@ import {
   KEEP_IMAGE_VERSIONS_CEILING,
 } from "../db/settings.js";
 import { runCachePrune } from "../deploy/cache-pruner.js";
+import { peopleError, peopleSummary, renderPersonCard, type PersonRow } from "../ui/people.js";
+import { renderEmptyState } from "../ui/empty-state.js";
 import {
-  SESSION_COOKIE,
+  RebuildBusyError,
+  activeRebuildRun,
+  activeRebuildRunId,
+  previewRebuildSelection,
+  rebuildableApps,
+  startRebuildRun,
+} from "../deploy/rebuild.js";
+import { renderRebuildActions } from "../ui/rebuild-actions.js";
+import {
+  SCHEDULE_TZ,
+  normalizeTime,
+  readSchedule,
+  saveSchedule,
+} from "../deploy/rebuild-scheduler.js";
+import {
+  getRebuildRun,
+  listRebuildRuns,
+  type RebuildAppResult,
+  type RebuildRun,
+} from "../db/rebuild-runs.js";
+import {
   requireAdmin,
   requireAppAccess,
   requireSession,
   type WebEnv,
 } from "../middleware/session.js";
-import { logAudit, getRecentAuditEntries } from "../db/audit.js";
-import { updateApp } from "../db/apps.js";
-import { getLatestDeployWithScan, getLatestDeploys } from "../db/deploys.js";
-import { getLatestPeriodicScan } from "../db/periodic-scans.js";
+import {
+  clearSessionCookie,
+  expireLegacySessionCookie,
+  readSessionToken,
+  setSessionCookie,
+} from "../middleware/cookies.js";
+import { logAudit, getRecentAuditEntries, apiAuditRetentionDays } from "../db/audit.js";
+import { parseAuditFilter, renderAuditFilters, renderAuditRows } from "../ui/audit.js";
+import { appVisibleTo, appsVisibleTo, isAppOwner, previousKeyActive, revokePreviousKey, rotateAppKey, updateApp } from "../db/apps.js";
+import { forgetKey, peekKey, rememberKey } from "../util/key-reveal.js";
+import {
+  createUserToken,
+  getUserTokenById,
+  listAllUserTokens,
+  listUserTokens,
+  revokeUserToken,
+  TokenLimitError,
+} from "../db/user-tokens.js";
+import { deleteDevTokenAsAdmin, listAllDevTokens } from "../db/dev-tokens.js";
+import { grantableScopes, isScope, USER_TOKEN_DEFAULT_DAYS, USER_TOKEN_MAX_DAYS } from "../util/token-scopes.js";
+import { legacyExpiryNotice, renderNewTokenForm, renderTokenTable } from "../ui/token-lists.js";
+import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
+import { describeBaseImage, lineOf, parseImageRef } from "../deploy/base-images.js";
+import {
+  addNotice,
+  deleteExemption,
+  getActiveExemption,
+  getExemption,
+  getQuarantine,
+  listNotices,
+  listQuarantine,
+  setExemption,
+} from "../db/quarantine.js";
+import { deadlineOf, evaluateAppQuarantine } from "../deploy/quarantine.js";
+import { getKevList, kevCacheInfo } from "../deploy/kev.js";
+import { notifyAdminWebhook } from "../util/webhook.js";
+import { clampQuarantineTermDays, getQuarantineTermDays } from "../db/settings.js";
+import { getLatestPeriodicScan, listPeriodicScanAppIds } from "../db/periodic-scans.js";
+import {
+  renderKevStatus,
+  renderSecurityAttention,
+  type AtRiskApp,
+} from "./security-view.js";
 import { rescanApp } from "../deploy/periodic-scanner.js";
-import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
+import { activeRescan, endRescan, tryBeginRescan } from "../deploy/rescan-guard.js";
+import { THRESHOLDS, isValidThreshold, effectiveThreshold, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
 import { getAppAllowedEmails, addAppAllowedEmail, removeAppAllowedEmail } from "../db/app-emails.js";
 import { appContainerName, destroyApp, rollbackApp } from "../deploy/index.js";
@@ -121,7 +221,10 @@ import {
   SOURCE_RETENTION,
 } from "../deploy/source.js";
 import { readFile } from "node:fs/promises";
-import { docker } from "../deploy/docker.js";
+import { runHealthChecks, cachedHealth } from "../overview/health.js";
+import { buildOverview, parsePeriod, parseTime as parseOverviewTime, type OverviewApp } from "../overview/build.js";
+import { gatherDbInputs, gatherHostInput } from "../overview/gather.js";
+import { renderOverview } from "../ui/overview.js";
 import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
 import { validateCustomDomain } from "../util/domain.js";
@@ -150,19 +253,14 @@ function isSecureRequest(c: Context): boolean {
 }
 
 const PREAUTH_COOKIE = "runway_preauth";
+// Where to go after a successful sign-in (the SSO handshake sends people to
+// /login first). A short host-only cookie, relative paths only.
+const LOGIN_RETURN_COOKIE = "runway_login_return";
 
-function sessionCookieOptions(c: Context) {
-  const baseDomain = getSetting("base_domain");
-  return {
-    httpOnly: true,
-    sameSite: "Lax" as const,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30,
-    secure: isSecureRequest(c),
-    // Set domain-wide cookie when base_domain is configured so the
-    // session is readable by forward-auth on app subdomains.
-    ...(baseDomain ? { domain: `.${baseDomain}` } : {}),
-  };
+function takeLoginReturn(c: Context): string {
+  const raw = getCookie(c, LOGIN_RETURN_COOKIE);
+  if (raw !== undefined) deleteCookie(c, LOGIN_RETURN_COOKIE, { path: "/", secure: isSecureRequest(c) });
+  return safeReturnTo(raw, () => false);
 }
 
 function preauthCookieOptions(c: Context) {
@@ -188,9 +286,10 @@ function escapeHtml(value: string): string {
 function layout(
   title: string,
   body: string,
-  opts?: { username?: string; csrf?: string; isAdmin?: boolean }
+  opts?: { username?: string; userId?: string; csrf?: string; isAdmin?: boolean }
 ) {
   const username = opts?.username;
+  const userId = opts?.userId;
   const csrf = opts?.csrf;
   const admin = opts?.isAdmin ?? false;
   if (csrf) {
@@ -201,236 +300,84 @@ function layout(
       `$1${csrf}`
     );
   }
+  const icon = (d: string) =>
+    `<svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+  const link = (href: string, label: string, d: string) =>
+    `<a class="nav-link" href="${href}" title="${label}">${icon(d)}<span class="lb">${label}</span></a>`;
   const adminLinks = admin
-    ? `<a href="/users">Users</a>
-         <a href="/skills">Skills</a>
-         <a href="/settings">Settings</a>
-         <a href="/audit">Audit</a>
-         <a href="/health">Health</a>`
+    ? [
+        link("/rebuild", "Rebuild", '<path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/>'),
+        link("/audit", "Audit", '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>'),
+        link("/health", "Health", '<path d="M3 12h4l3-8 4 16 3-8h4"/>'),
+        link("/users", "Users", '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.5-3.5 3.2-5.5 6.5-5.5s6 2 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.8c2 .6 3.3 2.4 3.5 5.2"/>'),
+        link("/skills", "Skills", '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>'),
+        link("/settings", "Settings", '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
+      ].join("")
     : "";
-  const nav = username
-    ? `<nav class="nav">
-         <a href="/" class="nav-brand">&#9992; Runway</a>
-         <a href="/">Apps</a>
-         ${adminLinks}
-         <div class="nav-spacer"></div>
-         <span class="nav-meta">v${escapeHtml(APP_VERSION)}</span>
-         <span class="nav-meta"><a href="https://github.com/wiggertdehaan/Runway" target="_blank" rel="noopener noreferrer" title="Documentation">Docs</a></span>
-         <a href="/account" style="font-weight:400">${escapeHtml(username)}</a>
-         <form method="POST" action="/logout" style="display:inline;margin:0">
-           ${csrf ?? ""}
-           <button type="submit" class="ghost">Logout</button>
-         </form>
-       </nav>`
-    : "";
+  // One read of the apps this viewer may see feeds the sidebar counter and the palette.
+  const visibleApps = username && userId ? appsVisibleTo(userId, admin) : [];
+  const secCount = username ? navCount(collectAtRisk(visibleApps).size) : "";
+  const palBtn = paletteButtons();
+  const paletteHtml = username ? renderPalette(buildPaletteItems({ admin, apps: visibleApps })) : "";
+  const securityLink = `<a class="nav-link" href="/security" title="Security${secCount ? ` (${secCount} need attention)` : ""}">${icon('<path d="M12 3 4 6v6c0 4.5 3.2 8 8 9 4.8-1 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/>')}<span class="lb">Security</span>${secCount ? `<span class="nav-count" aria-label="${escapeHtml(secCount)} need attention">${escapeHtml(secCount)}</span>` : ""}</a>`;
+  const themeBtn = (cls: string) =>
+    `<button type="button" class="${cls}" data-act="theme" aria-pressed="false" title="Toggle light/dark theme">
+       <span class="theme-ic-light">${icon('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>')}</span>
+       <span class="theme-ic-dark">${icon('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>')}</span>
+       <span class="lb">Theme</span>
+     </button>`;
+  const mark = `<span class="mark"><svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12 21 4l-5 16-4-6.5z"/><path d="m12 13.5 9-9.5"/></svg></span>`;
+  const shell = username
+    ? `<div class="shell">
+         <aside class="side" aria-label="Sidebar">
+           <div class="side-head">
+             <a class="brand" href="/">${mark}<span class="lb">Runway</span></a>
+             ${palBtn.top}
+             <button type="button" class="menu-btn" id="menubtn" aria-label="Menu" aria-expanded="false" aria-controls="side-body">${icon('<path d="M4 7h16M4 12h16M4 17h16"/>')}</button>
+           </div>
+           <div class="side-body" id="side-body">
+             ${palBtn.side}
+             <nav class="side-nav" aria-label="Main">
+               ${link("/overview", "Overview", '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z"/>')}
+               ${link("/", "Apps", '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>')}
+               ${securityLink}
+               ${adminLinks}
+             </nav>
+             <div class="side-foot">
+               <div class="side-meta">v${escapeHtml(APP_VERSION)} &middot; <a href="https://github.com/wiggertdehaan/Runway" target="_blank" rel="noopener noreferrer" title="Documentation">Docs</a></div>
+               ${themeBtn("side-btn")}
+               <button type="button" class="side-btn collapse-btn" data-act="collapse" aria-expanded="true" title="Collapse sidebar">${icon('<path class="collapse-ic" d="m15 6-6 6 6 6"/>')}<span class="lb">Collapse</span></button>
+               <a class="side-user" href="/account" title="Account"><span class="av" aria-hidden="true">${escapeHtml(username.slice(0, 1).toUpperCase())}</span><span class="lb">${escapeHtml(username)}</span></a>
+               <form method="POST" action="/logout">
+                 ${csrf ?? ""}
+                 <button type="submit" class="side-btn" title="Log out">${icon('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>')}<span class="lb">Logout</span></button>
+               </form>
+             </div>
+           </div>
+         </aside>
+         <main class="main" id="main"><div class="page">${body}</div></main>
+       </div>`
+    : `<div class="bare-top">${themeBtn("side-btn")}</div>
+       <main class="page" id="main">${body}</main>`;
 
   return html`<!doctype html>
     <html lang="en">
       <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="color-scheme" content="light dark" />
         <title>${title} - Runway</title>
-        <script src="https://unpkg.com/htmx.org@2.0.4"></script>
-        <style>
-          :root {
-            --bg: #0a0a0a; --bg-card: #171717; --bg-inset: #0f0f0f;
-            --border: #262626; --text: #e5e5e5; --text-muted: #8a8a8a; --text-dim: #6a6a6a;
-            --brand: #60a5fa; --brand-hover: #3b82f6;
-            --status-success: #4ade80; --status-success-bg: #14532d;
-            --status-warn: #fbbf24; --status-warn-bg: #3b2f00;
-            --status-error: #f87171; --status-error-bg: #7f1d1d;
-            --status-info: #60a5fa; --status-info-bg: #1e3a5f;
-            --status-neutral: #a3a3a3; --status-neutral-bg: #262626;
-          }
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; }
-          h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 1.5rem; letter-spacing: -0.01em; }
-          h2 { font-size: 1.1rem; }
-          .container { max-width: 960px; margin: 0 auto; }
-          .app-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1rem; }
-          @media (max-width: 500px) { .app-grid { grid-template-columns: 1fr; } }
-          .app-card { display: flex; flex-direction: column; border-left: 3px solid var(--border); }
-          .app-card.status-running { border-left-color: var(--status-success); }
-          .app-card.status-building, .app-card.status-starting { border-left-color: var(--status-warn); }
-          .app-card.status-failed, .app-card.status-exited { border-left-color: var(--status-error); }
-          .app-card.status-created { border-left-color: var(--status-info); }
-          .overflow-menu { position: relative; }
-          .overflow-menu summary { list-style: none; cursor: pointer; color: var(--text-dim); font-size: 1.1rem; padding: 0.1rem 0.4rem; border-radius: 4px; line-height: 1; }
-          .overflow-menu summary:hover { color: var(--text); background: var(--border); }
-          .overflow-menu summary::-webkit-details-marker { display: none; }
-          .overflow-menu[open] .overflow-dropdown { display: block; }
-          .overflow-dropdown { display: none; position: absolute; right: 0; top: 100%; z-index: 10; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 0.25rem; min-width: 180px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
-          .overflow-dropdown button, .overflow-dropdown .overflow-item { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text-muted); font-size: 0.8rem; padding: 0.4rem 0.75rem; cursor: pointer; border-radius: 4px; font-family: inherit; }
-          .overflow-dropdown button:hover, .overflow-dropdown .overflow-item:hover { background: var(--border); color: var(--text); }
-          .overflow-dropdown .overflow-danger:hover { color: var(--status-error); }
-          .dashboard-filter { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
-          .dashboard-filter input[type="search"] { flex: 1; min-width: 180px; }
-          .nav { display: flex; gap: 1rem; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
-          .nav a { color: var(--text); text-decoration: none; font-weight: 500; }
-          .nav a:hover { color: var(--brand); }
-          .nav-brand { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.02em; margin-right: 0.75rem; color: var(--text) !important; }
-          .nav-brand:hover { color: var(--brand) !important; }
-          .nav-meta { font-size: 0.75rem; color: var(--text-dim); }
-          .nav-meta a { color: var(--text-dim); font-weight: 400; font-size: 0.75rem; }
-          .nav-meta a:hover { color: var(--text-muted); }
-          .nav-spacer { flex: 1; }
-          .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
-          .tabs { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
-          .tabs input[type="radio"] { display: none; }
-          .tabs label { padding: 0.6rem 1.2rem; cursor: pointer; color: var(--text-dim); border-bottom: 3px solid transparent; font-size: 0.95rem; font-weight: 500; transition: color 0.15s; }
-          .tabs label:hover { color: var(--text); }
-          .tabs input:checked + label { color: var(--text); border-bottom-color: var(--brand); }
-          .tab-panel { display: none; }
-          #tab-deploys:checked ~ .tab-panels .panel-deploys,
-          #tab-access:checked ~ .tab-panels .panel-access,
-          #tab-config:checked ~ .tab-panels .panel-config,
-          #tab-general:checked ~ .tab-panels .panel-general,
-          #tab-security:checked ~ .tab-panels .panel-security,
-          #tab-sso:checked ~ .tab-panels .panel-sso { display: block; }
-          .card h2 { margin-bottom: 0.5rem; }
-          .meta { color: var(--text-muted); font-size: 0.85rem; }
-          .key { font-family: monospace; background: var(--border); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; word-break: break-all; }
-          .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; text-transform: lowercase; }
-          .badge-created { background: var(--status-info-bg); color: var(--status-info); }
-          .badge-running { background: var(--status-success-bg); color: var(--status-success); }
-          .badge-starting, .badge-building { background: var(--status-warn-bg); color: var(--status-warn); }
-          .badge-exited, .badge-stopped, .badge-failed { background: var(--status-error-bg); color: var(--status-error); }
-          .badge-restarting, .badge-paused { background: #3a1d5f; color: #c084fc; }
-          .badge-healthy { background: var(--status-success-bg); color: var(--status-success); }
-          .badge-unhealthy { background: var(--status-error-bg); color: var(--status-error); }
-          .badge-starting-health { background: var(--status-warn-bg); color: var(--status-warn); }
-          .stats {
-            display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 0.75rem;
-            margin-top: 1rem;
-            padding: 0.75rem;
-            background: #0f0f0f;
-            border: 1px solid #262626;
-            border-radius: 6px;
-          }
-          .stat-label {
-            color: #737373;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-            margin-bottom: 0.25rem;
-          }
-          .stat-value {
-            font-size: 0.9rem;
-            font-weight: 600;
-            color: #e5e5e5;
-            font-variant-numeric: tabular-nums;
-          }
-          code { font-family: monospace; background: #262626; padding: 1px 4px; border-radius: 4px; font-size: 0.85rem; }
-          @media (max-width: 640px) {
-            .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-          }
-          form { margin-bottom: 1.5rem; }
-          input, select, button { padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #262626; background: #171717; color: #e5e5e5; font-size: 0.9rem; font-family: inherit; }
-          input:focus, select:focus { outline: none; border-color: #2563eb; }
-          button { background: #2563eb; border-color: #2563eb; cursor: pointer; font-weight: 600; }
-          button:hover { background: #1d4ed8; }
-          button.danger { background: #dc2626; border-color: #dc2626; }
-          button.danger:hover { background: #b91c1c; }
-          button.ghost { background: transparent; border-color: #262626; }
-          button.ghost:hover { background: #171717; }
-          .flex { display: flex; gap: 0.5rem; align-items: center; }
-          .between { justify-content: space-between; }
-          .auth-card { max-width: 400px; margin: 0 auto; min-height: calc(100vh - 8rem); display: flex; flex-direction: column; justify-content: center; }
-          .auth-card input { width: 100%; margin-bottom: 0.75rem; }
-          .auth-card button[type="submit"] { width: 100%; }
-          .auth-brand { text-align: center; margin-bottom: 2rem; }
-          .auth-brand h1 { font-size: 2rem; margin-bottom: 0.25rem; }
-          .auth-brand p { color: var(--text-muted); font-size: 0.9rem; }
-          .error { background: #451a1a; border: 1px solid #dc2626; color: #fca5a5; padding: 0.75rem; border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem; }
-          .hint { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem; }
-          .feature-body { transition: opacity 0.15s; }
-          .feature-body.disabled { opacity: 0.35; pointer-events: none; }
-          .settings-layout { display: grid; grid-template-columns: 180px 1fr; gap: 2rem; }
-          .settings-nav { position: sticky; top: 2rem; align-self: start; display: flex; flex-direction: column; gap: 0.25rem; }
-          .settings-nav a { color: var(--text-dim); text-decoration: none; font-size: 0.85rem; padding: 0.4rem 0.75rem; border-radius: 4px; transition: color 0.15s, background 0.15s; }
-          .settings-nav a:hover { color: var(--text); background: var(--bg-card); }
-          .settings-nav a.active { color: var(--brand); background: var(--bg-card); }
-          @media (max-width: 700px) { .settings-layout { grid-template-columns: 1fr; } .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; } }
-          .health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.75rem; }
-          .health-tile { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; display: flex; align-items: flex-start; gap: 0.75rem; }
-          .health-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 0.3rem; flex-shrink: 0; }
-          .health-dot.ok { background: var(--status-success); }
-          .health-dot.warn { background: var(--status-warn); }
-          .health-dot.fail { background: var(--status-error); }
-          .copy-group { position: relative; display: flex; align-items: stretch; background: #0f0f0f; border: 1px solid #262626; border-radius: 6px; margin-top: 0.5rem; }
-          .copy-group code { flex: 1; padding: 0.6rem 0.75rem; background: transparent; border: none; font-size: 0.8rem; white-space: nowrap; overflow-x: auto; display: block; }
-          .copy-btn { padding: 0.4rem 0.75rem; background: #262626; border: none; border-left: 1px solid #262626; color: #a3a3a3; cursor: pointer; font-size: 0.75rem; font-family: inherit; border-radius: 0 5px 5px 0; white-space: nowrap; }
-          .copy-btn:hover { background: #333; color: #e5e5e5; }
-          .app-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.25rem; }
-          .app-header h2 { margin: 0; }
-          .app-domain { color: #60a5fa; text-decoration: none; font-size: 0.8rem; display: block; margin-bottom: 0.25rem; }
-          .app-domain:hover { text-decoration: underline; }
-          .section-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.75rem; margin-top: 1.25rem; color: #a3a3a3; }
-        </style>
-        <script>
-          function filterApps() {
-            var q = (document.getElementById('app-search') || {}).value || '';
-            q = q.toLowerCase();
-            var cards = document.querySelectorAll('.app-card[data-name]');
-            var shown = 0;
-            cards.forEach(function(c) {
-              var match = !q || c.getAttribute('data-name').toLowerCase().indexOf(q) !== -1
-                || (c.getAttribute('data-domain') || '').toLowerCase().indexOf(q) !== -1;
-              c.style.display = match ? '' : 'none';
-              if (match) shown++;
-            });
-            var empty = document.getElementById('no-match');
-            if (empty) empty.style.display = shown === 0 && q ? '' : 'none';
-          }
-          document.body.addEventListener('htmx:afterSwap', function(e) {
-            // After the live-apps swap reinserts fresh cards, re-apply
-            // the current search filter so the user's query keeps
-            // hiding non-matching cards.
-            var target = e && e.detail && e.detail.target;
-            if (target && target.id === 'apps-live') filterApps();
-          });
-          document.addEventListener('click', function(e) {
-            document.querySelectorAll('.overflow-menu[open]').forEach(function(m) {
-              if (!m.contains(e.target)) m.removeAttribute('open');
-            });
-          });
-          function featureToggle(checkbox) {
-            var body = checkbox.closest('.card').querySelector('.feature-body');
-            if (body) { body.classList.toggle('disabled', !checkbox.checked); }
-          }
-          function confirmDelete(form) {
-            var expected = form.getAttribute('data-app-name');
-            var input = prompt('Type "' + expected + '" to confirm deletion:');
-            if (input !== expected) return false;
-            return true;
-          }
-          function toggleSecret(btn) {
-            var code = btn.previousElementSibling;
-            if (code.textContent === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022') {
-              code.textContent = code.getAttribute('data-value');
-              btn.textContent = 'Hide';
-            } else {
-              code.textContent = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
-              btn.textContent = 'Show';
-            }
-          }
-          function copyText(btn) {
-            var text = btn.getAttribute('data-copy');
-            navigator.clipboard.writeText(text).then(function() {
-              var orig = btn.textContent;
-              btn.textContent = 'Copied!';
-              setTimeout(function() { btn.textContent = orig; }, 1500);
-            });
-          }
-        </script>
+        <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0a'/%3E%3Cpath d='M7 16 25 8l-5 17-4-7z' fill='none' stroke='%23fff' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E" />
+        <script>${raw(PREPAINT_JS)}</script>
+        <script src="${HTMX_PATH}" integrity="${HTMX_INTEGRITY}"></script>
+        <style>${raw(APP_CSS + PALETTE_CSS)}</style>
       </head>
       <body>
-        <div class="container">
-          ${raw(nav)}
-          ${raw(body)}
-        </div>
+        <a class="skip" href="#main">Skip to content</a>
+        ${raw(shell)}
+        ${raw(paletteHtml)}
+        <script>${raw(CLIENT_JS)}</script>
+        ${username ? html`<script>${raw(PALETTE_JS)}</script>` : ""}
       </body>
     </html>`;
 }
@@ -451,18 +398,35 @@ function authLayout(title: string, body: string, csrf?: string) {
 
 // ── Public routes (no auth) ──────────────────────────────
 
+const SETUP_WINDOW_MS = 15 * 60 * 1000;
+const SETUP_MAX_PER_IP = 5;
+const SETUP_MAX_TOTAL = 30;
+
 webRoutes.get("/setup", (c) => {
   if (countUsers() > 0) return c.redirect("/login");
+  const error = c.req.query("error");
+  const errorMsg =
+    error === "wait"
+      ? '<div class="error">Too many attempts. Wait a few minutes and try again.</div>'
+      : error === "token"
+        ? '<div class="error">That setup token is not right.</div>'
+        : "";
   return c.html(
     authLayout(
       "Setup",
       `
       <h1>Welcome to Runway</h1>
       <p class="hint">Create the first admin account and configure your base domain.</p>
+      ${errorMsg}
       <form method="POST" action="/setup">
-        <input type="text" name="username" placeholder="Username" required autofocus />
-        <input type="password" name="password" placeholder="Password (min 8 characters)" minlength="8" required />
-        <input type="text" name="base_domain" placeholder="Base domain (optional, e.g. runway.example.com)" />
+        <input type="password" name="setup_token" placeholder="Setup token" aria-label="Setup token" autocomplete="off" autocapitalize="none" spellcheck="false" required autofocus />
+        <p class="hint">
+          One-time token that proves you installed this server. The installer printed it; on the server run
+          <span class="key">docker logs runway-control 2>&amp;1 | grep -i "setup token"</span>.
+        </p>
+        <input type="text" name="username" placeholder="Username" aria-label="Username" autocomplete="username" autocapitalize="none" spellcheck="false" required />
+        <input type="password" name="password" placeholder="Password (min 8 characters)" aria-label="Password" autocomplete="new-password" minlength="8" required />
+        <input type="text" name="base_domain" placeholder="Base domain (optional, e.g. runway.example.com)" aria-label="Base domain" autocomplete="off" />
         <p class="hint">
           Point a wildcard DNS record <span class="key">*.your-domain</span> to this server.
           Each app will get its own subdomain automatically.
@@ -478,7 +442,23 @@ webRoutes.get("/setup", (c) => {
 webRoutes.post("/setup", async (c) => {
   if (countUsers() > 0) return c.redirect("/login");
 
+  // S19: nobody becomes the first admin without the one-time setup token.
+  // Wrong guesses are counted per address and for the whole server; the answer
+  // never says more than "not right", and the token never goes into a URL.
+  const ip = getClientIp(c);
+  if (isRateLimited(`setup:${ip}`, SETUP_MAX_PER_IP, SETUP_WINDOW_MS) || isRateLimited("setup:all", SETUP_MAX_TOTAL, SETUP_WINDOW_MS)) {
+    return c.redirect("/setup?error=wait");
+  }
   const body = await c.req.parseBody();
+  const expected = currentSetupToken();
+  if (!expected || !setupTokenMatches(body["setup_token"] as string | undefined, expected.token)) {
+    recordFailedAttempt(`setup:${ip}`, SETUP_WINDOW_MS);
+    recordFailedAttempt("setup:all", SETUP_WINDOW_MS);
+    console.warn(`Setup attempt with a wrong token from ${ip}`);
+    return c.redirect("/setup?error=token");
+  }
+  clearAttempts(`setup:${ip}`);
+
   const username = (body["username"] as string | undefined)?.trim();
   const password = body["password"] as string | undefined;
   const baseDomainRaw = body["base_domain"] as string | undefined;
@@ -488,6 +468,8 @@ webRoutes.post("/setup", async (c) => {
   }
 
   const user = await createUser(username, password, "admin");
+  // Setup is done: the token is of no further use (setup stays closed).
+  clearSetupToken();
 
   if (baseDomainRaw && baseDomainRaw.trim()) {
     const normalized = normalizeBaseDomain(baseDomainRaw);
@@ -495,7 +477,7 @@ webRoutes.post("/setup", async (c) => {
   }
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "user_created", {
     targetUserId: user.id,
     targetUsername: user.username,
@@ -505,6 +487,17 @@ webRoutes.post("/setup", async (c) => {
 
 webRoutes.get("/login", (c) => {
   if (countUsers() === 0) return c.redirect("/setup");
+  expireLegacySessionCookie(c);
+  const wanted = safeReturnTo(c.req.query("return_to"), () => false);
+  if (wanted !== "/") {
+    setCookie(c, LOGIN_RETURN_COOKIE, wanted, {
+      httpOnly: true,
+      sameSite: "Lax",
+      path: "/",
+      maxAge: 5 * 60,
+      secure: isSecureRequest(c),
+    });
+  }
   const error = c.req.query("error");
   const locked = c.req.query("locked");
   const ip = getClientIp(c);
@@ -518,14 +511,15 @@ webRoutes.get("/login", (c) => {
         ? '<div class="error">Invalid username or password.</div>'
         : "";
 
-  const returnTo = c.req.query("return_to") ?? "";
+  // S17: do not even pass an off-site target on to the OAuth start route.
+  const returnTo = c.req.query("return_to") ? safeReturn(c.req.query("return_to")) : "";
   const returnParam = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
 
   const hasGoogle = !!getSetting("oauth_google_client_id");
   const hasMicrosoft = !!getSetting("oauth_microsoft_client_id");
 
   const oauthButtons = (hasGoogle || hasMicrosoft)
-    ? `<div style="margin-top:1rem;border-top:1px solid #333;padding-top:1rem">
+    ? `<div style="margin-top:1rem;border-top:1px solid var(--line2);padding-top:1rem">
         ${hasGoogle ? `<a href="/auth/google${returnParam}" style="display:block;text-align:center;padding:0.6rem;margin-bottom:0.5rem;background:#1a73e8;color:#fff;text-decoration:none;border-radius:4px;font-size:0.9rem">Sign in with Google</a>` : ""}
         ${hasMicrosoft ? `<a href="/auth/microsoft${returnParam}" style="display:block;text-align:center;padding:0.6rem;background:#0078d4;color:#fff;text-decoration:none;border-radius:4px;font-size:0.9rem">Sign in with Microsoft</a>` : ""}
       </div>`
@@ -533,7 +527,9 @@ webRoutes.get("/login", (c) => {
 
   const oauthError = error === "oauth_state" || error === "oauth_no_code" || error === "oauth_exchange" || error === "oauth_no_email" || error === "oauth_nonce"
     ? '<div class="error">OAuth login failed. Please try again.</div>'
-    : "";
+    : error === "oauth_denied"
+      ? '<div class="error">This account cannot sign in here yet. Ask your administrator for an invitation.</div>'
+      : "";
 
   return c.html(
     authLayout(
@@ -543,10 +539,11 @@ webRoutes.get("/login", (c) => {
       ${errorMsg}
       ${oauthError}
       <form method="POST" action="/login">
-        <input type="text" name="username" placeholder="Username" required autofocus />
-        <input type="password" name="password" placeholder="Password" required />
+        <input type="text" name="username" placeholder="Username" aria-label="Username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus />
+        <input type="password" name="password" placeholder="Password" aria-label="Password" autocomplete="current-password" required />
         <button type="submit">Sign in</button>
       </form>
+      <p class="hint" style="margin-top:1rem;text-align:center">Trouble signing in? Ask your administrator.</p>
       ${oauthButtons}
     `,
       csrfField(c)
@@ -585,12 +582,65 @@ webRoutes.post("/login", async (c) => {
   }
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "login");
-  return c.redirect("/");
+  return c.redirect(takeLoginReturn(c));
 });
 
 // ── Second factor ────────────────────────────────────────
+
+// The per-IP limit on second-factor guesses has its own key, so a correct
+// password (which clears the login counter) does not wipe it. It is generous
+// on purpose: one office behind one address must not lock itself out. The
+// per-user counter (auth/twofa-limit.ts) is the real brake.
+const TWOFA_IP_SCOPE = (ip: string) => `2fa:${ip}`;
+const TWOFA_IP_MAX = 30;
+
+/**
+ * Check a second factor for a user, charging the attempt to that user
+ * BEFORE the code is looked at (S09). Used by the sign-in and by every
+ * signed-in action that asks for a code (turn 2FA off, new backup codes,
+ * reset someone else's 2FA), so a hijacked session cannot be used to guess
+ * either.
+ *
+ *  - "locked": too many failures. The code was not even looked at, so a
+ *    correct code gets the same answer as a wrong one.
+ *  - "bad": wrong, malformed or already used. All of these look the same.
+ */
+async function verifySecondFactor(
+  user: User,
+  raw: string,
+  opts: { allowBackup: boolean; ip: string; via?: string }
+): Promise<"ok" | "bad" | "locked"> {
+  const begin = beginAttempt(user.id);
+  if (!begin.allowed) return "locked";
+
+  const code = raw.replace(/\s+/g, "");
+  let ok = false;
+  if (/^\d{6}$/.test(code)) {
+    ok = verifyAndConsumeTotp(user.id, user.totp_secret!, code);
+  } else if (opts.allowBackup) {
+    ok = await consumeBackupCode(user.id, code);
+  }
+  if (ok) {
+    recordTwoFactorSuccess(user.id);
+    return "ok";
+  }
+
+  const where = `IP: ${opts.ip}${opts.via ? `, ${opts.via}` : ""}`;
+  logAudit(user.id, user.username, "2fa_failed", { detail: where });
+  if (begin.lockSeconds > 0) {
+    logAudit(user.id, user.username, "2fa_locked", {
+      detail: `locked for ${waitText(begin.lockSeconds)} after ${begin.failures} failed attempts; ${where}`,
+    });
+  }
+  if (begin.failures === SEVERE_AT) {
+    logAudit(user.id, user.username, "2fa_bruteforce_suspected", {
+      detail: `${begin.failures} failed second-factor attempts in a row; an administrator can lift the lock on the Users page; ${where}`,
+    });
+  }
+  return "bad";
+}
 
 webRoutes.get("/login/2fa", (c) => {
   const token = getCookieValue(c, PREAUTH_COOKIE);
@@ -598,10 +648,19 @@ webRoutes.get("/login/2fa", (c) => {
   const error = c.req.query("error");
   const locked = c.req.query("locked");
   const ip = getClientIp(c);
-  const remaining = isRateLimited(ip) ? remainingLockoutSeconds(ip) : 0;
+  const userId = getPreauthUserId(token);
+  // The per-user lock (S09) is the one that matters; the per-IP limit is a
+  // second line of defence with its own scope so it is not wiped by a
+  // correct password.
+  const userLock = userId ? lockRemainingSeconds(userId) : 0;
+  const remaining = userLock
+    ? userLock
+    : isRateLimited(TWOFA_IP_SCOPE(ip), TWOFA_IP_MAX)
+      ? remainingLockoutSeconds(TWOFA_IP_SCOPE(ip))
+      : 0;
 
   const errorMsg = remaining
-    ? `<div class="error">Too many failed attempts. Try again in ${Math.ceil(remaining / 60)} minute${remaining > 60 ? "s" : ""}.</div>`
+    ? `<div class="error">Too many failed attempts. Try again in ${waitText(remaining)}.</div>`
     : locked
       ? `<div class="error">Too many failed attempts. Try again later.</div>`
       : error
@@ -632,7 +691,7 @@ webRoutes.get("/login/2fa", (c) => {
 
 webRoutes.post("/login/2fa", async (c) => {
   const ip = getClientIp(c);
-  if (isRateLimited(ip)) return c.redirect("/login/2fa?locked=1");
+  if (isRateLimited(TWOFA_IP_SCOPE(ip), TWOFA_IP_MAX)) return c.redirect("/login/2fa?locked=1");
 
   const token = getCookieValue(c, PREAUTH_COOKIE);
   if (!token) return c.redirect("/login");
@@ -645,32 +704,32 @@ webRoutes.post("/login/2fa", async (c) => {
   if (!user || !isTotpEnabled(user)) return c.redirect("/login");
 
   const body = await c.req.parseBody();
-  const raw = (body["code"] as string | undefined)?.trim() ?? "";
-  const code = raw.replace(/\s+/g, "");
+  const raw = (body["code"] as string | undefined) ?? "";
 
-  let ok = false;
-  if (/^\d{6}$/.test(code)) {
-    ok = verifyAndConsumeTotp(user.id, user.totp_secret!, code);
-  } else {
-    ok = await consumeBackupCode(user.id, code);
-  }
-  if (!ok) {
-    recordFailedAttempt(ip);
-    logAudit(user.id, user.username, "2fa_failed", {
-      detail: `IP: ${ip}`,
-    });
+  const result = await verifySecondFactor(user, raw, { allowBackup: true, ip });
+  if (result === "locked") return c.redirect("/login/2fa?locked=1");
+  if (result === "bad") {
+    recordFailedAttempt(TWOFA_IP_SCOPE(ip));
+    // After a handful of misses on this one pre-auth session it is
+    // destroyed: the password has to be entered again, and that does not
+    // reset the per-user counter.
+    if (recordPreauthFailure(token) >= MAX_FAILURES_PER_PREAUTH) {
+      deletePreauthSession(token);
+      deleteCookie(c, PREAUTH_COOKIE, { path: "/" });
+      return c.redirect("/login?locked=1");
+    }
     return c.redirect("/login/2fa?error=1");
   }
 
-  clearAttempts(ip);
+  clearAttempts(TWOFA_IP_SCOPE(ip));
 
   deletePreauthSession(token);
   deleteCookie(c, PREAUTH_COOKIE, { path: "/" });
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "login_2fa");
-  return c.redirect("/");
+  return c.redirect(takeLoginReturn(c));
 });
 
 webRoutes.post("/login/2fa/cancel", (c) => {
@@ -681,9 +740,9 @@ webRoutes.post("/login/2fa/cancel", (c) => {
 });
 
 webRoutes.post("/logout", (c) => {
-  const token = getCookieValue(c, SESSION_COOKIE);
+  const token = readSessionToken(c);
   if (token) deleteSession(token);
-  deleteCookie(c, SESSION_COOKIE, { path: "/" });
+  clearSessionCookie(c);
   return c.redirect("/login");
 });
 
@@ -700,6 +759,8 @@ function getCookieValue(c: Context, name: string): string | undefined {
 
 webRoutes.use("/", requireSession);
 webRoutes.use("/partials/*", requireSession);
+webRoutes.use("/security", requireSession);
+webRoutes.use("/overview", requireSession);
 webRoutes.use("/apps", requireSession);
 webRoutes.use("/apps/*", requireSession);
 webRoutes.use("/apps/:id", requireAppAccess);
@@ -720,8 +781,96 @@ webRoutes.use("/skills", requireAdmin);
 webRoutes.use("/skills/*", requireAdmin);
 webRoutes.use("/account", requireSession);
 webRoutes.use("/account/*", requireSession);
+webRoutes.use("/rebuild", requireSession);
+webRoutes.use("/rebuild", requireAdmin);
+webRoutes.use("/rebuild/*", requireSession);
+webRoutes.use("/rebuild/*", requireAdmin);
 webRoutes.use("/health", requireSession);
 webRoutes.use("/health", requireAdmin);
+
+/** "auto-patched" / "auto-minor 1.29→1.30" badge for a used base image, or "". */
+function baseBadge(b: { image: string; auto_patched_from?: string; auto_minor_from?: string }): string {
+  if (b.auto_minor_from) {
+    const to = lineOf(parseImageRef(b.image)?.tag ?? "") ?? "?";
+    return ` <span class="badge badge-running" title="Escalated to a newer minor line because a vulnerability could not be fixed in ${escapeHtml(b.auto_minor_from)}">auto-minor ${escapeHtml(b.auto_minor_from)}&rarr;${escapeHtml(to)}</span>`;
+  }
+  if (b.auto_patched_from) {
+    return ` <span class="badge badge-running" title="Raised automatically from ${escapeHtml(b.auto_patched_from)}">auto-patched</span>`;
+  }
+  return "";
+}
+
+function fmtUtc(iso: string | null | undefined): string {
+  if (!iso) return "?";
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "?";
+}
+
+/**
+ * Apps (out of the given ones) that are in a KEV grace term or
+ * quarantined, keyed by app id, in the shape the dashboard views take.
+ */
+function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
+  const rows = new Map(listQuarantine().map((r) => [r.app_id, r]));
+  const termMs = getQuarantineTermDays() * 86_400_000;
+  const out = new Map<string, AtRiskApp>();
+  for (const a of apps) {
+    const q = rows.get(a.id);
+    if (!q) continue;
+    out.set(a.id, {
+      id: a.id,
+      name: a.name ?? a.id,
+      owner: ownerUsernameOf(a),
+      state: q.state,
+      cves: Object.keys(q.kev_first_seen),
+      deadline: deadlineOf(q, termMs),
+      quarantinedAt: q.quarantined_at,
+      exemptUntil: getActiveExemption(a.id)?.until ?? null,
+    });
+  }
+  return out;
+}
+
+/** App-page section: quarantine status, exemption, owner notices. */
+function renderQuarantineSection(app: App, admin: boolean): string {
+  const q = getQuarantine(app.id);
+  const ex = getExemption(app.id);
+  const exActive = !!getActiveExemption(app.id);
+  const notices = listNotices(app.id, 10);
+  if (!q && !ex && notices.length === 0) return "";
+  const termMs = getQuarantineTermDays() * 86_400_000;
+
+  const status = q
+    ? q.state === "quarantined"
+      ? `<p><span class="badge badge-quarantined">quarantined</span> since ${escapeHtml(fmtUtc(q.quarantined_at))}. Visitors see a maintenance page; the container is stopped, data and volumes are kept. It comes back online automatically when a rebuild or deploy resolves ${escapeHtml(Object.keys(q.kev_first_seen).join(", "))}.</p>`
+      : `<p><span class="badge badge-building">term running</span> Actively exploited: ${escapeHtml(Object.keys(q.kev_first_seen).join(", "))}. Fix it before ${escapeHtml(fmtUtc(deadlineOf(q, termMs)))} or the app is taken offline.</p>`
+    : "";
+  const exemption = ex
+    ? `<p class="meta">Exemption ${exActive ? "active" : "expired"}: until ${escapeHtml(fmtUtc(ex.until))}, by ${escapeHtml(ex.granted_by)}. Reason: ${escapeHtml(ex.reason)}</p>`
+    : "";
+  const forms =
+    admin && (q || ex)
+      ? `<details class="exempt"${ex && exActive ? " open" : ""}>
+          <summary>${exActive ? "Change or remove the exemption" : "Give this app more time (exemption)"}</summary>
+          <p class="hint">An exemption postpones taking the app offline until the date you pick. It needs a reason and is kept in the audit log.</p>
+          <form method="POST" action="/apps/${encodeURIComponent(app.id)}/quarantine-exception" style="display:grid;gap:0.5rem;max-width:32rem;margin:0.5rem 0">
+            <input type="text" name="reason" required minlength="5" maxlength="500" placeholder="Reason (required, kept in the audit log)" />
+            <label class="meta">Until <input type="date" name="until" required /></label>
+            <div><button type="submit" style="width:auto">${exActive ? "Update" : "Grant"} exemption</button></div>
+          </form>
+          ${ex ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/quarantine-exception/remove" style="margin:0"><button type="submit" class="ghost" style="width:auto">Remove exemption</button></form>` : ""}
+        </details>`
+      : "";
+  const list = notices.length
+    ? `<ul style="margin:0.5rem 0 0 1.25rem">${notices
+        .map((n) => `<li><span class="meta">${escapeHtml(formatRelative(n.created_at))}</span> ${escapeHtml(n.message)}</li>`)
+        .join("")}</ul>`
+    : "";
+  return `<div class="card" id="quarantine">
+    <h2>Security notices</h2>
+    ${status}${exemption}${forms}${list}
+  </div>`;
+}
 
 /**
  * HTML for the apps area of the dashboard. Rendered inline on first
@@ -740,7 +889,7 @@ async function renderAppsLive(
   const admin = isAdmin(user);
   const apps = admin
     ? listApps()
-    : listApps().filter((a) => a.created_by === user.username);
+    : listApps().filter((a) => a.owner_user_id === user.id);
   // Pre-fetch live container state + memory + image size for every
   // app so each card renders with real values inline. Without this
   // the outer swap would paint "..." placeholders that a second
@@ -750,74 +899,153 @@ async function renderAppsLive(
     apps.map((a) => a.id),
     SPARKLINE_HOURS
   );
-  const appCards = apps
+  const now = Date.now();
+  const atRisk = collectAtRisk(apps);
+  const statuses = apps.map((app, i) =>
+    statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now)
+  );
+  const appRows = apps
     .map((app, i) =>
-      renderAppCard(app, dashboardDomain, allStats[i] ?? null, {
-        lastRequestAt: app.last_request_at,
-        buckets: buckets.get(app.id) ?? [],
-      })
+      renderAppRow(
+        app,
+        dashboardDomain,
+        allStats[i] ?? null,
+        {
+          lastRequestAt: app.last_request_at,
+          buckets: buckets.get(app.id) ?? [],
+        },
+        statuses[i],
+        admin,
+        user.id
+      )
     )
     .join("");
 
-  const running = apps.filter((a) => a.status === "running").length;
-  const failing = apps.filter((a) =>
-    ["failed", "exited"].includes(a.status)
-  ).length;
-  const parts: string[] = [];
-  if (apps.length > 0) {
-    parts.push(`${apps.length} app${apps.length !== 1 ? "s" : ""}`);
-    if (running)
-      parts.push(
-        `<span style="color:var(--status-success)">${running} running</span>`
-      );
-    if (failing)
-      parts.push(
-        `<span style="color:var(--status-error)">${failing} failing</span>`
-      );
-  }
+  // Unconfigured apps (no name or runtime yet) have no state: they count
+  // in "All" and in nothing else.
+  const configuredIdx = apps.map((a, i) => (a.name && a.runtime ? i : -1)).filter((i) => i >= 0);
+  const chips = homeChips(
+    countStates(configuredIdx.map((i) => statuses[i])),
+    configuredIdx.filter((i) => needsAttention(statuses[i])).length,
+    apps.length - configuredIdx.length
+  );
 
   // The search input is rendered (and preserved) whenever there are
   // any apps, not only past the old >=4 threshold, so its value
   // survives live updates even if the app count briefly dips.
   const filterBlock =
     apps.length > 0
-      ? `<div class="dashboard-filter" id="app-search-wrap" hx-preserve="true" style="margin-top:0.75rem">
+      ? `<div class="dashboard-filter" id="app-search-wrap" hx-preserve="true">
           <input type="search" id="app-search" placeholder="Search apps..." oninput="filterApps()" style="font-size:0.85rem" />
         </div>`
       : "";
 
   const header =
     apps.length > 0
-      ? `<div style="margin-bottom:1rem">
-          <p class="meta">${parts.join(" &middot; ")}</p>
+      ? `<div class="apps-bar">
+          ${renderChips(chips)}
           ${filterBlock}
         </div>`
       : "";
 
   const body =
     apps.length === 0
-      ? `<div class="card" style="text-align:center;padding:3rem 2rem">
-          <h2 style="margin-bottom:1rem">Get started</h2>
-          <p class="hint" style="max-width:500px;margin:0 auto 1.5rem">
-            Create your first app to get an API key. Then open your project in
-            <a href="https://claude.ai/code" target="_blank" style="color:#60a5fa">Claude Code</a>
-            and paste the deploy instruction — Runway handles the rest.
-          </p>
-          <p style="margin-bottom:1.5rem">
-            <strong>1.</strong> Click <em>"+ New app"</em> above<br/>
-            <strong>2.</strong> Copy the deploy instruction<br/>
-            <strong>3.</strong> Paste it in Claude Code
-          </p>
-          <p class="meta">
-            Need help? Check the <a href="https://github.com/wiggertdehaan/Runway#deploying-an-app" target="_blank" style="color:#60a5fa">deploy guide</a>
-            or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:#60a5fa">API docs</a>.
-          </p>
-        </div>`
-      : `<div class="app-grid">${appCards}</div>
-         <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your search.</p>`;
+      ? renderEmptyState({ dashboardDomain })
+      : `<table class="apps-tbl">
+          <thead><tr><th>App</th><th>Status</th><th>Address</th><th>Runtime</th><th>Traffic, 7 days</th><th><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>${appRows}</tbody>
+        </table>
+         <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your filter.</p>`;
 
-  return `${header}${body}`;
+  const scannedIds = listPeriodicScanAppIds();
+  const runningApps = apps.filter((a) => a.status === "running");
+  const kevStatus = renderKevStatus(
+    kevCacheInfo(),
+    {
+      running: runningApps.length,
+      scanned: runningApps.filter((a) => scannedIds.has(a.id)).length,
+    },
+    atRisk.size,
+    now,
+    admin
+  );
+
+  return `${renderSecurityAttention([...atRisk.values()], now, admin)}${header}${kevStatus}${body}`;
 }
+
+webRoutes.get("/overview", async (c) => {
+  const user = c.get("user");
+  const admin = isAdmin(user);
+  const now = Date.now();
+  const period = parsePeriod(c.req.query("period"));
+  // The one place rights are decided: the apps this viewer may see. Everything
+  // the overview shows is built from these and from nothing else.
+  const apps = appsVisibleTo(user.id, admin);
+  const atRisk = collectAtRisk(apps);
+  const allStats = await getAppStatsBulk(apps);
+  const overviewApps: OverviewApp[] = apps.map((app, i) => {
+    const st = statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now);
+    return {
+      id: app.id,
+      name: app.name,
+      createdAt: parseOverviewTime(app.created_at) ?? now,
+      configured: !!(app.name && app.runtime),
+      state: st.state,
+      reason: st.reason,
+      ownerless: app.owner_user_id === null,
+    };
+  });
+  const dbInputs = gatherDbInputs({ appIds: apps.map((a) => a.id), viewer: { id: user.id, admin }, now });
+  const health = admin ? await cachedHealth().catch(() => null) : null;
+  // Server figures are for administrators: an owner's request never touches them.
+  const host = admin ? gatherHostInput(now, period) : null;
+  const view = buildOverview(
+    { viewer: { admin }, apps: overviewApps, kev: [...atRisk.values()], health, host, ...dbInputs },
+    now,
+    period
+  );
+  return c.html(
+    layout("Overview", renderOverview(view, { admin }), {
+      username: user.username,
+      userId: user.id,
+      csrf: csrfField(c),
+      isAdmin: admin,
+    })
+  );
+});
+
+webRoutes.get("/security", async (c) => {
+  const user = c.get("user");
+  const admin = isAdmin(user);
+  const apps = appsVisibleTo(user.id, admin);
+  const now = Date.now();
+  const atRisk = collectAtRisk(apps);
+  const allStats = await getAppStatsBulk(apps);
+  const rows: SecurityApp[] = apps.map((app, i) => ({
+    id: app.id,
+    name: app.name ?? app.id,
+    owner: ownerUsernameOf(app),
+    kev: atRisk.get(app.id),
+    status: statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now),
+    hasImage: !!app.image_tag,
+  }));
+  const scannedIds = listPeriodicScanAppIds();
+  const running = apps.filter((a) => a.status === "running");
+  const kevStatusHtml = renderKevStatus(
+    kevCacheInfo(),
+    { running: running.length, scanned: running.filter((a) => scannedIds.has(a.id)).length },
+    atRisk.size,
+    now,
+    admin
+  );
+  return c.html(
+    layout(
+      "Security",
+      renderSecurityPage({ apps: rows, now, admin, kevStatusHtml, termDays: getQuarantineTermDays() }),
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: admin }
+    )
+  );
+});
 
 webRoutes.get("/", async (c) => {
   const user = c.get("user");
@@ -829,20 +1057,20 @@ webRoutes.get("/", async (c) => {
     layout(
       "Dashboard",
       `
-      ${c.req.query("forbidden") ? '<div class="card" style="border-color:#7f1d1d;color:#fca5a5;margin-bottom:1.5rem"><strong>Not allowed.</strong> That page is admin-only. Ask an administrator if you need access.</div>' : ""}
+      ${c.req.query("forbidden") ? '<div class="card" style="border-color:var(--err);color:var(--err);margin-bottom:1.5rem"><strong>Not allowed.</strong> That page is admin-only. Ask an administrator if you need access.</div>' : ""}
       ${c.req.query("welcome") ? `
-        <div class="card" style="border-color:#14532d;color:#4ade80;margin-bottom:1.5rem">
+        <div class="card" style="border-color:var(--ok);color:var(--ok);margin-bottom:1.5rem">
           <strong>Welcome to Runway!</strong> Your admin account is ready.
           Create your first app below to get started.
         </div>
       ` : ""}
       ${c.req.query("new") ? `
-        <div class="card" style="border-color:#1e3a8a;margin-bottom:1.5rem">
-          <strong style="color:#93c5fd">New app created.</strong>
-          <p style="margin:0.5rem 0 0;font-size:0.9rem;color:#d4d4d4">
+        <div class="card" style="border-color:var(--line2);margin-bottom:1.5rem">
+          <strong style="color:var(--tx)">New app created.</strong>
+          <p style="margin:0.5rem 0 0;font-size:0.9rem;color:var(--tx)">
             Scroll down to the highlighted card, click
             <em>Copy deploy instruction</em>, and paste it into
-            <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">Claude Code</a>
+            <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:var(--tx)">Claude Code</a>
             inside your project directory. Claude reads your Dockerfile (or generates one),
             packages the project, uploads it, and the server builds &amp; runs the container.
             The app's URL appears on the card once it's live.
@@ -893,12 +1121,12 @@ webRoutes.get("/", async (c) => {
           }
         });
       </script>
-      ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
+      ${!baseDomain && isAdmin(user) ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
       <div id="apps-live" hx-get="/partials/apps" hx-trigger="every 5s" hx-swap="innerHTML">
         ${appsHtml}
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -925,7 +1153,10 @@ webRoutes.post("/apps", async (c) => {
   const enabled = new Set(listEnabledSkills().map((s) => s.id));
   const valid = requested.filter((id) => enabled.has(id));
 
-  const app = createApp(user.username);
+  const app = createApp({ id: user.id, username: user.username });
+  // S10: createApp hands the plaintext back once. Keep it in memory for this
+  // person, so the home page can show it for a few minutes.
+  rememberKey(app.id, user.id, app.api_key);
   if (valid.length > 0) {
     setAppSkillIds(app.id, valid);
   }
@@ -990,19 +1221,28 @@ function renderDeployHistory(
       );
       const statusColor =
         d.status === "success"
-          ? "#4ade80"
+          ? "var(--ok)"
           : d.status === "blocked"
-          ? "#fca5a5"
+          ? "var(--err)"
           : d.status === "warned"
-          ? "#fbbf24"
+          ? "var(--warn)"
           : d.status === "failed"
-          ? "#f87171"
-          : "#a3a3a3";
+          ? "var(--err)"
+          : "var(--mu)";
       const statusLabel = escapeHtml(d.status);
       const when = escapeHtml(formatRelative(d.created_at));
       const tagShort = d.image_tag
         ? escapeHtml(d.image_tag.split(":").pop() ?? d.image_tag)
         : '<span class="meta">—</span>';
+      const bases = parseBaseImages(d);
+      const baseCell = bases.length
+        ? bases
+            .map((b) => {
+              const short = b.image.replace(/^docker\.io\/(library\/)?/, "");
+              return `<div style="font-family:monospace;font-size:0.72rem" title="${escapeHtml(describeBaseImage(b))} — ${escapeHtml(b.digest)}">${escapeHtml(short)}${baseBadge(b)}</div>`;
+            })
+            .join("")
+        : '<span class="meta" style="font-size:0.75rem">—</span>';
       const sourceCell = hasSourceForDeploy(app.id, d.id)
         ? `<a href="/apps/${encodeURIComponent(app.id)}/source?deploy=${d.id}" class="ghost" style="font-size:0.75rem;padding:0.25rem 0.5rem;text-decoration:none">Download</a>`
         : '<span class="meta" style="font-size:0.75rem">—</span>';
@@ -1015,11 +1255,13 @@ function renderDeployHistory(
              <button type="submit" class="ghost" style="font-size:0.75rem;padding:0.25rem 0.5rem">Restore</button>
            </form>`
         : "";
+      const reason = deployReason(d);
       return `
-        <tr style="border-bottom:1px solid #262626">
+        <tr style="border-bottom:1px solid var(--line)">
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.8rem">#${d.id}</td>
-          <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span></td>
+          <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span>${reason ? `<div class="meta deploy-reason">${escapeHtml(reason)}${d.status === "blocked" ? ' <a href="#scan">See findings</a>' : ""}</div>` : ""}</td>
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem" title="${escapeHtml(d.image_tag ?? "")}">${tagShort}</td>
+          <td style="padding:0.4rem 0.75rem">${baseCell}</td>
           <td style="padding:0.4rem 0.75rem;font-size:0.8rem" class="meta">${when}</td>
           <td style="padding:0.4rem 0.75rem">${sourceCell}</td>
           <td style="padding:0.4rem 0.75rem;text-align:right">${action}</td>
@@ -1038,12 +1280,13 @@ function renderDeployHistory(
         (the last ${SOURCE_RETENTION} snapshots are kept).
       </p>
       <div style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse">
+        <table class="deploys-table" style="width:100%;border-collapse:collapse">
           <thead>
-            <tr style="text-align:left;border-bottom:1px solid #262626">
+            <tr style="text-align:left;border-bottom:1px solid var(--line)">
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Deploy</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Status</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Image</th>
+              <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Base image</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">When</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Source</th>
               <th style="padding:0.5rem 0.75rem"></th>
@@ -1058,7 +1301,10 @@ function renderDeployHistory(
 
 function renderScanSection(
   app: ReturnType<typeof listApps>[number],
-  admin: boolean
+  admin: boolean,
+  canRebuild = false,
+  rebuildDisabledReason: string | null = null,
+  canRescan = false
 ): string {
   const thresholdOptions = THRESHOLDS.map((t) => {
     const selected = app.scan_threshold === t ? " selected" : "";
@@ -1078,7 +1324,7 @@ function renderScanSection(
   const floorApplies = effective !== app.scan_threshold && serverFloor !== "none";
 
   const floorNote = floorApplies
-    ? `<p style="color:#fbbf24;font-size:0.8rem;margin:0.5rem 0">
+    ? `<p style="color:var(--warn);font-size:0.8rem;margin:0.5rem 0">
          &#9888; Server-wide floor <strong>${escapeHtml(serverFloor)}</strong> raises
          this app's effective threshold above its per-app setting.
        </p>`
@@ -1123,12 +1369,25 @@ function renderScanSection(
         after the deploy gate ran.
       </p>`;
   }
-  const rescanButton =
-    admin && app.image_tag && app.status === "running"
-      ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/rescan" style="margin:0 0 0.5rem">
+  // Rescan is for the owner as well as the admin, same rule as rebuild.
+  const rescanButton = canRescan
+    ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/rescan" style="margin:0 0 0.5rem">
           <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Rescan now</button>
         </form>`
+    : "";
+
+  // Rebuild is for the owner as well as the admin; the switches below stay admin-only.
+  const rebuildButton = canRebuild
+    ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/rebuild" style="margin:0 0 0.5rem" onsubmit="return confirm('Rebuild this app from source without cache? It can take a few minutes.')">
+        <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Rebuild (no cache)</button>
+      </form>`
+    : rebuildDisabledReason
+      ? `<p class="meta" style="margin:0 0 0.5rem;font-size:0.8rem">${escapeHtml(rebuildDisabledReason)}</p>`
       : "";
+
+  // Five switches, each posting to the same admin-only endpoint as before.
+  // Owners see the state read-only.
+  const rebuildControls = app.image_tag ? renderMaintenance(app, admin) : "";
 
   const latest = getLatestDeployWithScan(app.id);
   let reportHtml = '<p class="meta">No scan has run yet. Deploy the app to generate a report.</p>';
@@ -1137,7 +1396,7 @@ function renderScanSection(
       const report: ScanResult = JSON.parse(latest.scan_report);
       const findings = report.findings ?? [];
       if (findings.length === 0) {
-        reportHtml = `<p style="color:#4ade80">&#10003; No findings in deploy #${latest.id} (image <code>${escapeHtml(latest.image_tag ?? "?")}</code>).</p>`;
+        reportHtml = `<p style="color:var(--ok)">&#10003; No findings in deploy #${latest.id} (image <code>${escapeHtml(latest.image_tag ?? "?")}</code>).</p>`;
       } else {
         const sevRank: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
         const threshRank: Record<string, number> = { none: -1, low: 1, medium: 2, high: 3, critical: 4 };
@@ -1213,7 +1472,7 @@ function renderScanSection(
           <div style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:0.8rem">
               <thead>
-                <tr style="text-align:left;border-bottom:1px solid #262626">
+                <tr style="text-align:left;border-bottom:1px solid var(--line)">
                   <th style="padding:0.4rem 0.6rem">Severity</th>
                   <th style="padding:0.4rem 0.6rem">Source</th>
                   <th style="padding:0.4rem 0.6rem">ID</th>
@@ -1225,7 +1484,7 @@ function renderScanSection(
               <tbody>${rows}</tbody>
             </table>
           </div>
-          ${more}` : `<p style="color:#4ade80;margin-bottom:0.5rem">&#10003; No findings at or above the effective threshold.</p>`}
+          ${more}` : `<p style="color:var(--ok);margin-bottom:0.5rem">&#10003; No findings at or above the effective threshold.</p>`}
           ${belowSummary}
           ${imageHint}
         `;
@@ -1254,49 +1513,45 @@ function renderScanSection(
       ${exemptToggle}
       ${periodicHtml}
       ${rescanButton}
+      ${rebuildButton}
+      ${rebuildControls}
       ${reportHtml}
     </div>
   `;
 }
 
-function renderScanBadge(app: ReturnType<typeof listApps>[number]): string {
-  const latest = getLatestDeployWithScan(app.id);
-  if (!latest || !latest.scan_summary) return "";
-  let summary: { status?: string; counts?: Record<string, number> };
-  try {
-    summary = JSON.parse(latest.scan_summary);
-  } catch {
-    return "";
-  }
-  const status = summary.status ?? "";
-  const c = summary.counts ?? {};
-  const crit = c.critical ?? 0;
-  const high = c.high ?? 0;
-  let label: string;
-  let color: string;
-  const med = c.medium ?? 0;
-  const low = (c.low ?? 0) + (c.unknown ?? 0);
-  const other = med + low;
-  const otherSuffix = other > 0 ? ` <span style="opacity:0.6">(+${other} other)</span>` : "";
-  if (status === "passed") {
-    label = "&#10003; secure";
-    color = "#14532d;color:#4ade80";
-  } else if (status === "blocked") {
-    label = `&#10007; blocked: ${crit} crit, ${high} high`;
-    color = "#7f1d1d;color:#fca5a5";
-  } else if (status === "warned") {
-    const serious = crit + high;
-    label = serious > 0
-      ? `&#9888; ${serious} issue${serious !== 1 ? "s" : ""}${otherSuffix}`
-      : `&#9888; ${other} low`;
-    color = serious > 0
-      ? "#713f12;color:#fbbf24"
-      : "#262626;color:#a3a3a3";
-  } else {
-    label = "scan skipped";
-    color = "#262626;color:#737373";
-  }
-  return `<a href="/apps/${encodeURIComponent(app.id)}#scan" class="badge" style="background:${color};text-decoration:none;font-size:0.7rem">${label}</a>`;
+/**
+ * The app's one status, from everything the dashboard already knows:
+ * the database row, Docker's live container state, the KEV term and the
+ * latest deploy's scan summary.
+ */
+function statusOf(
+  app: ReturnType<typeof listApps>[number],
+  stats: AppStats | null,
+  kev: AtRiskApp | undefined,
+  now: number
+): AppStatus {
+  return appStatus({
+    dbStatus: app.status,
+    containerState: stats?.containerState ?? null,
+    kev,
+    scanSummary: getLatestDeployWithScan(app.id)?.scan_summary ?? null,
+    now,
+  });
+}
+
+/** The status word with a coloured dot; the reason (if any) is the tooltip. */
+function renderStatusChip(s: AppStatus): string {
+  const title = s.reason ? ` title="${escapeHtml(s.reason)}"` : "";
+  return `<span class="st st-${s.state}"${title}><span class="dot" aria-hidden="true"></span>${escapeHtml(s.label)}</span>`;
+}
+
+/** The single security chip, linking to where the details live. Empty when there is nothing to say. */
+function renderSecurityChip(appId: string, s: AppStatus): string {
+  const c = s.security;
+  if (!c) return "";
+  const title = c.detail ? ` title="${escapeHtml(c.detail)}"` : "";
+  return `<a href="/apps/${encodeURIComponent(appId)}#${c.target}" class="tag tag-${c.tone}"${title}>${escapeHtml(c.label)}</a>`;
 }
 
 function activityToneColor(tone: ActivityTone): string {
@@ -1342,127 +1597,121 @@ function renderSparkline(buckets: number[], tone: ActivityTone): string {
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" width="100%" height="20" style="display:block" aria-hidden="true">${bars}</svg>`;
 }
 
-function renderActivityRow(
+function renderActivityCell(
   lastRequestAt: string | null,
   buckets: number[]
 ): string {
   const { label, tone } = formatActivity(lastRequestAt);
   const total = buckets.reduce((s, v) => s + v, 0);
   const tooltip = total > 0 ? `${total} requests in the last 7 days` : "";
-  return `
-    <div style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)" title="${escapeHtml(tooltip)}">
-      <div class="flex between" style="margin-bottom:0.3rem">
-        <span class="stat-label">Activity</span>
-        <span style="font-size:0.7rem;color:${activityToneColor(tone)};font-weight:500">${escapeHtml(label)}</span>
-      </div>
+  return `<div title="${escapeHtml(tooltip)}">
+      <span class="act-label" style="color:${activityToneColor(tone)}">${escapeHtml(label)}</span>
       ${renderSparkline(buckets, tone)}
     </div>`;
 }
 
-function renderAppCard(
+/**
+ * One app as a table row on desktop and as a card on a phone (same
+ * markup, the stylesheet switches). The name links to the app page; the
+ * row carries the attributes the client filter reads (data-status,
+ * data-attn, data-name, data-domain).
+ */
+function renderAppRow(
   app: ReturnType<typeof listApps>[number],
   dashboardDomain: string,
   stats: AppStats | null = null,
-  activity: { lastRequestAt: string | null; buckets: number[] } | null = null
+  activity: { lastRequestAt: string | null; buckets: number[] } | null = null,
+  status: AppStatus | null = null,
+  admin = false,
+  viewerId = ""
 ): string {
   const configured = !!(app.name && app.runtime);
-  const title = configured
-    ? escapeHtml(app.name!)
-    : '<span class="meta">Unconfigured</span>';
+  const id = encodeURIComponent(app.id);
+  const displayName = app.name ?? app.id;
+  const nameCell = configured
+    ? `<a class="app-name" href="/apps/${id}">${escapeHtml(displayName)}</a>${
+        admin ? `<div class="meta">${escapeHtml(ownerUsernameOf(app) ?? "No owner (admin only)")}</div>` : ""
+      }`
+    : `<a class="app-name" href="/apps/${id}"><span class="meta">Unconfigured</span></a>`;
 
   const domain = app.custom_domain ?? app.domain;
-  const domainLink = domain
-    ? `<a href="https://${encodeURI(domain)}" target="_blank" rel="noopener noreferrer" style="color:var(--brand);text-decoration:none;font-size:0.95rem;font-weight:500;display:block;margin-bottom:0.5rem">${escapeHtml(domain)} &#8599;</a>`
+  const domainCell = domain
+    ? `<a href="https://${encodeURI(domain)}" target="_blank" rel="noopener noreferrer">${escapeHtml(domain)} &#8599;</a>`
+    : `<span class="meta">&mdash;</span>`;
+
+  const llmsTxtUrl = dashboardDomain ? `https://${dashboardDomain}/llms.txt` : "/llms.txt";
+  // S10: keys are stored hashed, so the dashboard has a key to show only for a
+  // few minutes after it was made (see util/key-reveal.ts), and only to the
+  // person who made it. Otherwise the instruction carries a placeholder.
+  const revealedKey = viewerId ? peekKey(app.id, viewerId) : null;
+  const claudeInstruction = `Fetch ${llmsTxtUrl} and deploy this project using API key ${revealedKey ?? "<paste your API key here>"}`;
+
+  const st = status ?? statusOf(app, stats, undefined, Date.now());
+  const statusCell = configured
+    ? `<div class="app-status">${renderStatusChip(st)}${renderSecurityChip(app.id, st)}</div>`
+    : `<span class="meta">Not deployed</span>`;
+
+  // Runtime and memory in one cell; image size and uptime go in the tooltip.
+  const resTitle = stats
+    ? `Image ${formatBytes(stats.imageBytes)}, up ${formatRelative(stats.startedAt)}`
+    : "";
+  const resCell = configured
+    ? `<span title="${escapeHtml(resTitle)}">${escapeHtml(app.runtime!)}${stats ? ` &middot; ${escapeHtml(formatBytes(stats.memoryBytes))}` : ""}</span>`
     : "";
 
-  const llmsTxtUrl = dashboardDomain
-    ? `https://${dashboardDomain}/llms.txt`
-    : "/llms.txt";
-  const claudeInstruction = `Fetch ${llmsTxtUrl} and deploy this project using API key ${app.api_key}`;
-
-  // When stats were pre-fetched (bulk render, either on first page
-  // load or inside /partials/apps), render the values inline so the
-  // card never flickers. Fall back to the hx-get placeholder pattern
-  // when no stats were provided (keeps the function usable in other
-  // call sites).
-  const statsBlock = !configured
-    ? ""
-    : stats
-      ? `<div class="stats">
-          <div><div class="stat-label">Runtime</div><div class="stat-value">${escapeHtml(app.runtime!)}</div></div>
-          <div><div class="stat-label">Image</div><div class="stat-value">${escapeHtml(formatBytes(stats.imageBytes))}</div></div>
-          <div><div class="stat-label">Memory</div><div class="stat-value">${escapeHtml(formatBytes(stats.memoryBytes))}</div></div>
-          <div><div class="stat-label">Uptime</div><div class="stat-value">${escapeHtml(formatRelative(stats.startedAt))}</div></div>
-        </div>`
-      : `<div hx-get="/apps/${encodeURIComponent(app.id)}/stats" hx-trigger="load" hx-swap="outerHTML">
-          <div class="stats" style="grid-template-columns:repeat(4,1fr);gap:0.5rem;padding:0.5rem;margin-top:0.5rem">
-            <div><div class="stat-label">Runtime</div><div class="stat-value" style="font-size:0.8rem">${escapeHtml(app.runtime!)}</div></div>
-            <div><div class="stat-label">Image</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-            <div><div class="stat-label">Memory</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-            <div><div class="stat-label">Uptime</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-          </div>
-        </div>`;
-
-  // Status badge: use live container state when available, otherwise
-  // fall back to the DB status + hx-get so the first render without
-  // prefetched stats still catches up.
-  const badgeState = stats ? stats.containerState ?? app.status : app.status;
-  const badgeHtml = stats
-    ? `<span class="badge badge-${escapeHtml(badgeState)}">${escapeHtml(badgeState)}</span>`
-    : `<span class="badge badge-${escapeHtml(app.status)}" hx-get="/apps/${encodeURIComponent(app.id)}/badge" hx-trigger="load" hx-swap="outerHTML">${escapeHtml(app.status)}</span>`;
-
-  const initials = app.created_by
-    ? app.created_by.slice(0, 2).toUpperCase()
-    : "";
-  const avatar = initials
-    ? `<span title="${escapeHtml(app.created_by ?? "")}" style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--border);color:var(--text-muted);font-size:0.6rem;font-weight:600;flex-shrink:0">${escapeHtml(initials)}</span>`
-    : "";
+  const activityCell =
+    configured && activity ? renderActivityCell(activity.lastRequestAt, activity.buckets) : "";
 
   const overflowMenu = `
     <details class="overflow-menu">
-      <summary>&#8943;</summary>
+      <summary aria-label="More actions for ${escapeHtml(displayName)}">&#8943;</summary>
       <div class="overflow-dropdown">
-        ${configured ? `<a href="/apps/${encodeURIComponent(app.id)}" class="overflow-item" style="text-decoration:none">Settings</a>` : ""}
+        <a href="/apps/${id}" class="overflow-item" style="text-decoration:none">${configured ? "Open app page" : "Set up"}</a>
         <button type="button" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy deploy instruction</button>
-        <button type="button" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)">Copy API key</button>
-        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/delete" style="margin:0" data-app-name="${escapeHtml(configured ? app.name! : app.id)}" onsubmit="return confirmDelete(this)">
+        ${
+          revealedKey
+            ? `<button type="button" data-copy="${escapeHtml(revealedKey)}" onclick="copyText(this)">Copy API key</button>`
+            : `<a href="/apps/${id}#access" class="overflow-item" style="text-decoration:none">Rotate API key</a>`
+        }
+        <form method="POST" action="/apps/${id}/delete" style="margin:0" data-app-name="${escapeHtml(displayName)}" onsubmit="return confirmDelete(this)">
           <button type="submit" class="overflow-danger">Delete app</button>
         </form>
       </div>
     </details>`;
 
-  const unconfiguredBlock = !configured
-    ? `<div style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)">
-        <p style="font-size:0.8rem;margin:0 0 0.5rem;color:var(--text-muted)">
-          Paste this in <a href="https://claude.ai/code" target="_blank" rel="noopener" style="color:var(--brand)">Claude Code</a>:
-        </p>
-        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;margin:0 0 0.5rem;font-size:0.65rem;white-space:pre-wrap;word-break:break-all;color:#d4d4d4;user-select:all">${escapeHtml(claudeInstruction)}</pre>
-        <button type="button" style="padding:0.25rem 0.6rem;font-size:0.75rem;width:auto" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy</button>
-      </div>`
-    : "";
+  const key = configured ? st.state : "new";
+  const attn = configured && needsAttention(st) ? "1" : "0";
+  const attrs = `data-app-row data-name="${escapeHtml(displayName)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${key}" data-attn="${attn}"`;
 
-  const activityBlock =
-    configured && activity
-      ? renderActivityRow(activity.lastRequestAt, activity.buckets)
-      : "";
+  if (!configured) {
+    return `
+    <tr class="app-row status-new" ${attrs}>
+      <td colspan="6" class="c-name">
+        ${nameCell}
+        <div class="setup">
+          <p class="meta" style="margin:0 0 0.5rem">Paste this in <a href="https://claude.ai/code" target="_blank" rel="noopener" style="color:var(--tx)">Claude Code</a> inside your project:</p>
+          <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:var(--r1);padding:0.4rem 0.6rem;margin:0 0 0.5rem;font-size:0.7rem;white-space:pre-wrap;word-break:break-all;color:var(--tx);user-select:all">${escapeHtml(claudeInstruction)}</pre>
+          <button type="button" style="padding:0.25rem 0.75rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy</button>
+          ${
+            revealedKey
+              ? `<p class="meta" style="margin:0.5rem 0 0">This key is shown for a few minutes only and is stored as a hash. Copy it now.</p>`
+              : `<p class="meta" style="margin:0.5rem 0 0">Keys are not stored in a readable form. <a href="/apps/${id}#access" style="color:var(--tx)">Rotate the key</a> to get a new one.</p>`
+          }
+        </div>
+        <div class="c-menu">${overflowMenu}</div>
+      </td>
+    </tr>`;
+  }
 
   return `
-    <div class="card app-card status-${escapeHtml(badgeState)}" data-name="${escapeHtml(app.name ?? app.id)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${escapeHtml(badgeState)}"${!configured ? ' style="border-color:var(--status-info-bg)"' : ""}>
-      <div class="flex between" style="margin-bottom:0.25rem">
-        <div style="display:flex;align-items:center;gap:0.5rem;min-width:0">
-          ${avatar}
-          <h2 style="font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</h2>
-          ${badgeHtml}
-          ${configured ? renderScanBadge(app) : ""}
-        </div>
-        ${overflowMenu}
-      </div>
-      ${domainLink}
-      ${statsBlock}
-      ${activityBlock}
-      ${unconfiguredBlock}
-    </div>
-  `;
+    <tr class="app-row status-${key}" ${attrs}>
+      <td class="c-name">${nameCell}</td>
+      <td class="c-status">${statusCell}</td>
+      <td class="c-url">${domainCell}</td>
+      <td class="c-res">${resCell}</td>
+      <td class="c-act">${activityCell}</td>
+      <td class="c-menu">${overflowMenu}</td>
+    </tr>`;
 }
 
 webRoutes.get("/apps/:id/stats", async (c) => {
@@ -1479,16 +1728,6 @@ webRoutes.get("/apps/:id/stats", async (c) => {
   `);
 });
 
-webRoutes.get("/apps/:id/badge", async (c) => {
-  const app = getApp(c.req.param("id"));
-  if (!app) return c.text("");
-  const stats = await getAppStats(app);
-  const state = stats.containerState ?? app.status;
-  return c.html(
-    `<span class="badge badge-${escapeHtml(state)}">${escapeHtml(state)}</span>`
-  );
-});
-
 webRoutes.post("/apps/:id/delete", async (c) => {
   const app = getApp(c.req.param("id"));
   if (app) {
@@ -1498,12 +1737,119 @@ webRoutes.post("/apps/:id/delete", async (c) => {
   return c.redirect("/");
 });
 
+/**
+ * The API-key card on the Access tab (S10, S11). A stored key cannot be shown;
+ * a new one is shown here once, for a few minutes, to the person who made it.
+ */
+function renderApiKeyCard(app: App, revealed: string | null): string {
+  const id = encodeURIComponent(app.id);
+  const hint = app.api_key_hint ? `<code>${escapeHtml(`rwy_…${app.api_key_hint}`)}</code>` : "";
+  const overlap = previousKeyActive(app)
+    ? `<p class="meta" style="margin:0.75rem 0 0">The previous key still works until ${escapeHtml(app.prev_key_expires_at ?? "")} UTC.
+         <form method="POST" action="/apps/${id}/key/end-overlap" style="display:inline"><button type="submit" class="ghost" style="width:auto;padding:0.2rem 0.6rem">End it now</button></form></p>`
+    : "";
+  const fresh = revealed
+    ? `<div class="notice" style="border:1px solid var(--ok);border-radius:var(--r1);padding:0.75rem;margin:0.75rem 0">
+         <strong>New key. Copy it now: it is not shown again.</strong>
+         <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:var(--r1);padding:0.5rem 0.6rem;margin:0.5rem 0;word-break:break-all;white-space:pre-wrap;user-select:all">${escapeHtml(revealed)}</pre>
+         <button type="button" style="width:auto;padding:0.25rem 0.75rem;font-size:0.8rem" data-copy="${escapeHtml(revealed)}" onclick="copyText(this)">Copy key</button>
+         <form method="POST" action="/apps/${id}/key/hide" style="display:inline"><button type="submit" class="ghost" style="width:auto;padding:0.25rem 0.75rem;font-size:0.8rem">I have copied it</button></form>
+       </div>`
+    : "";
+  return `
+            <div class="card" id="api-key">
+              <h2>API key</h2>
+              <p class="hint" style="margin:0.5rem 0 0.75rem">
+                The key that lets a script, a CI job or an agent deploy this app.
+                It is kept as a one-way hash, so an existing key cannot be shown again${hint ? ` (yours ends in ${hint})` : ""}.
+                Lost it, or shared it where you should not have? Rotate it.
+              </p>
+              ${fresh}
+              <form method="POST" action="/apps/${id}/key/rotate">
+                <div class="flex" style="gap:0.5rem;flex-wrap:wrap;align-items:center">
+                  <label for="key-grace" class="meta">Old key</label>
+                  <select id="key-grace" name="grace" style="width:auto">
+                    <option value="0">stops working now</option>
+                    <option value="60">keeps working for 1 hour</option>
+                    <option value="1440">keeps working for 24 hours</option>
+                    <option value="10080">keeps working for 7 days</option>
+                  </select>
+                  <button type="submit">Rotate key</button>
+                </div>
+              </form>
+              ${overlap}
+            </div>
+`;
+}
+
+webRoutes.post("/apps/:id/key/rotate", async (c) => {
+  const user = c.get("user");
+  const app = getApp(c.req.param("id"));
+  // requireAppAccess has already limited /apps/:id/* to admins and the owner.
+  if (!app || !appVisibleTo(user, app)) return c.redirect("/?forbidden=1");
+  const body = await c.req.parseBody();
+  const raw = Number(body["grace"]);
+  const grace = [0, 60, 1440, 10080].includes(raw) ? raw : 0;
+  const rotated = rotateAppKey(app.id, grace);
+  if (!rotated) return c.redirect("/?forbidden=1");
+  rememberKey(app.id, user.id, rotated.key);
+  logAudit(user.id, user.username, "app_key_rotated", {
+    detail: `${app.id} overlap ${grace} min${isAppOwner(user, app) ? "" : " (by administrator)"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}#access`);
+});
+
+webRoutes.post("/apps/:id/key/end-overlap", (c) => {
+  const user = c.get("user");
+  const app = getApp(c.req.param("id"));
+  if (!app || !appVisibleTo(user, app)) return c.redirect("/?forbidden=1");
+  if (revokePreviousKey(app.id)) {
+    logAudit(user.id, user.username, "app_key_overlap_ended", { detail: app.id });
+  }
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}#access`);
+});
+
+webRoutes.post("/apps/:id/key/hide", (c) => {
+  const user = c.get("user");
+  const app = getApp(c.req.param("id"));
+  if (!app || !appVisibleTo(user, app)) return c.redirect("/?forbidden=1");
+  if (peekKey(app.id, user.id)) forgetKey(app.id);
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}#access`);
+});
+
 // ── App detail (env vars + volumes) ─────────────────────
 
-webRoutes.get("/apps/:id", (c) => {
+webRoutes.get("/apps/:id", async (c) => {
   const user = c.get("user");
   const app = getApp(c.req.param("id"));
   if (!app) return c.redirect("/");
+  const admin = isAdmin(user);
+  const now = Date.now();
+  const stats = app.runtime ? await getAppStats(app).catch(() => null) : null;
+  const kev = collectAtRisk([app]).get(app.id);
+  const status = statusOf(app, stats, kev, now);
+  const running = activeRebuildRun();
+  const blockedReason =
+    rebuildBlockedReason(app) ??
+    (running ? "A rebuild is already running. Only one runs at a time." : null);
+  const canRebuild = mayRebuild(user, app) && blockedReason === null;
+  const canRescan = mayRescan(user, app) && rescanBlockedReason(app) === null && activeRescan() === null;
+  const rescanFlag = c.req.query("rescan");
+  const rescanNote =
+    rescanFlag === "busy"
+      ? '<div class="error">A rescan is already running. Only one runs at a time; try again when it is done.</div>'
+      : rescanFlag === "blocked"
+        ? `<div class="error">${escapeHtml(rescanBlockedReason(app) ?? "This app cannot be rescanned right now.")}</div>`
+        : "";
+  const rebuildFlag = c.req.query("rebuild");
+  const rebuildNote =
+    rebuildFlag === "busy"
+      ? '<div class="error">A rebuild is already running. Only one runs at a time; try again when it is done.</div>'
+      : rebuildFlag === "blocked"
+        ? `<div class="error">${escapeHtml(rebuildBlockedReason(app) ?? "This app cannot be rebuilt yet.")}</div>`
+        : "";
+  const appUrlHost = app.custom_domain || app.domain;
+  const lastDeploy = getLatestDeploys(app.id, 1)[0];
 
   const env = getEnvVars(app.id);
   const volumes = getVolumes(app.id);
@@ -1559,28 +1905,64 @@ webRoutes.get("/apps/:id", (c) => {
     layout(
       app.name ?? "App",
       `
-      <p style="margin-bottom:1.5rem"><a href="/" style="color:#60a5fa;text-decoration:none">&larr; Back to apps</a></p>
-      <h1>${escapeHtml(app.name ?? app.id)}</h1>
-      ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Saved.</div>' : ""}
-      ${rollbackError ? `<div class="card" style="border-color:#7f1d1d;color:#fca5a5"><strong>Rollback failed:</strong> ${escapeHtml(rollbackError)}</div>` : ""}
+      <p class="crumb"><a href="/">&larr; Apps</a></p>
+      <header class="app-head">
+        <div class="app-head-top">
+          <h1>${escapeHtml(app.name ?? app.id)}</h1>
+          ${renderStatusChip(status)}
+          ${renderSecurityChip(app.id, status)}
+        </div>
+        <p class="app-head-meta meta">
+          ${appUrlHost ? `<a href="https://${escapeHtml(appUrlHost)}" target="_blank" rel="noopener noreferrer">${escapeHtml(appUrlHost)} &#8599;</a>` : "No domain yet"}
+          ${app.runtime ? `<span>${escapeHtml(app.runtime)}</span>` : ""}
+          <span>${lastDeploy ? `Last deploy ${escapeHtml(formatRelative(lastDeploy.created_at))}` : "Not deployed yet"}</span>
+          ${admin ? `<span>${ownerUsernameOf(app) ? `Owner ${escapeHtml(ownerUsernameOf(app)!)}` : "No owner (admin only)"}</span>` : ""}
+        </p>
+      </header>
+      ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Saved.</div>' : ""}
+      ${rebuildNote}
+      ${rescanNote}
+      ${
+        kev
+          ? renderKevBlock({
+              app: { id: app.id, name: app.name ?? app.id },
+              kev,
+              now,
+              canRebuild,
+              rebuildDisabledReason: mayRebuild(user, app) ? blockedReason : "Only the app's owner or an admin can rebuild it.",
+              canRescan,
+              isAdmin: admin,
+            })
+          : ""
+      }
+      ${rollbackError ? `<div class="card" style="border-color:var(--err);color:var(--err)"><strong>Rollback failed:</strong> ${escapeHtml(rollbackError)}</div>` : ""}
 
       <div class="tabs">
         <input type="radio" name="app-tab" id="tab-deploys" checked />
         <label for="tab-deploys">Deploys</label>
-        <input type="radio" name="app-tab" id="tab-access" />
-        <label for="tab-access">Access</label>
+        <input type="radio" name="app-tab" id="tab-security" />
+        <label for="tab-security">Security${status.security && status.security.tone !== "ok" && status.security.tone !== "neutral" ? ' <span class="tab-dot" aria-label="needs attention"></span>' : ""}</label>
         <input type="radio" name="app-tab" id="tab-config" />
         <label for="tab-config">Config</label>
+        <input type="radio" name="app-tab" id="tab-access" />
+        <label for="tab-access">Access</label>
 
         <div class="tab-panels" style="width:100%">
           <!-- ── Deploys tab ────────────────────────── -->
           <div class="tab-panel panel-deploys">
+            ${renderRebuildLine(rebuildLine(listRebuildRuns(10), app.id, running), app.id, (iso) => (iso ? formatRelative(iso) : ""))}
             ${renderDeployHistory(app)}
-            ${renderScanSection(app, isAdmin(user))}
+          </div>
+
+          <!-- ── Security tab ───────────────────────── -->
+          <div class="tab-panel panel-security">
+            ${renderQuarantineSection(app, admin)}
+            ${renderScanSection(app, admin, canRebuild, mayRebuild(user, app) ? blockedReason : null, canRescan)}
           </div>
 
           <!-- ── Access tab ─────────────────────────── -->
           <div class="tab-panel panel-access">
+            ${renderApiKeyCard(app, peekKey(app.id, user.id))}
             <div class="card">
               <h2>Custom domain</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
@@ -1619,7 +2001,7 @@ webRoutes.get("/apps/:id", (c) => {
             <div class="card" id="sso">
               <h2>SSO protection</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
-                Protect this app with Single Sign-On via the subdomain.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
+                Protect this app with Single Sign-On, on its Runway address and on its custom domain.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
               </p>
               <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso">
                 <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
@@ -1664,6 +2046,10 @@ webRoutes.get("/apps/:id", (c) => {
               </form>
             </div>
 
+            ${renderHardening(app, admin)}
+
+            ${admin ? renderOwnerCard(app, ownerUsernameOf(app), listUsers().map((u) => ({ id: u.id, username: u.username, role: u.role }))) : ""}
+
             <div class="card">
               <h2>Environment variables</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
@@ -1674,7 +2060,7 @@ webRoutes.get("/apps/:id", (c) => {
                   ? `<div style="overflow-x:auto;margin-bottom:1rem">
                       <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
                         <thead>
-                          <tr style="text-align:left;border-bottom:1px solid #262626">
+                          <tr style="text-align:left;border-bottom:1px solid var(--line)">
                             <th style="padding:0.5rem 0.75rem">Key</th>
                             <th style="padding:0.5rem 0.75rem">Value</th>
                             <th style="padding:0.5rem 0.75rem"></th>
@@ -1705,7 +2091,7 @@ webRoutes.get("/apps/:id", (c) => {
                   ? `<div style="overflow-x:auto;margin-bottom:1rem">
                       <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
                         <thead>
-                          <tr style="text-align:left;border-bottom:1px solid #262626">
+                          <tr style="text-align:left;border-bottom:1px solid var(--line)">
                             <th style="padding:0.5rem 0.75rem">Mount path</th>
                             <th style="padding:0.5rem 0.75rem">Added</th>
                             <th style="padding:0.5rem 0.75rem"></th>
@@ -1759,7 +2145,7 @@ webRoutes.get("/apps/:id", (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: admin }
     )
   );
 });
@@ -1907,19 +2293,30 @@ webRoutes.post("/apps/:id/scan-threshold", async (c) => {
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 
+/**
+ * Rescan one app's current image with Trivy. An admin, or the app's owner:
+ * requireAppAccess already turns every other member away for /apps/:id/*,
+ * and mayRescan() says the same again here so the rule survives a
+ * reordering of the middleware. An app without an owner is admin-only.
+ * One manual rescan at a time for everybody (it runs inline and Trivy is
+ * heavy); every rescan is audited.
+ */
 webRoutes.post("/apps/:id/rescan", async (c) => {
   const user = c.get("user");
-  if (!isAdmin(user)) return c.redirect("/");
   const app = getApp(c.req.param("id"));
-  if (!app) return c.redirect("/");
-  if (!app.image_tag) {
-    return c.redirect(
-      `/apps/${encodeURIComponent(app.id)}?error=no_image#scan`,
-    );
+  if (!app || !mayRescan(user, app)) return c.redirect("/?forbidden=1");
+  const back = (flag: string) => c.redirect(`/apps/${encodeURIComponent(app.id)}?rescan=${flag}#scan`);
+  if (rescanBlockedReason(app)) return back("blocked");
+  if (!tryBeginRescan(app.id)) return back("busy");
+  try {
+    // Run inline so the page reload reflects the new periodic-scan row.
+    await rescanApp(app);
+  } finally {
+    endRescan(app.id);
   }
-  // Run inline so the page reload reflects the new periodic-scan row.
-  await rescanApp(app);
-  logAudit(user.id, user.username, "app_rescanned", { detail: app.id });
+  logAudit(user.id, user.username, "app_rescanned", {
+    detail: `${app.id}${isAdmin(user) ? "" : " (by owner)"}`,
+  });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 
@@ -2054,87 +2451,176 @@ webRoutes.get("/users", (c) => {
   const users = listUsers();
   const error = c.req.query("error");
   const adminCount = countAdmins();
-
-  const rows = users
-    .map((u) => {
-      const twofa = isTotpEnabled(u)
-        ? '<span class="badge badge-running">2FA on</span>'
-        : '<span class="badge badge-stopped">2FA off</span>';
-      const roleBadge =
-        u.role === "admin"
-          ? '<span class="badge badge-running">admin</span>'
-          : '<span class="badge badge-stopped">member</span>';
-      // Never let the current admin demote themselves or the last
-      // remaining admin — doing so would lock user management out.
-      const isLastAdmin = u.role === "admin" && adminCount <= 1;
-      const canToggleRole = u.id !== current.id && !isLastAdmin;
-      const roleToggle = canToggleRole
-        ? `<form method="POST" action="/users/${encodeURIComponent(u.id)}/role" style="margin:0">
-             <input type="hidden" name="role" value="${u.role === "admin" ? "member" : "admin"}" />
-             <button type="submit" class="ghost">${u.role === "admin" ? "Demote to member" : "Promote to admin"}</button>
-           </form>`
-        : "";
-      const actions =
-        u.id === current.id
-          ? '<span class="meta">you</span>'
-          : `<div class="flex" style="gap:0.5rem;margin:0;flex-wrap:wrap">
-               ${roleToggle}
-               ${
-                 isTotpEnabled(u)
-                   ? `<form method="POST" action="/users/${encodeURIComponent(u.id)}/2fa/reset" style="margin:0" class="flex">
-                        <input type="text" name="code" inputmode="numeric" placeholder="Your code" style="width:9rem" required />
-                        <button type="submit" class="ghost">Reset 2FA</button>
-                      </form>`
-                   : ""
-               }
-               <form method="POST" action="/users/${encodeURIComponent(u.id)}/delete" style="margin:0">
-                 <button class="danger" type="submit">Delete</button>
-               </form>
-             </div>`;
-      return `
-    <div class="card">
-      <div class="flex between">
-        <div>
-          <div class="flex" style="gap:0.75rem;flex-wrap:wrap">
-            <h2>${escapeHtml(u.username)}</h2>
-            ${roleBadge}
-            ${twofa}
-          </div>
-          <p class="meta" style="margin-top:0.25rem">Created ${escapeHtml(u.created_at)}</p>
-        </div>
-        ${actions}
-      </div>
-    </div>
-  `;
-    })
-    .join("");
+  const allApps = listApps();
+  const ctx = { currentUserId: current.id, adminCount };
+  const locked = lockedUsers();
+  const people: PersonRow[] = users.map((u) => ({
+    id: u.id,
+    username: u.username,
+    role: u.role === "admin" ? "admin" : "member",
+    totpEnabled: isTotpEnabled(u),
+    twoFaLockedUntil: locked.get(u.id) ?? null,
+    createdAt: u.created_at,
+    appNames: allApps
+      .filter((a) => a.owner_user_id === u.id)
+      .map((a) => a.name ?? a.id),
+  }));
+  const rows = people.map((p) => renderPersonCard(p, ctx)).join("");
 
   return c.html(
     layout(
       "Users",
       `
       <h1>Users</h1>
-      ${
-        error === "last_admin"
-          ? '<div class="error">Refused: that would leave zero admins. Promote another user first.</div>'
-          : error === "needs_2fa"
-            ? '<div class="error">Enable 2FA on your own account before resetting it for others.</div>'
-            : error
-              ? '<div class="error">Invalid 2FA code. Please try again.</div>'
-              : ""
-      }
-      <form method="POST" action="/users">
+      <p class="hint">${escapeHtml(peopleSummary(people))}</p>
+      ${peopleError(error)}
+      <form method="POST" action="/users" class="card">
+        <h2>Add a user</h2>
+        <p class="hint">They sign in with this password (min 8 characters). Share it with them privately and ask them to change it on their Account page and turn on 2FA.</p>
         <div class="flex">
-          <input type="text" name="username" placeholder="Username" required />
-          <input type="password" name="password" placeholder="Password (min 8)" minlength="8" required />
+          <input type="text" name="username" placeholder="Username" aria-label="Username" autocomplete="off" autocapitalize="none" spellcheck="false" required />
+          <input type="password" name="password" placeholder="Temporary password" aria-label="Temporary password (min 8 characters)" autocomplete="new-password" minlength="8" required />
           <button type="submit">Add user</button>
         </div>
       </form>
+      ${renderOAuthAccessCard(error)}
+      ${renderAdminTokensCard(c.req.query("token_revoked"))}
       ${rows}
     `,
-      { username: current.username, csrf: csrfField(c), isAdmin: isAdmin(current) }
+      { username: current.username, userId: current.id, csrf: csrfField(c), isAdmin: isAdmin(current) }
     )
   );
+});
+
+function renderAdminTokensCard(revoked: string | undefined): string {
+  const userTokens = listAllUserTokens().map((t) => ({ ...t, hint: t.token_hint }));
+  const devTokens = listAllDevTokens().map((t) => ({
+    id: t.id,
+    name: t.name,
+    hint: t.token_hint,
+    scope: null,
+    expires_at: t.expires_at,
+    expiry_assigned: t.expiry_assigned,
+    last_used_at: t.last_used_at,
+    revoked_at: null,
+    username: t.username,
+  }));
+  return `<div class="card" id="api-tokens">
+      <h2>Tokens</h2>
+      <p class="hint">Every access token and skill token on this server. Revoking one ends it at once; the person can make a new one. The tokens themselves are never shown.</p>
+      ${revoked ? '<p style="color:var(--ok)">Token revoked.</p>' : ""}
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.25rem">Access tokens</h3>
+      ${renderTokenTable(userTokens, {
+        revokeAction: (t) => `/users/tokens/${t.id}/revoke`,
+        showOwner: true,
+        empty: "Nobody has made an access token yet.",
+        confirmText: "Revoke this token? Whatever uses it loses access straight away.",
+      })}
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.25rem">Skill tokens</h3>
+      ${renderTokenTable(devTokens, {
+        revokeAction: (t) => `/users/dev-tokens/${t.id}/revoke`,
+        showOwner: true,
+        empty: "Nobody has made a skill token yet.",
+        confirmText: "Revoke this token? Claude Code sessions using it lose access.",
+      })}
+    </div>`;
+}
+
+webRoutes.post("/users/tokens/:id/revoke", (c) => {
+  const current = c.get("user");
+  const id = c.req.param("id");
+  const done = revokeUserToken(id, current.id);
+  if (done) {
+    const owner = getUser(done.user_id);
+    logAudit(current.id, current.username, "user_token_revoked", {
+      targetUserId: done.user_id,
+      targetUsername: owner?.username,
+      detail: `${id} (by administrator)`,
+    });
+  }
+  return c.redirect("/users?token_revoked=1#api-tokens");
+});
+
+webRoutes.post("/users/dev-tokens/:id/revoke", (c) => {
+  const current = c.get("user");
+  const id = c.req.param("id");
+  const done = deleteDevTokenAsAdmin(id);
+  if (done) {
+    const owner = getUser(done.user_id);
+    logAudit(current.id, current.username, "dev_token_revoked", {
+      targetUserId: done.user_id,
+      targetUsername: owner?.username,
+      detail: `${id} (by administrator)`,
+    });
+  }
+  return c.redirect("/users?token_revoked=1#api-tokens");
+});
+
+function renderOAuthAccessCard(error: string | undefined): string {
+  const configured =
+    !!getSetting("oauth_google_client_id") || !!getSetting("oauth_microsoft_client_id");
+  const rows = listAccess();
+  const list = rows.length
+    ? rows
+        .map((r) => {
+          const label =
+            r.kind === "domain"
+              ? `Everyone at <strong>@${escapeHtml(r.value)}</strong>`
+              : `<strong>${escapeHtml(r.value)}</strong>${r.one_time ? ' <span class="tag">Invitation, one use</span>' : ""}`;
+          return `<li class="flex" style="justify-content:space-between;align-items:center;margin:0.4rem 0">
+            <span>${label}</span>
+            <form method="POST" action="/users/oauth-access/${r.id}/delete"><button type="submit" class="ghost">Remove</button></form>
+          </li>`;
+        })
+        .join("")
+    : '<li class="hint">Nobody yet. People with Google or Microsoft cannot create an account until you add them.</li>';
+  const msg =
+    error === "oauth_access_invalid"
+      ? '<div class="error">Enter an email address (ann@example.com) or a domain (example.com).</div>'
+      : "";
+  return `<div class="card" id="oauth-access">
+      <h2>Sign in with Google or Microsoft</h2>
+      <p class="hint">${
+        configured
+          ? "Only these people can create an account by signing in with Google or Microsoft. Anyone who already has an account keeps signing in as before."
+          : "Google and Microsoft sign-in is not set up (see Settings, Single Sign-On). Once it is, only the people below can create an account."
+      } Adding a whole domain lets everyone with that address in, so use it only for a domain you control (not gmail.com).</p>
+      ${msg}
+      <ul style="list-style:none;padding:0">${list}</ul>
+      <form method="POST" action="/users/oauth-access">
+        <div class="flex">
+          <input type="text" name="entry" placeholder="ann@example.com or example.com" aria-label="Email address or domain" autocomplete="off" autocapitalize="none" spellcheck="false" required style="flex:1" />
+          <label style="white-space:nowrap"><input type="checkbox" name="invite" value="1" /> One use</label>
+          <button type="submit">Allow</button>
+        </div>
+      </form>
+    </div>`;
+}
+
+webRoutes.post("/users/oauth-access", async (c) => {
+  const body = await c.req.parseBody();
+  const entry = parseAccessEntry(String(body["entry"] ?? ""));
+  if (!entry) return c.redirect("/users?error=oauth_access_invalid#oauth-access");
+  const current = c.get("user");
+  const added = addAccess(entry, {
+    invite: body["invite"] === "1",
+    createdBy: current.username,
+  });
+  if (added) {
+    logAudit(current.id, current.username, "oauth_access_added", {
+      detail: `${entry.kind}=${entry.value}${body["invite"] === "1" && entry.kind === "email" ? " (invitation)" : ""}`,
+    });
+  }
+  return c.redirect("/users#oauth-access");
+});
+
+webRoutes.post("/users/oauth-access/:id/delete", (c) => {
+  const id = Number(c.req.param("id"));
+  const current = c.get("user");
+  if (Number.isInteger(id) && removeAccess(id)) {
+    logAudit(current.id, current.username, "oauth_access_removed", { detail: `id=${id}` });
+  }
+  return c.redirect("/users#oauth-access");
 });
 
 webRoutes.post("/users", async (c) => {
@@ -2170,10 +2656,11 @@ webRoutes.post("/users/:id/delete", (c) => {
   if (target.role === "admin" && countAdmins() <= 1) {
     return c.redirect("/users?error=last_admin");
   }
-  deleteUser(id);
+  const orphaned = deleteUser(id) ?? 0;
   logAudit(current.id, current.username, "user_deleted", {
     targetUserId: target.id,
     targetUsername: target.username,
+    detail: orphaned > 0 ? `${orphaned} app(s) now without an owner (admin-only)` : undefined,
   });
   return c.redirect("/users");
 });
@@ -2226,12 +2713,17 @@ webRoutes.post("/users/:id/2fa/reset", async (c) => {
     return c.redirect("/users?error=needs_2fa");
   }
   const body = await c.req.parseBody();
-  const code = ((body["code"] as string | undefined) ?? "").trim();
-  if (!verifyAndConsumeTotp(current.id, current.totp_secret!, code)) {
-    return c.redirect("/users?error=1");
-  }
+  const code = (body["code"] as string | undefined) ?? "";
+  const checked = await verifySecondFactor(current, code, {
+    allowBackup: false,
+    ip: getClientIp(c),
+    via: "admin 2FA reset",
+  });
+  if (checked === "locked") return c.redirect("/users?error=2fa_locked");
+  if (checked !== "ok") return c.redirect("/users?error=1");
 
   clearTotp(target.id);
+  recordTwoFactorSuccess(target.id);
   deleteBackupCodes(target.id);
   // Invalidate any active sessions for the target so a stale session
   // cannot continue to act with the pre-reset 2FA trust level.
@@ -2240,6 +2732,24 @@ webRoutes.post("/users/:id/2fa/reset", async (c) => {
     targetUserId: target.id,
     targetUsername: target.username,
   });
+  return c.redirect("/users");
+});
+
+/**
+ * Lift the second-factor lock of a person who tripped it (S09). Admin-only
+ * through the /users/* guard, and CSRF-checked like every POST. Writes an
+ * audit line so an unlock after a suspected attack is on record.
+ */
+webRoutes.post("/users/:id/2fa/unlock", (c) => {
+  const current = c.get("user");
+  const target = getUser(c.req.param("id"));
+  if (!target) return c.redirect("/users");
+  if (unlockTwoFactor(target.id)) {
+    logAudit(current.id, current.username, "2fa_unlocked", {
+      targetUserId: target.id,
+      targetUsername: target.username,
+    });
+  }
   return c.redirect("/users");
 });
 
@@ -2273,7 +2783,7 @@ webRoutes.get("/settings", (c) => {
       "Settings",
       `
       <h1>Settings</h1>
-      ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Settings saved.</div>' : ""}
+      ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Settings saved.</div>' : ""}
       ${dnsWarning ? `<div class="error">${escapeHtml(dnsWarning)}</div>` : ""}
       ${webhookError ? `<div class="error">${escapeHtml(webhookError)}</div>` : ""}
 
@@ -2301,9 +2811,9 @@ webRoutes.get("/settings", (c) => {
           </div>
 
           <div class="card" id="notifications">
-            <h2>Deploy notifications</h2>
+            <h2>Notifications</h2>
             <p class="hint" style="margin:0.5rem 0 1rem">
-              Webhook URL called on deploy failure. Works with Slack, Discord, ntfy.
+              Webhook URL called on deploy failures, rebuild results and security events (KEV quarantine, automatic updates). Works with Slack, Discord, ntfy.
             </p>
             <form method="POST" action="/settings/webhook">
               <div class="flex">
@@ -2369,7 +2879,7 @@ webRoutes.get("/settings", (c) => {
               </div>
             </form>
             <form method="POST" action="/settings/prune-build-cache" style="margin-top:0.75rem">
-              <button type="submit" style="width:auto">Prune build cache now</button>
+              <button type="submit" class="ghost" style="width:auto" onclick="return confirm(\'Prune the build cache? The next builds will be slower while it refills.\')">Prune build cache now</button>
               <span class="hint" style="margin-left:0.75rem">Runs <code>buildctl prune --keep-duration 168h</code>.</span>
             </form>
           </div>
@@ -2423,7 +2933,7 @@ webRoutes.get("/settings", (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -2490,6 +3000,461 @@ webRoutes.post("/settings/prune-build-cache", async (c) => {
   return c.redirect("/settings?saved=1");
 });
 
+// ── Rebuild (admin) ─────────────────────────────────────
+// Rebuild apps from their stored source without the BuildKit cache so
+// base-image and apt fixes actually land. See deploy/rebuild.ts.
+
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+webRoutes.get("/rebuild", async (c) => {
+  const user = c.get("user");
+  const schedule = readSchedule();
+  const runs = listRebuildRuns(5);
+  const running = activeRebuildRunId() !== null;
+  const latest = runs[0];
+  const preview = await previewRebuildSelection({ kevTimeoutMs: 4000 });
+  const flash =
+    c.req.query("busy") ? '<div class="error">A rebuild run is already in progress.</div>'
+    : c.req.query("none") === "all" ? '<div class="card" style="margin-bottom:1rem">No app has been deployed yet, so there is nothing to rebuild.</div>'
+    : c.req.query("none") ? '<div class="card" style="margin-bottom:1rem">Nothing needs a rebuild: no app has an actively exploited vulnerability, a critical finding with a fix, or dependency updates waiting.</div>'
+    : c.req.query("saved") ? '<div class="card" style="margin-bottom:1rem">Saved.</div>'
+    : c.req.query("started") ? '<div class="card" style="margin-bottom:1rem">Rebuild started. Apps are rebuilt one after another; this page refreshes while it runs.</div>'
+    : "";
+  const dayOptions = WEEKDAY_NAMES.map(
+    (n, i) => `<option value="${i}"${i === schedule.day ? " selected" : ""}>${n}</option>`
+  ).join("");
+  const rel = { relative: (iso: string) => formatRelative(iso) };
+  const history = runs.slice(1).map((r) => renderEarlierRun(r, rel)).join("");
+
+  const termMs = getQuarantineTermDays() * 86_400_000;
+  const qRows = listQuarantine();
+  const quarantineTable = qRows.length
+    ? `<table class="apps-tbl sec-tbl" style="margin-top:1rem" aria-label="Apps with an actively exploited vulnerability"><thead><tr><th>App</th><th>State</th><th>Actively exploited</th><th>Term ends</th><th>Exemption</th></tr></thead><tbody>${qRows
+        .map((q) => {
+          const a = getApp(q.app_id);
+          const ex = getActiveExemption(q.app_id);
+          return `<tr class="sec-row ${q.state === "quarantined" ? "sec-row-err" : "sec-row-warn"}">
+            <td class="sc-app" data-label="App"><a class="app-name" href="/apps/${encodeURIComponent(q.app_id)}#quarantine">${escapeHtml(a?.name ?? q.app_id)}</a></td>
+            <td class="sc-state" data-label="State"><span class="tag ${q.state === "quarantined" ? "tag-err" : "tag-warn"}">${q.state === "quarantined" ? "Offline" : "Term running"}</span></td>
+            <td class="sc-cve" data-label="Actively exploited"><code>${escapeHtml(Object.keys(q.kev_first_seen).join(", "))}</code></td>
+            <td class="meta" data-label="Term ends">${escapeHtml(fmtUtc(deadlineOf(q, termMs)))}</td>
+            <td class="meta" data-label="Exemption">${ex ? escapeHtml(`until ${fmtUtc(ex.until)}: ${ex.reason}`) : "&mdash;"}</td>
+          </tr>`;
+        })
+        .join("")}</tbody></table>`
+    : '<p class="meta" style="margin-top:1rem">No app has an actively exploited vulnerability right now.</p>';
+
+  return c.html(
+    layout(
+      "Rebuild",
+      `
+      ${running ? '<meta http-equiv="refresh" content="10" />' : ""}
+      <div class="container">
+        <div class="rr-head">
+          <div>
+            <h1>Rebuild</h1>
+            <p class="meta rr-lead">Keeps every app on the newest safe base image and dependencies. Apps are rebuilt one after another; live apps keep serving until their own swap.</p>
+          </div>
+        </div>
+        ${flash}
+        ${renderRebuildActions({
+          issues: preview.issues.map((r) => ({
+            id: r.app.id,
+            name: r.app.name ?? r.app.id,
+            reason: r.reason,
+            optedOut: r.optedOut,
+            quarantined: r.quarantined,
+          })),
+          all: preview.all.map((a) => ({ id: a.id, name: a.name ?? a.id })),
+          running,
+          confirmAll: c.req.query("confirm") === "all",
+          kevStale: preview.kevStale,
+        })}
+        <details class="attn-how rr-how">
+          <summary>How a rebuild works</summary>
+          <p class="meta">
+            Each app is rebuilt from its stored source <strong>without the BuildKit cache</strong>. Exact patch pins in
+            <code>FROM</code> (e.g. <code>nginx:1.30.6-alpine</code>) are raised to the newest patch of the same minor in a
+            build-time copy (per-app opt-out). A rebuild goes live only if it is not worse than the running version (no new
+            critical, no new actively exploited CVE) and the new container passes its health check; otherwise the old version
+            keeps running and the reason is shown here. A container that fails its health check is replaced by the previous
+            deploy automatically. Critical and high are the findings before and after; actively exploited (CISA KEV) CVEs are
+            listed when there are any.
+          </p>
+        </details>
+
+        <h2 class="sec-h">${latest ? `Run #${latest.id} result` : "No runs yet"}</h2>
+        ${
+          latest
+            ? `${runHeading(latest, rel)}${renderRunResult(latest, rel)}`
+            : '<p class="meta">Nothing has been rebuilt yet.</p>'
+        }
+        ${history ? `<h2 class="sec-h">Earlier runs</h2>${history}` : ""}
+
+        <h2 class="sec-h">Settings</h2>
+        <div class="card">
+          <h2>Automatic weekly rebuild</h2>
+          <p class="meta">
+            Rebuilds only apps whose latest scan shows an actively exploited CVE (CISA KEV) or a critical
+            finding that has a fix, and that haven't opted out on their app page. The outcome is sent to the
+            notification webhook. Times are ${escapeHtml(SCHEDULE_TZ)}.
+          </p>
+          <form method="POST" action="/rebuild/schedule">
+            <label><input type="checkbox" name="enabled" value="1"${schedule.enabled ? " checked" : ""} /> Enabled</label>
+            <div style="display:flex;gap:0.5rem;margin:0.75rem 0">
+              <select name="day">${dayOptions}</select>
+              <input type="time" name="time" value="${escapeHtml(schedule.time)}" required />
+            </div>
+            <button type="submit" style="width:auto">Save schedule</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>KEV quarantine term</h2>
+          <p class="meta">
+            An actively exploited CVE (CISA KEV) in a running app's runtime packages starts a term and notifies the
+            owner and the webhook on day 0. If it is still there when the term ends and one last rebuild (with minor
+            escalation) did not fix it, the app is quarantined: visitors get a maintenance page and the container is
+            stopped (data and volumes stay). It returns automatically once a rebuild or deploy resolves it. Admins can
+            grant a time-boxed exemption on the app page. Ordinary criticals never quarantine.
+          </p>
+          <form method="POST" action="/rebuild/quarantine-term" style="display:flex;gap:0.5rem;align-items:center">
+            <label>Term (days) <input type="number" name="days" step="any" min="0.001" max="90" value="${escapeHtml(String(getQuarantineTermDays()))}" style="width:7rem" required /></label>
+            <button type="submit" style="width:auto">Save</button>
+          </form>
+          ${quarantineTable}
+        </div>
+      </div>`,
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: true }
+    )
+  );
+});
+
+/**
+ * Start a manual run from the Rebuild page. Two modes, both admin-only
+ * (the whole /rebuild tree is):
+ *  - "issues" (default, also for anything unrecognised): the apps the
+ *    page just listed, chosen by the same function as the weekly run. If
+ *    none qualifies nothing starts.
+ *  - "all": every deployed app, but only with `confirm=all`, which the
+ *    confirmation panel on the page sends. Without it the visitor is sent
+ *    back to that panel, so a stray or forged POST cannot rebuild the lot.
+ * One run at a time stays the rule for both.
+ */
+webRoutes.post("/rebuild/run", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const mode = body["mode"] === "all" ? "all" : "issues";
+  if (mode === "all" && body["confirm"] !== "all") return c.redirect("/rebuild?confirm=all");
+  if (activeRebuildRunId() !== null) return c.redirect("/rebuild?busy=1");
+  try {
+    if (mode === "all") {
+      const n = rebuildableApps().length;
+      if (n === 0) return c.redirect("/rebuild?none=all");
+      const id = startRebuildRun({ trigger: "manual" });
+      logAudit(user.id, user.username, "rebuild_all_started", { detail: `run ${id} (mode all, ${n} apps)` });
+    } else {
+      const { issues } = await previewRebuildSelection();
+      if (issues.length === 0) return c.redirect("/rebuild?none=1");
+      const id = startRebuildRun({
+        trigger: "manual",
+        appIds: issues.map((r) => r.app.id),
+        onlyWithIssues: true,
+      });
+      logAudit(user.id, user.username, "rebuild_issues_started", {
+        detail: `run ${id} (mode issues, ${issues.length} apps)`,
+      });
+    }
+  } catch (err) {
+    if (err instanceof RebuildBusyError) return c.redirect("/rebuild?busy=1");
+    throw err;
+  }
+  return c.redirect("/rebuild?started=1");
+});
+
+webRoutes.post("/rebuild/schedule", async (c) => {
+  const body = await c.req.parseBody();
+  const time = normalizeTime(body["time"] as string | undefined);
+  const day = parseInt((body["day"] as string | undefined) ?? "", 10);
+  if (time && Number.isInteger(day) && day >= 0 && day <= 6) {
+    saveSchedule({ enabled: body["enabled"] === "1", day, time });
+  }
+  return c.redirect("/rebuild?saved=1");
+});
+
+/**
+ * Rebuild one app from its stored source. An admin, or the app's owner:
+ * requireAppAccess already turned every other member away for
+ * /apps/:id/*, and mayRebuild() says the same again here so the rule
+ * survives a reordering of the middleware. Same limit for everyone: one
+ * run at a time. Every run is audited when it starts and when it ends.
+ */
+webRoutes.post("/apps/:id/rebuild", async (c) => {
+  const user = c.get("user");
+  const app = getApp(c.req.param("id"));
+  if (!app || !mayRebuild(user, app)) return c.redirect("/?forbidden=1");
+  const admin = isAdmin(user);
+  const back = (flag: string) =>
+    admin && flag !== "blocked"
+      ? c.redirect(flag === "busy" ? "/rebuild?busy=1" : "/rebuild?started=1")
+      : c.redirect(`/apps/${encodeURIComponent(app.id)}?rebuild=${flag}#deploys`);
+  if (rebuildBlockedReason(app)) return back("blocked");
+  try {
+    const id = startRebuildRun({
+      trigger: "manual",
+      appIds: [app.id],
+      onFinished: (results) => {
+        const r = results.find((x) => x.app_id === app.id) ?? results[0];
+        logAudit(user.id, user.username, "app_rebuild_finished", {
+          detail: `${app.id} run ${id}: ${r?.outcome ?? "no result"}${r?.detail ? ` (${r.detail.slice(0, 200)})` : ""}`,
+        });
+      },
+    });
+    logAudit(user.id, user.username, "app_rebuild_started", {
+      detail: `${app.id} run ${id}${admin ? "" : " (by owner)"}`,
+    });
+  } catch (err) {
+    if (err instanceof RebuildBusyError) return back("busy");
+    throw err;
+  }
+  return back("started");
+});
+
+/** Rebuild line of one app, polled while a run is busy. Same access rule as the page. */
+webRoutes.get("/apps/:id/rebuild-status", (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.text("", 404);
+  return c.html(
+    renderRebuildLine(
+      rebuildLine(listRebuildRuns(10), app.id, activeRebuildRun()),
+      app.id,
+      (iso) => (iso ? formatRelative(iso) : "")
+    )
+  );
+});
+
+webRoutes.post("/apps/:id/auto-patch", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_patch_base: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_patch_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+webRoutes.post("/apps/:id/auto-rebuild", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_rebuild: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_rebuild_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+// JSON admin API for scripts. Session-authenticated (not per-app
+// Bearer keys): the per-app key model is untouched. State-changing
+// calls must carry `X-Requested-With: runway`, which a cross-site form
+// cannot set; the session cookie is SameSite=Lax as a second layer.
+async function adminApi(c: any, next: any) {
+  const token = readSessionToken(c);
+  const user = token ? getSessionUser(token) : undefined;
+  if (!user) return c.json({ error: "Not signed in" }, 401);
+  if (!isAdmin(user)) return c.json({ error: "Admin only" }, 403);
+  if (c.req.method !== "GET" && c.req.header("x-requested-with") !== "runway") {
+    return c.json({ error: "Missing X-Requested-With: runway header" }, 400);
+  }
+  c.set("user", user);
+  await next();
+}
+webRoutes.use("/admin/api/*", adminApi);
+
+webRoutes.post("/admin/api/rebuild-all", async (c) => {
+  const user = c.get("user");
+  try {
+    const id = startRebuildRun({ trigger: "manual" });
+    logAudit(user.id, user.username, "rebuild_all_started", { detail: `run ${id} (api)` });
+    return c.json({ status: "started", run_id: id }, 202);
+  } catch (err) {
+    if (err instanceof RebuildBusyError) {
+      return c.json({ error: err.message, run_id: activeRebuildRunId() }, 409);
+    }
+    throw err;
+  }
+});
+
+webRoutes.get("/admin/api/rebuild-runs", (c) =>
+  c.json({ runs: listRebuildRuns(20) })
+);
+
+webRoutes.get("/admin/api/rebuild-runs/:id", (c) => {
+  const run = getRebuildRun(parseInt(c.req.param("id"), 10));
+  return run ? c.json(run) : c.json({ error: "Run not found" }, 404);
+});
+
+webRoutes.post("/rebuild/quarantine-term", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const days = parseFloat((body["days"] as string | undefined) ?? "");
+  if (Number.isFinite(days)) {
+    const clamped = clampQuarantineTermDays(days);
+    setSetting("quarantine_term_days", String(clamped));
+    logAudit(user.id, user.username, "quarantine_term_changed", { detail: `${clamped} day(s)` });
+  }
+  return c.redirect("/rebuild?saved=1");
+});
+
+webRoutes.post("/apps/:id/hardening", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const raw = String(body["profile"] ?? "").trim();
+  // "" = inherit the server default; anything else must be a known profile.
+  // An unknown value changes nothing: a typo must not turn hardening off.
+  const profile = raw === "" ? null : parseHardeningMode(raw);
+  if (raw !== "" && profile === null) {
+    return c.redirect(`/apps/${encodeURIComponent(app.id)}#hardening`);
+  }
+  const readonly = body["readonly"] === "1" ? 1 : 0;
+  updateApp(app.id, { hardening_profile: profile, readonly_rootfs: readonly });
+  logAudit(user.id, user.username, "app_hardening_changed", {
+    detail: `${app.id}: profile=${profile ?? "server default"}, read-only rootfs=${readonly ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#hardening`);
+});
+
+webRoutes.post("/apps/:id/owner", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const raw = String(body["owner"] ?? "").trim();
+  const target = raw === "" ? null : raw;
+  const back = `/apps/${encodeURIComponent(app.id)}#owner`;
+  const previousName = ownerUsernameOf(app);
+  const moved = setAppOwner(app.id, target);
+  // An unknown user id changes nothing and says nothing more than "not saved".
+  if (!moved.ok) return c.redirect(back);
+  const nextName = target ? getUser(target)?.username ?? null : null;
+  logAudit(user.id, user.username, "app_owner_assigned", {
+    targetUserId: target ?? undefined,
+    targetUsername: nextName ?? undefined,
+    detail: `${app.id}: ${previousName ?? "no owner"} -> ${nextName ?? "no owner"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#owner`);
+});
+
+webRoutes.post("/apps/:id/auto-minor", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_minor_base: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_minor_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+webRoutes.post("/apps/:id/auto-deps", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_update_deps: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_deps_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+webRoutes.post("/apps/:id/auto-deps-major", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  updateApp(app.id, { auto_update_deps_major: body["enabled"] === "1" ? 1 : 0 });
+  logAudit(user.id, user.username, "app_auto_deps_major_toggled", {
+    detail: `${app.id} -> ${body["enabled"] === "1" ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
+});
+
+const MAX_EXEMPTION_DAYS = 90;
+
+webRoutes.post("/apps/:id/quarantine-exception", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const reason = ((body["reason"] as string | undefined) ?? "").trim();
+  const untilRaw = ((body["until"] as string | undefined) ?? "").trim();
+  // A bare date means "through the end of that day (UTC)".
+  const until = /^\d{4}-\d{2}-\d{2}$/.test(untilRaw)
+    ? Date.parse(`${untilRaw}T23:59:59Z`)
+    : Date.parse(untilRaw);
+  const now = Date.now();
+  const back = `/apps/${encodeURIComponent(app.id)}`;
+  if (reason.length < 5 || reason.length > 500) return c.redirect(`${back}?error=exception_reason#quarantine`);
+  if (!Number.isFinite(until) || until <= now || until > now + MAX_EXEMPTION_DAYS * 86_400_000) {
+    return c.redirect(`${back}?error=exception_date#quarantine`);
+  }
+  const untilIso = new Date(until).toISOString();
+  setExemption({ app_id: app.id, reason, until: untilIso, granted_by: user.username });
+  logAudit(user.id, user.username, "quarantine_exemption_granted", {
+    detail: `${app.id} until ${untilIso}: ${reason}`.slice(0, 500),
+  });
+  const msg = `quarantine exemption granted by ${user.username} until ${fmtUtc(untilIso)}: ${reason}`;
+  addNotice(app.id, "exemption", msg);
+  await notifyAdminWebhook(`Runway ${app.name ?? app.id}: ${msg}`, { app_id: app.id, event: "exemption" });
+  // Apply right away: lifts an existing quarantine instead of waiting for the next tick.
+  const kev = await getKevList();
+  if (kev.fetchedAt !== null) await evaluateAppQuarantine(app, kev.ids, false);
+  return c.redirect(`${back}?saved=1#quarantine`);
+});
+
+webRoutes.post("/apps/:id/quarantine-exception/remove", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  deleteExemption(app.id);
+  logAudit(user.id, user.username, "quarantine_exemption_removed", { detail: app.id });
+  addNotice(app.id, "exemption", `quarantine exemption removed by ${user.username}`);
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#quarantine`);
+});
+
+/**
+ * Public maintenance page. The gateway routes a quarantined app's hosts
+ * here (path rewritten to /maintenance). Deliberately generic: no app
+ * name, no reason, no CVE ids.
+ */
+webRoutes.get("/maintenance", (c) => {
+  c.header("Retry-After", "3600");
+  c.header("Cache-Control", "no-store");
+  c.header("X-Robots-Tag", "noindex");
+  return c.html(
+    `<!doctype html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Temporarily offline</title>
+    <style>body{font-family:system-ui,sans-serif;background:#faf7f2;color:#2b2926;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:1rem}main{max-width:32rem;text-align:center}h1{font-size:1.5rem}p{color:#6b665e;line-height:1.5}@media (prefers-color-scheme:dark){body{background:#1d1b18;color:#ece8e1}p{color:#a39d93}}</style></head>
+    <body><main><h1>Temporarily offline</h1><p>This site is offline for security maintenance. Please check back later.</p></main></body></html>`,
+    503
+  );
+});
+
 webRoutes.post("/settings/oauth/google", async (c) => {
   const body = await c.req.parseBody();
   const clientId = ((body["client_id"] as string | undefined) ?? "").trim();
@@ -2538,36 +3503,22 @@ webRoutes.post("/settings/webhook", async (c) => {
 
 webRoutes.get("/audit", (c) => {
   const user = c.get("user");
-  const entries = getRecentAuditEntries(50);
-
-  const rows = entries
-    .map((e) => {
-      const target =
-        e.target_username
-          ? `${escapeHtml(e.target_username)}`
-          : '<span class="meta">—</span>';
-      return `
-        <tr>
-          <td class="meta">${escapeHtml(e.created_at)}</td>
-          <td>${escapeHtml(e.username)}</td>
-          <td><code>${escapeHtml(e.action)}</code></td>
-          <td>${target}</td>
-          <td class="meta">${e.detail ? escapeHtml(e.detail) : "—"}</td>
-        </tr>`;
-    })
-    .join("");
+  const filter = parseAuditFilter(c.req.query("type"));
+  const entries = getRecentAuditEntries(100, filter);
+  const rows = renderAuditRows(entries);
 
   return c.html(
     layout(
       "Audit log",
       `
       <h1>Audit log</h1>
+      ${renderAuditFilters(filter)}
       <div class="card" style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
           <thead>
-            <tr style="text-align:left;border-bottom:1px solid #262626">
+            <tr style="text-align:left;border-bottom:1px solid var(--line)">
               <th style="padding:0.5rem 0.75rem">Time</th>
-              <th style="padding:0.5rem 0.75rem">User</th>
+              <th style="padding:0.5rem 0.75rem">Who</th>
               <th style="padding:0.5rem 0.75rem">Action</th>
               <th style="padding:0.5rem 0.75rem">Target</th>
               <th style="padding:0.5rem 0.75rem">Detail</th>
@@ -2578,8 +3529,9 @@ webRoutes.get("/audit", (c) => {
           </tbody>
         </table>
       </div>
+      <p class="hint">Calls made with an app key or the MCP route are listed with the app that made them. Field names are recorded, never values. Refused attempts are counted per source and ten-minute window instead of one line each. API lines are kept for ${apiAuditRetentionDays()} days.</p>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -2703,10 +3655,10 @@ webRoutes.get("/skills", (c) => {
         skills are imported from a public GitHub bundle; custom skills
         are pasted in below.
       </p>
-      ${saved === "added" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill added.</div>' : ""}
-      ${saved === "imported" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill imported.</div>' : ""}
-      ${saved === "toggled" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Updated.</div>' : ""}
-      ${saved === "deleted" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill deleted.</div>' : ""}
+      ${saved === "added" ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Skill added.</div>' : ""}
+      ${saved === "imported" ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Skill imported.</div>' : ""}
+      ${saved === "toggled" ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Updated.</div>' : ""}
+      ${saved === "deleted" ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Skill deleted.</div>' : ""}
       ${errorMessage ? `<div class="error">${escapeHtml(errorMessage)}</div>` : ""}
 
       ${skills.length > 0 ? rows : '<p class="meta">No skills loaded yet.</p>'}
@@ -2724,7 +3676,7 @@ webRoutes.get("/skills", (c) => {
           Trusted publishers (signed): ${trustedList}.
         </p>
         <form method="POST" action="/skills/import">
-          <input type="text" name="source" required placeholder="anthropics/skills/pdf" style="width:100%;font-family:monospace;font-size:0.9rem;padding:0.5rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;color:#d4d4d4" />
+          <input type="text" name="source" required placeholder="anthropics/skills/pdf" style="width:100%;font-family:monospace;font-size:0.9rem;padding:0.5rem;background:var(--bg2);border:1px solid var(--line);border-radius:6px;color:var(--tx)" />
           <label class="meta" style="display:block;margin-top:0.6rem;font-size:0.8rem">
             <input type="checkbox" name="allow_untrusted" value="1" style="vertical-align:middle" />
             I have reviewed this source and want to import even though
@@ -2742,12 +3694,12 @@ webRoutes.get("/skills", (c) => {
           <code>description</code>. Max ${MAX_SKILL_MD_BYTES / 1024} KB.
         </p>
         <form method="POST" action="/skills">
-          <textarea name="skill_md" rows="14" required style="width:100%;font-family:monospace;font-size:0.85rem;padding:0.6rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;color:#d4d4d4" placeholder="---&#10;name: my-skill&#10;description: When and why to use this skill.&#10;---&#10;&#10;# Skill content here"></textarea>
+          <textarea name="skill_md" rows="14" required style="width:100%;font-family:monospace;font-size:0.85rem;padding:0.6rem;background:var(--bg2);border:1px solid var(--line);border-radius:6px;color:var(--tx)" placeholder="---&#10;name: my-skill&#10;description: When and why to use this skill.&#10;---&#10;&#10;# Skill content here"></textarea>
           <button type="submit" style="margin-top:0.75rem">Add skill</button>
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -2898,73 +3850,7 @@ webRoutes.post("/skills/:id/delete", async (c) => {
 
 webRoutes.get("/health", async (c) => {
   const user = c.get("user");
-  const baseDomain = getSetting("base_domain");
-
-  const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
-
-  // Docker socket
-  try {
-    await docker.ping();
-    checks.push({ name: "Docker", ok: true, detail: "Socket reachable" });
-  } catch {
-    checks.push({ name: "Docker", ok: false, detail: "Cannot reach Docker socket" });
-  }
-
-  // BuildKit
-  try {
-    const bk = docker.getContainer("runway-buildkit");
-    const info = await bk.inspect();
-    const running = info.State.Status === "running";
-    checks.push({
-      name: "BuildKit",
-      ok: running,
-      detail: running ? "Running" : `Status: ${info.State.Status}`,
-    });
-  } catch {
-    checks.push({ name: "BuildKit", ok: false, detail: "Container not found" });
-  }
-
-  // DNS
-  if (baseDomain) {
-    const dns = await checkWildcardDns(baseDomain);
-    checks.push({ name: "Wildcard DNS", ok: dns.ok, detail: dns.message });
-  } else {
-    checks.push({ name: "Wildcard DNS", ok: false, detail: "No base domain configured" });
-  }
-
-  // Traefik
-  try {
-    const gw = docker.getContainer("runway-gateway");
-    const info = await gw.inspect();
-    const running = info.State.Status === "running";
-    checks.push({
-      name: "Traefik",
-      ok: running,
-      detail: running ? "Running" : `Status: ${info.State.Status}`,
-    });
-  } catch {
-    checks.push({ name: "Traefik", ok: false, detail: "Container not found" });
-  }
-
-  // Security scanner (Trivy). Three checks: binary present, cache volume
-  // writable, vulnerability DB present and fresh. Each one can fail
-  // independently, so they're separate rows.
-  const scanner = await getScannerHealth();
-  checks.push({
-    name: "Scanner binary",
-    ok: scanner.binary.ok,
-    detail: scanner.binary.detail,
-  });
-  checks.push({
-    name: "Scanner cache",
-    ok: scanner.cache.ok,
-    detail: scanner.cache.detail,
-  });
-  checks.push({
-    name: "Vulnerability DB",
-    ok: scanner.db.ok,
-    detail: scanner.db.detail,
-  });
+  const checks = await runHealthChecks();
 
   const allOk = checks.every((ch) => ch.ok);
   const failCount = checks.filter((ch) => !ch.ok).length;
@@ -2996,7 +3882,7 @@ webRoutes.get("/health", async (c) => {
       </div>
       <div class="health-grid">${tiles}</div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3019,6 +3905,7 @@ webRoutes.get("/account", (c) => {
   const pwSaved = c.req.query("pw_saved");
   const tokenRevoked = c.req.query("token_revoked");
   const tokens = listDevTokens(user.id);
+  const accessTokens = listUserTokens(user.id);
 
   const passwordCard = `
     <div class="card">
@@ -3026,7 +3913,7 @@ webRoutes.get("/account", (c) => {
       <p class="meta" style="margin-top:0.5rem;margin-bottom:0.75rem">
         Changing your password signs you out of other devices.
       </p>
-      ${pwSaved ? '<p style="color:#4ade80;margin:0 0 0.75rem">Password updated.</p>' : ""}
+      ${pwSaved ? '<p style="color:var(--ok);margin:0 0 0.75rem">Password updated.</p>' : ""}
       ${pwError === "wrong" ? '<div class="error" style="margin-bottom:0.75rem">Current password is incorrect.</div>' : ""}
       ${pwError === "short" ? '<div class="error" style="margin-bottom:0.75rem">New password must be at least 8 characters.</div>' : ""}
       ${pwError === "mismatch" ? '<div class="error" style="margin-bottom:0.75rem">New passwords do not match.</div>' : ""}
@@ -3090,6 +3977,7 @@ webRoutes.get("/account", (c) => {
           <tr style="text-align:left;color:var(--text-muted);font-weight:500">
             <th style="padding:0.4rem 0.6rem 0.4rem 0">Name</th>
             <th style="padding:0.4rem 0.6rem">Last used</th>
+            <th style="padding:0.4rem 0.6rem">Expires</th>
             <th style="padding:0.4rem 0.6rem">Created</th>
             <th></th>
           </tr>
@@ -3099,8 +3987,9 @@ webRoutes.get("/account", (c) => {
             .map(
               (t) => `
             <tr style="border-top:1px solid var(--border)">
-              <td style="padding:0.5rem 0.6rem 0.5rem 0">${escapeHtml(t.name)}</td>
+              <td style="padding:0.5rem 0.6rem 0.5rem 0">${escapeHtml(t.name)}${t.token_hint ? ` <span class="meta"><code>…${escapeHtml(t.token_hint)}</code></span>` : ""}</td>
               <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.last_used_at ? escapeHtml(formatRelative(t.last_used_at)) : "never"}</td>
+              <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.expires_at ? escapeHtml(t.expires_at.slice(0, 10)) : "never"}${t.expiry_assigned === 1 ? ' <span class="tag tag-warn" title="This token had no expiry. The upgrade gave it one. Make a new token before then and revoke this one.">set by upgrade</span>' : ""}</td>
               <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${escapeHtml(formatRelative(t.created_at))}</td>
               <td style="padding:0.5rem 0 0.5rem 0.6rem;text-align:right">
                 <form method="POST" action="/account/tokens/${escapeHtml(t.id)}/delete" style="margin:0" onsubmit="return confirm('Revoke this token? Any Claude Code session using it will lose access.')">
@@ -3114,6 +4003,30 @@ webRoutes.get("/account", (c) => {
       </table>`
     : `<p class="meta" style="margin-top:0.75rem">You have no developer tokens yet.</p>`;
 
+  const accessTokenRevoked = c.req.query("access_token_revoked");
+  const accessTokensCard = `
+    <div class="card" id="access-tokens">
+      <h2>Access tokens</h2>
+      <p class="meta" style="margin-top:0.5rem">
+        One token that reaches every app you may see on this Runway server, for scripts,
+        CI and coding agents. It can do what you can do here, and no more: the scope
+        you pick narrows it further. Each token expires, and you can revoke it at any time.
+        A token is shown once, when you create it.
+      </p>
+      ${accessTokenRevoked ? '<p style="color:var(--ok);margin:0.75rem 0 0">Token revoked.</p>' : ""}
+      ${c.req.query("access_token_error") === "limit" ? '<div class="error" style="margin-top:0.75rem">You have too many active tokens. Revoke one first.</div>' : ""}
+      ${renderTokenTable(
+        accessTokens.map((t) => ({ ...t, hint: t.token_hint })),
+        {
+          revokeAction: (t) => `/account/access-tokens/${t.id}/delete`,
+          empty: "You have no access tokens yet.",
+          confirmText: "Revoke this token? Anything using it will lose access straight away.",
+        }
+      )}
+      ${renderNewTokenForm({ admin: isAdmin(user) })}
+    </div>
+  `;
+
   const tokensCard = `
     <div class="card">
       <h2>Skill MCP tokens</h2>
@@ -3122,7 +4035,7 @@ webRoutes.get("/account", (c) => {
         Each token is tied to your account; the token is shown only
         once when you generate it.
       </p>
-      ${tokenRevoked ? '<p style="color:#4ade80;margin:0.75rem 0 0">Token revoked.</p>' : ""}
+      ${tokenRevoked ? '<p style="color:var(--ok);margin:0.75rem 0 0">Token revoked.</p>' : ""}
       ${tokensRows}
       <form method="POST" action="/account/tokens" style="margin-top:0.75rem">
         <div class="flex" style="gap:0.5rem">
@@ -3138,7 +4051,14 @@ webRoutes.get("/account", (c) => {
       "Account",
       `
       <h1>Account</h1>
-      ${error ? '<div class="error">That code did not work. Try again.</div>' : ""}
+      ${legacyExpiryNotice(tokens.map((t) => ({ expires_at: t.expires_at, revoked_at: null, expiry_assigned: t.expiry_assigned })))}
+      ${
+        error === "locked"
+          ? `<div class="error">Too many failed attempts. Try again in ${waitText(lockRemainingSeconds(user.id) || 60)}.</div>`
+          : error
+            ? '<div class="error">That code did not work. Try again.</div>'
+            : ""
+      }
       <div class="card">
         <h2>${escapeHtml(user.username)}</h2>
         <p class="meta" style="margin-top:0.5rem">
@@ -3147,9 +4067,10 @@ webRoutes.get("/account", (c) => {
       </div>
       ${passwordCard}
       ${twofaCard}
+      ${accessTokensCard}
       ${tokensCard}
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3181,14 +4102,14 @@ webRoutes.post("/account/tokens", async (c) => {
           Store it in your password manager if you want to keep a copy.
         </p>
         <p style="margin-top:0.75rem;font-size:0.85rem">Token:</p>
-        <pre style="background:#0f0f0f;border:1px solid #262626;border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.85rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(created.token)}</pre>
+        <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.85rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(created.token)}</pre>
         <button type="button" style="margin-top:0.5rem;padding:0.3rem 0.7rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(created.token)}" onclick="copyText(this)">Copy token</button>
 
         <p style="margin-top:1.5rem;font-size:0.85rem">
           Paste this into a terminal to register the skill server with
           <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:var(--brand)">Claude Code</a>:
         </p>
-        <pre style="background:#0f0f0f;border:1px solid #262626;border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.8rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(installCmd)}</pre>
+        <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.8rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(installCmd)}</pre>
         <button type="button" style="margin-top:0.5rem;padding:0.3rem 0.7rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(installCmd)}" onclick="copyText(this)">Copy install command</button>
 
         <div style="margin-top:1.5rem">
@@ -3196,9 +4117,70 @@ webRoutes.post("/account/tokens", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
+});
+
+webRoutes.post("/account/access-tokens", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const name = String(body["name"] ?? "").trim();
+  const scopeRaw = String(body["scope"] ?? "read");
+  const days = Number(body["days"]);
+  if (!name || name.length > 60) return c.redirect("/account#access-tokens");
+  // The scope is checked against the person's role here and again on every use.
+  const scope = isScope(scopeRaw) && grantableScopes(user.role).includes(scopeRaw) ? scopeRaw : "read";
+  let created;
+  try {
+    created = createUserToken(
+      user.id,
+      name,
+      scope,
+      Number.isFinite(days) && days >= 1 ? Math.min(days, USER_TOKEN_MAX_DAYS) : USER_TOKEN_DEFAULT_DAYS
+    );
+  } catch (err) {
+    if (err instanceof TokenLimitError) return c.redirect("/account?access_token_error=limit#access-tokens");
+    throw err;
+  }
+  // The audit line names the token by id and says what it may do; never the token.
+  logAudit(user.id, user.username, "user_token_created", {
+    detail: `${created.id} ${scope} until ${created.expires_at.slice(0, 10)}`,
+  });
+  const base = publicBaseUrl(c);
+  return c.html(
+    layout(
+      "Token created",
+      `
+      <h1>Access token created</h1>
+      <div class="card">
+        <h2>${escapeHtml(created.name)}</h2>
+        <p class="meta" style="margin-top:0.5rem">
+          <strong>This is the only time the token will be shown.</strong>
+          Store it in your password manager or a secret store. It is valid until
+          ${escapeHtml(created.expires_at.slice(0, 10))} and can do: ${escapeHtml(created.scope)}.
+        </p>
+        <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:0.6rem 0.75rem;margin:0.75rem 0 0;font-family:monospace;font-size:0.85rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(created.token)}</pre>
+        <button type="button" style="margin-top:0.5rem;padding:0.3rem 0.7rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(created.token)}" onclick="copyText(this)">Copy token</button>
+        <p class="meta" style="margin-top:1rem">Check that it works (server: <code>${escapeHtml(base)}</code>): <code>GET /api/v1/me</code> with the header <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+        <div style="margin-top:1.5rem"><a href="/account#access-tokens" style="color:var(--brand)">Back to account</a></div>
+      </div>
+    `,
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
+    )
+  );
+});
+
+webRoutes.post("/account/access-tokens/:id/delete", (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id");
+  const token = getUserTokenById(id);
+  // Only your own. Someone else's id gets the same answer as an unknown one.
+  if (token && token.user_id === user.id && revokeUserToken(id, user.id)) {
+    logAudit(user.id, user.username, "user_token_revoked", { detail: `${id} (by owner)` });
+    return c.redirect("/account?access_token_revoked=1#access-tokens");
+  }
+  return c.redirect("/account#access-tokens");
 });
 
 webRoutes.post("/account/tokens/:id/delete", async (c) => {
@@ -3235,10 +4217,10 @@ webRoutes.post("/account/password", async (c) => {
   // fresh one so the current tab stays signed in. Other devices are
   // logged out on their next request.
   deleteAllUserSessions(user.id);
-  const oldToken = getCookieValue(c, SESSION_COOKIE);
+  const oldToken = readSessionToken(c);
   if (oldToken) deleteSession(oldToken);
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
 
   logAudit(user.id, user.username, "password_changed", {
     targetUserId: user.id,
@@ -3305,7 +4287,7 @@ webRoutes.get("/account/2fa/verify", async (c) => {
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3340,13 +4322,13 @@ webRoutes.post("/account/2fa/verify", async (c) => {
           (e.g. your password manager). You can generate new ones
           later from the account page, which invalidates the old set.
         </p>
-        <pre style="margin-top:1rem;padding:1rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;font-family:monospace;font-size:0.95rem;line-height:1.6">${codes.map((c) => escapeHtml(c)).join("\n")}</pre>
+        <pre style="margin-top:1rem;padding:1rem;background:var(--bg2);border:1px solid var(--line);border-radius:6px;font-family:monospace;font-size:0.95rem;line-height:1.6">${codes.map((c) => escapeHtml(c)).join("\n")}</pre>
         <div style="margin-top:1rem">
-          <a href="/account" style="color:#60a5fa">I've saved them — back to account</a>
+          <a href="/account" style="color:var(--tx)">I've saved them — back to account</a>
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3362,11 +4344,14 @@ webRoutes.post("/account/2fa/disable", async (c) => {
   if (!isTotpEnabled(user)) return c.redirect("/account");
 
   const body = await c.req.parseBody();
-  const code = ((body["code"] as string | undefined) ?? "").trim();
-  const ok =
-    verifyAndConsumeTotp(user.id, user.totp_secret!, code) ||
-    (await consumeBackupCode(user.id, code));
-  if (!ok) return c.redirect("/account?error=1");
+  const code = (body["code"] as string | undefined) ?? "";
+  const checked = await verifySecondFactor(user, code, {
+    allowBackup: true,
+    ip: getClientIp(c),
+    via: "turn 2FA off",
+  });
+  if (checked === "locked") return c.redirect("/account?error=locked");
+  if (checked !== "ok") return c.redirect("/account?error=1");
 
   clearTotp(user.id);
   deleteBackupCodes(user.id);
@@ -3379,10 +4364,14 @@ webRoutes.post("/account/2fa/regenerate", async (c) => {
   if (!isTotpEnabled(user)) return c.redirect("/account");
 
   const body = await c.req.parseBody();
-  const code = ((body["code"] as string | undefined) ?? "").trim();
-  if (!verifyAndConsumeTotp(user.id, user.totp_secret!, code)) {
-    return c.redirect("/account?error=1");
-  }
+  const code = (body["code"] as string | undefined) ?? "";
+  const checked = await verifySecondFactor(user, code, {
+    allowBackup: false,
+    ip: getClientIp(c),
+    via: "new backup codes",
+  });
+  if (checked === "locked") return c.redirect("/account?error=locked");
+  if (checked !== "ok") return c.redirect("/account?error=1");
 
   const codes = generateBackupCodes(10);
   await storeBackupCodes(user.id, codes);
@@ -3399,13 +4388,13 @@ webRoutes.post("/account/2fa/regenerate", async (c) => {
           Your previous backup codes have been invalidated. Store
           these new ones somewhere safe.
         </p>
-        <pre style="margin-top:1rem;padding:1rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;font-family:monospace;font-size:0.95rem;line-height:1.6">${codes.map((c) => escapeHtml(c)).join("\n")}</pre>
+        <pre style="margin-top:1rem;padding:1rem;background:var(--bg2);border:1px solid var(--line);border-radius:6px;font-family:monospace;font-size:0.95rem;line-height:1.6">${codes.map((c) => escapeHtml(c)).join("\n")}</pre>
         <div style="margin-top:1rem">
-          <a href="/account" style="color:#60a5fa">I've saved them — back to account</a>
+          <a href="/account" style="color:var(--tx)">I've saved them — back to account</a>
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });

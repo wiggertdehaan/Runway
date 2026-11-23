@@ -1,5 +1,15 @@
+import { ensureEventsTables } from "./events-schema.js";
+import { ensureHostTables } from "../host/schema.js";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
+import { ensureUniqueDomainIndexes } from "./domain-index.js";
+import { backfillOwnerUserIds } from "./owner-migration.js";
+import {
+  LEGACY_DEV_TOKEN_DAYS,
+  ensureUserTokensTable,
+  expireLegacyDevTokens,
+  migrateTokenStorage,
+} from "./token-migration.js";
 
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), "runway.db");
 
@@ -29,6 +39,29 @@ export function migrate() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+    -- S02: sign-ins of SSO app hosts, separate from the dashboard session.
+    CREATE TABLE IF NOT EXISTS sso_tickets (
+      hash TEXT PRIMARY KEY,
+      host TEXT NOT NULL,
+      app_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      parent_token TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sso_tickets_parent ON sso_tickets(parent_token);
+
+    CREATE TABLE IF NOT EXISTS sso_sessions (
+      hash TEXT PRIMARY KEY,
+      host TEXT NOT NULL,
+      app_id TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      parent_token TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sso_sessions_parent ON sso_sessions(parent_token);
+    CREATE INDEX IF NOT EXISTS idx_sso_sessions_user ON sso_sessions(user_id);
 
     CREATE TABLE IF NOT EXISTS preauth_sessions (
       token TEXT PRIMARY KEY,
@@ -119,6 +152,50 @@ export function migrate() {
     );
   `);
 
+  // S12: the audit log also records what the API and the MCP route do, and
+  // who tried and failed. Extra columns, all nullable or defaulted, so every
+  // existing row stays valid (actor_type NULL = a person using the dashboard).
+  const auditCols = db.prepare("PRAGMA table_info(audit_log)").all() as Array<{
+    name: string;
+  }>;
+  for (const [col, ddl] of [
+    ["actor_type", "TEXT"],
+    ["app_id", "TEXT"],
+    ["result", "TEXT"],
+    ["source_ip", "TEXT"],
+    ["count", "INTEGER NOT NULL DEFAULT 1"],
+  ] as const) {
+    if (!auditCols.some((c) => c.name === col)) {
+      db.exec(`ALTER TABLE audit_log ADD COLUMN ${col} ${ddl}`);
+    }
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_type, id);
+    CREATE INDEX IF NOT EXISTS idx_audit_denied ON audit_log(action, source_ip, id);
+    CREATE INDEX IF NOT EXISTS idx_audit_app ON audit_log(app_id, id);
+  `);
+
+  // S09: failed second-factor attempts per user. Kept in the database (not
+  // in memory) so a restart does not hand an attacker a fresh set of guesses,
+  // and keyed on the user (not the IP) so a password-holder cannot reset it
+  // by signing in again. See auth/twofa-limit.ts for the schedule.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS twofa_attempts (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      failures INTEGER NOT NULL DEFAULT 0,
+      last_failure_at INTEGER NOT NULL DEFAULT 0,
+      locked_until INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  // S09: failed attempts against one pre-auth session. After a handful the
+  // session is destroyed, so the attacker must enter the password again.
+  const preauthCols = db.prepare("PRAGMA table_info(preauth_sessions)").all() as Array<{
+    name: string;
+  }>;
+  if (!preauthCols.some((c) => c.name === "failures")) {
+    db.exec(`ALTER TABLE preauth_sessions ADD COLUMN failures INTEGER NOT NULL DEFAULT 0`);
+  }
+
   // Upgrade legacy users tables so existing installations pick up
   // the totp columns. ADD COLUMN is supported by SQLite.
   const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{
@@ -133,6 +210,25 @@ export function migrate() {
   if (!userColumns.some((c) => c.name === "oauth_provider")) {
     db.exec(`ALTER TABLE users ADD COLUMN oauth_provider TEXT`);
   }
+  // S01: the provider identity (`sub`) an OAuth user first signed in with.
+  // Later logins must present the same one, so a second account that merely
+  // claims the same email address cannot take the account over.
+  if (!userColumns.some((c) => c.name === "oauth_sub")) {
+    db.exec(`ALTER TABLE users ADD COLUMN oauth_sub TEXT`);
+  }
+  // S01: who may create an account by signing in with Google/Microsoft.
+  // Empty by default: nobody new gets in until an admin allows them.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_access (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL CHECK (kind IN ('email','domain')),
+      value TEXT NOT NULL,
+      one_time INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(kind, value)
+    );
+  `);
   if (!userColumns.some((c) => c.name === "totp_secret")) {
     db.exec(`ALTER TABLE users ADD COLUMN totp_secret TEXT`);
   }
@@ -209,11 +305,29 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "custom_domain")) {
     db.exec(`ALTER TABLE apps ADD COLUMN custom_domain TEXT`);
   }
+  // S03: one app per hostname. Creates the unique indexes unless the
+  // installation already holds duplicates, which are then reported.
+  ensureUniqueDomainIndexes(db);
   if (!appCols.some((c) => c.name === "health_check_path")) {
     db.exec(`ALTER TABLE apps ADD COLUMN health_check_path TEXT`);
   }
   if (!appCols.some((c) => c.name === "created_by")) {
     db.exec(`ALTER TABLE apps ADD COLUMN created_by TEXT`);
+  }
+  // S13: ownership by user id. The column and the one-time fill of it share
+  // a transaction, so a crash cannot leave the column added but empty (the
+  // fill would then never run). See owner-migration.ts for why it must not
+  // be repeated on later starts.
+  if (!appCols.some((c) => c.name === "owner_user_id")) {
+    db.exec("BEGIN");
+    try {
+      db.exec(`ALTER TABLE apps ADD COLUMN owner_user_id TEXT`);
+      backfillOwnerUserIds(db);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   }
   if (!appCols.some((c) => c.name === "scan_threshold")) {
     db.exec(`ALTER TABLE apps ADD COLUMN scan_threshold TEXT NOT NULL DEFAULT 'none'`);
@@ -352,6 +466,95 @@ export function migrate() {
   // (~6h); a deploy that passed the gate at build time can develop new
   // findings later. The periodic scanner writes one row per scan so
   // the dashboard can show a delta against the previous run.
+  // Rebuild-all: per-app opt-out for the weekly automatic rebuild, and
+  // a history of rebuild runs (manual + scheduled). `results` is a JSON
+  // array of per-app outcomes, rewritten after each app so the dashboard
+  // can show progress while a run is in flight.
+  if (!appCols.some((c) => c.name === "auto_rebuild")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_rebuild INTEGER NOT NULL DEFAULT 1`);
+  }
+  // Auto-patch of base images on rebuild: per-app opt-out, and which base
+  // images (tag + digest, and whether auto-raised) each deploy used.
+  if (!appCols.some((c) => c.name === "auto_patch_base")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_patch_base INTEGER NOT NULL DEFAULT 1`);
+  }
+  if (!deployCols.some((c) => c.name === "base_images")) {
+    db.exec(`ALTER TABLE deploys ADD COLUMN base_images TEXT`);
+  }
+  // Minor-line escalation opt-out + KEV quarantine (see deploy/quarantine.ts).
+  if (!appCols.some((c) => c.name === "auto_minor_base")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_minor_base INTEGER NOT NULL DEFAULT 1`);
+  }
+  // Dependency auto-update on rebuild (see deploy/dep-updates.ts): per-app
+  // opt-out, and a memory of attempts so a version that failed to build or
+  // start is not retried on every weekly run.
+  if (!appCols.some((c) => c.name === "auto_update_deps")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_update_deps INTEGER NOT NULL DEFAULT 1`);
+  }
+  // Major jumps are a separate, explicit opt-in (default off, also for
+  // apps that existed before): a healthcheck only proves the app starts.
+  if (!appCols.some((c) => c.name === "auto_update_deps_major")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN auto_update_deps_major INTEGER NOT NULL DEFAULT 0`);
+  }
+  // Container hardening (S08, see deploy/hardening.ts): an administrator's
+  // per-app profile (NULL = the instance default) and an opt-in read-only
+  // root filesystem. Both take effect when the container is next created.
+  if (!appCols.some((c) => c.name === "hardening_profile")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN hardening_profile TEXT`);
+  }
+  if (!appCols.some((c) => c.name === "readonly_rootfs")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN readonly_rootfs INTEGER NOT NULL DEFAULT 0`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dep_update_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      dep_key TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_dep_update_attempts_app
+      ON dep_update_attempts(app_id, id DESC);
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_quarantine (
+      app_id TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,
+      state TEXT NOT NULL,
+      kev_first_seen TEXT NOT NULL DEFAULT '{}',
+      attempt_at TEXT,
+      quarantined_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS quarantine_exemptions (
+      app_id TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,
+      reason TEXT NOT NULL,
+      until TEXT NOT NULL,
+      granted_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS app_notices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_app_notices_app
+      ON app_notices(app_id, id DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rebuild_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trigger TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT,
+      results TEXT NOT NULL DEFAULT '[]'
+    );
+  `);
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS app_periodic_scans (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -366,4 +569,48 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_periodic_scans_app_recent
       ON app_periodic_scans(app_id, created_at DESC);
   `);
+
+  // S10/S11/S18: tokens are kept as hashes, and users can hold tokens of their
+  // own. See token-migration.ts for why this is safe to run on every start.
+  const moved = migrateTokenStorage(db);
+  if (moved.appKeys > 0 || moved.devTokens > 0) {
+    console.log(
+      `Stored ${moved.appKeys} app key(s) and ${moved.devTokens} developer token(s) as hashes. ` +
+        `Keys still work; the dashboard can no longer show an old key (rotate to get a new one).`
+    );
+  }
+  // Developer tokens that never expire get an expiry (90 days) so none lives forever.
+  const dated = expireLegacyDevTokens(db);
+  if (dated > 0) {
+    console.log(
+      `${dated} developer token(s) had no expiry and now expire in ${LEGACY_DEV_TOKEN_DAYS} days. ` +
+        `They work until then; their owners are told on the Account page.`
+    );
+  }
+  ensureUserTokensTable(db);
+  ensureEventsTables(db);
+  ensureHostTables(db);
+
+  // S02: until now the session cookie was set on `.{base_domain}`, so every
+  // deployed app received a valid dashboard session. Those tokens are
+  // therefore treated as exposed: once, on the first start of this version,
+  // every dashboard session is ended. Users sign in again (one time). The
+  // marker keeps later starts from signing everyone out again. A fresh
+  // install has no sessions, so this is a no-op there.
+  const marker = db
+    .prepare(`SELECT 1 AS done FROM settings WHERE key = 'sessions_host_only_v1'`)
+    .get();
+  if (!marker) {
+    db.exec("BEGIN");
+    try {
+      db.exec(`DELETE FROM sessions`);
+      db.prepare(
+        `INSERT INTO settings (key, value, updated_at) VALUES ('sessions_host_only_v1', '1', datetime('now'))`
+      ).run();
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
 }

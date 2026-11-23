@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { db } from "./index.js";
 import type { User } from "./users.js";
+import { deleteSsoForSession, deleteSsoForUser, deleteExpiredSso } from "./sso-sessions.js";
 
 const SESSION_TTL_DAYS = 30;
 
@@ -42,13 +43,17 @@ export function getSessionUser(token: string): User | undefined {
 }
 
 export function deleteSession(token: string): void {
+  // The app sign-ins that came out of this session go with it.
+  deleteSsoForSession(token);
   db.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
 }
 
 export function deleteAllUserSessions(userId: string): void {
+  deleteSsoForUser(userId);
   db.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(userId);
 }
 
 export function deleteExpiredSessions(): void {
+  deleteExpiredSso();
   db.prepare(`DELETE FROM sessions WHERE expires_at <= datetime('now')`).run();
 }

@@ -10,17 +10,27 @@ services:
   # proxies HTTP to named services resolved through the internal
   # Docker DNS (e.g. http://control:3000).
   #
-  # Joins two networks: `runway-internal` so it can reach the
+  # Joins two networks here: `runway-internal` so it can reach the
   # control plane (for the dashboard and forward-auth), and
-  # `runway-apps` so it can route to deployed app containers.
+  # `runway-apps`, which only the apps deployed before per-app networks
+  # still use. Every app now gets its own network (runway-net-<id>) and
+  # control attaches this container to it at runtime, so a recreated
+  # gateway is reattached by control within a minute (deploy/networks.ts).
   #
   # The dashboard/insecure API is intentionally disabled.
   gateway:
-    image: traefik:v3.5
+    # Pin the exact release: `up -d --build` never re-pulls an existing tag,
+    # so a floating tag stays on whatever the server first downloaded.
+    image: traefik:v3.7.17
     container_name: runway-gateway
     restart: unless-stopped
     environment:
       - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN must be set in .env}
+      # Stopgap for CVE-2026-98432: Go listens on MPTCP by default, and a
+      # container's network namespace doesn't inherit the host's setting.
+      - GODEBUG=multipathtcp=0
+    sysctls:
+      - net.mptcp.enabled=0
     command:
       - "--providers.file.directory=/config"
       - "--providers.file.watch=true"
@@ -51,19 +61,27 @@ services:
       - runway-apps
 
   # ── Builder (BuildKit) ─────────────────────────────────
+  # Pinned to a release tag (never :latest) so updates are deliberate:
+  # bump the tag here, then `docker compose pull && docker compose up -d`.
   # Isolated image builder. Control reaches buildkit via the Docker
   # socket (`docker exec`), not over TCP, so buildkit does NOT share
   # a network with control or with deployed apps. This prevents
   # malicious RUN steps in a user Dockerfile from reaching the
   # control plane or other apps at build time.
   buildkit:
-    image: moby/buildkit:latest
+    image: moby/buildkit:v0.35.1
     container_name: runway-buildkit
     restart: unless-stopped
     privileged: true
     command:
       - "--addr"
       - "unix:///run/buildkit/buildkitd.sock"
+      # Cap the build cache. BuildKit defaults to keeping up to 30 GB,
+      # which fills a small server during a rebuild of all apps (20 apps
+      # left 12 GB behind). Format: "reserved,min free,max used" in MB.
+      # Raise it on a large disk with BUILDKIT_GC_KEEPSTORAGE in .env.
+      - "--oci-worker-gc=true"
+      - "--oci-worker-gc-keepstorage=${BUILDKIT_GC_KEEPSTORAGE:-2000,8000,6000}"
     volumes:
       - buildkit-cache:/var/lib/buildkit
       - build-exchange:/exchange
@@ -74,7 +92,8 @@ services:
   # Web dashboard + REST API backing the MCP server.
   #
   # Lives on `runway-internal` only. Deployed app containers live
-  # on `runway-apps` and therefore cannot reach `control:3000`
+  # on their own per-app networks (or, until redeployed, `runway-apps`)
+  # and therefore cannot reach `control:3000`
   # directly. Gateway straddles both networks to route traffic.
   control:
     build:
@@ -111,6 +130,56 @@ services:
       - RUNWAY_NETWORK=runway-apps
       - BUILDKIT_CONTAINER=runway-buildkit
       - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN must be set in .env}
+      # Hardening of the app containers (S08), see deploy/hardening.ts.
+      # RUNWAY_HARDENING: standard (default) | strict | relaxed. `relaxed` is an
+      # emergency brake that switches the capability, PID and read-only rules
+      # off for every app at their next (re)deploy. RUNWAY_PIDS_LIMIT: tasks
+      # (threads included) per app container, default 512.
+      - RUNWAY_HARDENING=${RUNWAY_HARDENING:-}
+      - RUNWAY_PIDS_LIMIT=${RUNWAY_PIDS_LIMIT:-}
+      # Rate limits per API key / MCP token (S21). Empty = built-in default.
+      # Per minute: READ 120, WRITE 60. Per 10 minutes: HEAVY (deploy, rollback,
+      # source download) 10, AUTH_FAIL (wrong keys from one address) 20.
+      # API_IP_RATE_LIMIT is a coarse per-address flood guard (default 600/min).
+      - RATE_LIMIT_READ_PER_MIN=${RATE_LIMIT_READ_PER_MIN:-}
+      - RATE_LIMIT_WRITE_PER_MIN=${RATE_LIMIT_WRITE_PER_MIN:-}
+      - RATE_LIMIT_HEAVY_PER_10MIN=${RATE_LIMIT_HEAVY_PER_10MIN:-}
+      - RATE_LIMIT_AUTH_FAIL_PER_10MIN=${RATE_LIMIT_AUTH_FAIL_PER_10MIN:-}
+      - API_IP_RATE_LIMIT=${API_IP_RATE_LIMIT:-}
+      # Events (GET /api/v1/events): how long and how many are kept, and the
+      # health watcher that raises health_unhealthy / health_recovered
+      # (HEALTH_WATCH_INTERVAL_MS=0 turns it off; default one look a minute).
+      - EVENTS_RETENTION_DAYS=${EVENTS_RETENTION_DAYS:-}
+      - EVENTS_MAX_PER_APP=${EVENTS_MAX_PER_APP:-}
+      - HEALTH_WATCH_INTERVAL_MS=${HEALTH_WATCH_INTERVAL_MS:-}
+      # Host disk, CPU, memory and Docker data usage for the overview page, read
+      # from inside this container (no extra mount or privilege). Empty = every
+      # minute (disk every 5, Docker data every 15); 0 turns it off.
+      - HOST_METRICS_INTERVAL_MS=${HOST_METRICS_INTERVAL_MS:-}
+      # One-time token that /setup asks for until the first admin exists (S19).
+      # install.sh writes one into .env. Empty = control generates one on first
+      # start and prints it in its log. It does nothing once an admin exists.
+      - SETUP_TOKEN=${SETUP_TOKEN:-}
+      # Per-app networks (S04). RUNWAY_APP_NETWORK_MODE=shared is the emergency
+      # brake: new deploys go back on the shared runway-apps network. The pool
+      # and prefix decide which private subnets the per-app networks use;
+      # change them only when 10.250.0.0/16 collides with something on the host.
+      - RUNWAY_APP_NETWORK_MODE=${RUNWAY_APP_NETWORK_MODE:-}
+      - RUNWAY_APP_NET_POOL=${RUNWAY_APP_NET_POOL:-}
+      - RUNWAY_APP_NET_PREFIX=${RUNWAY_APP_NET_PREFIX:-}
+      # How long (days) and how many lines of what API keys and tokens did are
+      # kept in the audit log (S12). Empty = 90 days and 100000 lines. Lines
+      # about people in the dashboard are never pruned.
+      - AUDIT_API_RETENTION_DAYS=${AUDIT_API_RETENTION_DAYS:-}
+      - AUDIT_API_MAX_ROWS=${AUDIT_API_MAX_ROWS:-}
+      # Uploads (S06): limits on a source tar. Empty = built-in defaults.
+      - RUNWAY_TAR_MAX_ENTRIES=${RUNWAY_TAR_MAX_ENTRIES:-}
+      - RUNWAY_TAR_MAX_PATH=${RUNWAY_TAR_MAX_PATH:-}
+      - RUNWAY_TAR_MAX_DEPTH=${RUNWAY_TAR_MAX_DEPTH:-}
+      # How many stored source tarballs to keep per app. Empty = 10.
+      - RUNWAY_SOURCE_RETENTION=${RUNWAY_SOURCE_RETENTION:-}
+      # Hours between the periodic scans of running apps. Empty = the default.
+      - PERIODIC_SCAN_INTERVAL_HOURS=${PERIODIC_SCAN_INTERVAL_HOURS:-}
     security_opt:
       - no-new-privileges:true
     tmpfs:
@@ -132,7 +201,11 @@ networks:
   # build sandboxes.
   runway-internal:
     name: runway-internal
-  # Deployed app containers ↔ gateway. No control-plane reachability.
+  # Shared network of apps deployed before per-app networks (0.39). Kept so
+  # they keep running until their next deploy or rebuild moves them to their
+  # own network, and as the target of RUNWAY_APP_NETWORK_MODE=shared. It
+  # can be removed from this file once no app container is left on it
+  # (control logs how many still are at startup).
   runway-apps:
     name: runway-apps
   # BuildKit only. Isolated so build-time RUN steps cannot reach

@@ -10,13 +10,16 @@ import { getEnvVars } from "../db/env.js";
 import { getVolumes } from "../db/volumes.js";
 import {
   buildImageFromTar,
+  docker,
   getContainerLogs,
   getContainerStatus,
   removeContainerByName,
   removeImageByTag,
   runContainer,
+  stopContainerByName,
 } from "./docker.js";
 import { appBasicAuth, deleteAppRoute, writeAppRoute } from "./gateway.js";
+import { removeAppNetwork, networkNameForContainer, type NetworkDocker } from "./networks.js";
 import {
   buildScanResult,
   effectiveThreshold,
@@ -26,12 +29,20 @@ import {
   scanSource,
   trivyAvailable,
   type Finding,
+  countSeverity,
   type ScanResult,
   type Threshold,
 } from "./scan.js";
 import { getKeepImageVersions, getSetting } from "../db/settings.js";
 import { preflightCheckTar, PreflightRejectedError } from "./preflight.js";
 import { saveSource, pruneOldSources, deleteAllSources } from "./source.js";
+import { waitForHealthy } from "./health.js";
+import { insertPeriodicScan } from "../db/periodic-scans.js";
+import {
+  extractUsedBaseImages,
+  type BasePlan,
+  type UsedBaseImage,
+} from "./base-images.js";
 export { PreflightRejectedError } from "./preflight.js";
 
 function dockerSafeId(appId: string): string {
@@ -77,6 +88,39 @@ function buildVolumeBinds(appId: string) {
 export interface DeployInput {
   app: App;
   tar: Readable | Buffer;
+  /** Build without the BuildKit layer cache (used by rebuilds). */
+  noCache?: boolean;
+  /**
+   * After starting the new container, wait for it to be healthy. If it
+   * is not, put the previous image back and throw UnhealthyDeployError.
+   * Regular deploys keep the old fire-and-forget behaviour.
+   */
+  verifyHealth?: boolean;
+  /** Don't overwrite the stored source snapshot (rebuilds reuse it). */
+  skipSourceSave?: boolean;
+  /**
+   * Base-image patch plan (rebuilds only): a build-time Dockerfile copy
+   * and/or build-args. The stored source is never modified.
+   */
+  basePlan?: BasePlan;
+  /**
+   * Rebuild gate. When set it REPLACES the app's scan-threshold gate:
+   * the new image goes live only if the gate allows it (typically "not
+   * worse than what is running now"). Plain deploys leave this unset
+   * and keep the threshold gate.
+   */
+  scanGate?: (scan: ScanResult) => { allow: boolean; reason?: string };
+  /**
+   * Build + scan only: no container, no route, no status change, no
+   * deploy record, and the image is removed again. Used to probe whether
+   * a newer (e.g. major) base would resolve findings.
+   */
+  dryRun?: boolean;
+  /**
+   * The app is quarantined: if the new container is not healthy, do NOT
+   * restore the previous (vulnerable) version, keep the app offline.
+   */
+  keepOffline?: boolean;
 }
 
 export interface DeployResult {
@@ -87,6 +131,8 @@ export interface DeployResult {
   domain: string | null;
   log_tail: string;
   scan: ScanResult;
+  /** Base images (tag + digest) used by this build. */
+  base_images: UsedBaseImage[];
 }
 
 /**
@@ -98,16 +144,43 @@ export class ScanBlockedError extends Error {
   scan: ScanResult;
   imageTag: string;
   deployId: number;
-  constructor(scan: ScanResult, imageTag: string, deployId: number) {
+  baseImages: UsedBaseImage[] = [];
+  constructor(
+    scan: ScanResult,
+    imageTag: string,
+    deployId: number,
+    reason?: string
+  ) {
     const top = scan.findings[0];
     super(
-      top
-        ? `Deploy blocked by scan: ${top.severity} ${top.id}${top.pkg ? ` in ${top.pkg}` : ""}`
-        : "Deploy blocked by scan"
+      reason ??
+        (top
+          ? `Deploy blocked by scan: ${top.severity} ${top.id}${top.pkg ? ` in ${top.pkg}` : ""}`
+          : "Deploy blocked by scan")
     );
     this.scan = scan;
     this.imageTag = imageTag;
     this.deployId = deployId;
+  }
+}
+
+/**
+ * Thrown when verifyHealth is set and the new container never became
+ * healthy. By the time this is thrown the previous image is running
+ * again (`restored`), or nothing could be restored (first deploy).
+ */
+export class UnhealthyDeployError extends Error {
+  imageTag: string;
+  restored: boolean;
+  scan: ScanResult;
+  baseImages: UsedBaseImage[] = [];
+  constructor(reason: string, imageTag: string, restored: boolean, scan: ScanResult) {
+    super(
+      `New container unhealthy (${reason}); ${restored ? "restored the previous deploy" : "no previous deploy to restore"}`
+    );
+    this.imageTag = imageTag;
+    this.restored = restored;
+    this.scan = scan;
   }
 }
 
@@ -195,30 +268,67 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   // cloud-metadata reach-out with minimal false-positive risk.
   if (tarBuffer) preflightCheckTar(tarBuffer);
 
-  updateApp(app.id, { status: "building" });
+  if (!input.dryRun) updateApp(app.id, { status: "building" });
 
-  const build = await buildImageFromTar(tarBuffer ?? tar, { imageTag });
+  const build = await buildImageFromTar(tarBuffer ?? tar, {
+    imageTag,
+    noCache: input.noCache,
+    dockerfileOverride: input.basePlan?.dockerfile,
+    buildArgs: input.basePlan?.buildArgs,
+  });
+  const baseImages = extractUsedBaseImages(build.log, input.basePlan?.patches);
 
-  updateApp(app.id, { status: "scanning" });
+  if (!input.dryRun) updateApp(app.id, { status: "scanning" });
 
   const scan = await runScans(tarBuffer, imageTag, threshold);
+
+  let blockReason: string | undefined;
+  let blocked = scan.status === "blocked";
+  if (input.scanGate) {
+    // The rebuild gate decides instead of the threshold. A threshold-level
+    // "blocked" that the gate let through is just a warning on record.
+    const verdict = input.scanGate(scan);
+    blocked = !verdict.allow;
+    blockReason = verdict.reason;
+    if (!blocked && scan.status === "blocked") scan.status = "warned";
+  }
   const scanSummary = { status: scan.status, counts: scan.counts };
 
-  if (scan.status === "blocked") {
+  if (input.dryRun) {
+    await removeImageByTag(imageTag).catch(() => {});
+    return {
+      app_id: app.id,
+      image_tag: imageTag,
+      container_id: "",
+      container_name: containerName,
+      domain: app.domain,
+      log_tail: "dry run",
+      scan,
+      base_images: baseImages,
+    };
+  }
+
+  if (blocked) {
     const deploy = recordDeploy(app.id, imageTag, "blocked", {
-      log: build.log,
-      scanStatus: scan.status,
-      scanSummary,
-      scanReport: scan,
+      silentEvent: !!input.scanGate,
+      log: blockReason ? `${build.log}\n[runway] blocked: ${blockReason}` : build.log,
+      scanStatus: "blocked",
+      scanSummary: { status: "blocked", counts: scan.counts },
+      scanReport: { ...scan, status: "blocked" },
+      baseImages,
     });
-    throw new ScanBlockedError(scan, imageTag, deploy.id);
+    const err = new ScanBlockedError(scan, imageTag, deploy.id, blockReason);
+    err.baseImages = baseImages;
+    throw err;
   }
 
   updateApp(app.id, { status: "starting" });
 
   const env = getEnvVars(app.id);
 
+  const previousTag = app.image_tag;
   const run = await runContainer({
+    appId: app.id,
     containerName,
     imageTag,
     port: app.port,
@@ -226,8 +336,59 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     volumes: buildVolumeBinds(app.id),
     cpuLimit: app.cpu_limit,
     memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
     healthCheckPath: app.health_check_path,
   });
+
+  if (input.verifyHealth) {
+    const health = await waitForHealthy(containerName, {
+      hasHealthcheck: !!app.health_check_path,
+    });
+    if (!health.healthy) {
+      let restored = false;
+      if (input.keepOffline) {
+        // Quarantined app: never fall back to the vulnerable version.
+        await stopContainerByName(containerName).catch(() => {});
+        updateApp(app.id, { status: "quarantined" });
+      } else if (previousTag) {
+        try {
+          const back = await runContainer({
+            appId: app.id,
+            containerName,
+            imageTag: previousTag,
+            port: app.port,
+            env,
+            volumes: buildVolumeBinds(app.id),
+            cpuLimit: app.cpu_limit,
+            memoryLimit: app.memory_limit,
+            hardening: app.hardening_profile,
+            readonlyRootfs: app.readonly_rootfs === 1,
+            healthCheckPath: app.health_check_path,
+          });
+          updateApp(app.id, { status: "running", container_id: back.containerId });
+          restored = true;
+        } catch {
+          updateApp(app.id, { status: "failed" });
+        }
+      } else {
+        await removeContainerByName(containerName).catch(() => {});
+        updateApp(app.id, { status: "failed" });
+      }
+      recordDeploy(app.id, imageTag, "unhealthy", {
+        silentEvent: !!input.scanGate,
+        log: `${build.log}\n[runway] unhealthy: ${health.reason}; ${restored ? "restored " + previousTag : "nothing restored"}`,
+        scanStatus: scan.status,
+        scanSummary,
+        scanReport: scan,
+        baseImages,
+      });
+      removeImageByTag(imageTag).catch(() => {});
+      const unhealthy = new UnhealthyDeployError(health.reason, imageTag, restored, scan);
+      unhealthy.baseImages = baseImages;
+      throw unhealthy;
+    }
+  }
 
   if (app.domain) {
     await writeAppRoute({
@@ -248,18 +409,39 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   });
 
   const deploy = recordDeploy(app.id, imageTag, "success", {
+    silentEvent: !!input.scanGate,
     log: build.log,
     scanStatus: scan.status,
     scanSummary,
     scanReport: scan,
+    baseImages,
   });
+
+  // The deploy-time scan is also the baseline for the daily rescan and for
+  // quarantine evaluation, so a fresh deploy is judged on its own image
+  // and not on the previous one.
+  if (scan.status !== "skipped") {
+    try {
+      const imageFindings = scan.findings.filter((f) => f.source === "image");
+      insertPeriodicScan({
+        app_id: app.id,
+        image_tag: imageTag,
+        scan_status: scan.status,
+        counts: countSeverity(imageFindings),
+        findings: imageFindings,
+        error: null,
+      });
+    } catch {
+      // best effort
+    }
+  }
 
   // Persist the build context per deploy so the project source can later
   // be pulled back to a fresh working directory (runway_pull / GET
   // /api/v1/app/source). Best-effort: don't fail the deploy if the disk
   // write trips. Only saved on a successful deploy so a broken upload
   // never replaces a previous good source.
-  if (tarBuffer) {
+  if (tarBuffer && !input.skipSourceSave) {
     try {
       saveSource(app.id, deploy.id, tarBuffer);
       pruneOldSources(app.id);
@@ -280,6 +462,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     domain: app.domain,
     log_tail: logTail,
     scan,
+    base_images: baseImages,
   };
 }
 
@@ -321,6 +504,7 @@ export async function rollbackApp(
   updateApp(app.id, { status: "starting" });
 
   const run = await runContainer({
+    appId: app.id,
     containerName,
     imageTag: prev.image_tag,
     port: app.port,
@@ -328,6 +512,8 @@ export async function rollbackApp(
     volumes: buildVolumeBinds(app.id),
     cpuLimit: app.cpu_limit,
     memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
     healthCheckPath: app.health_check_path,
   });
 
@@ -349,7 +535,7 @@ export async function rollbackApp(
     container_id: run.containerId,
   });
 
-  recordDeploy(app.id, prev.image_tag, "success", { log: "Rolled back" });
+  recordDeploy(app.id, prev.image_tag, "success", { log: "Rolled back", rollback: true });
 
   return {
     app_id: app.id,
@@ -364,11 +550,52 @@ export async function rollbackApp(
       findings: [],
       error: "rollback reuses existing image",
     },
+    base_images: [],
   };
 }
 
+/**
+ * Bring an app back online from its current image: used when a
+ * quarantine is lifted (resolved or exempted). Recreates the container
+ * (named volumes are untouched) and restores the normal gateway route.
+ */
+export async function restoreApp(app: App): Promise<void> {
+  if (!app.image_tag) throw new Error("app has no image to start");
+  const containerName = appContainerName(app.id);
+  updateApp(app.id, { status: "starting" });
+  const run = await runContainer({
+    appId: app.id,
+    containerName,
+    imageTag: app.image_tag,
+    port: app.port,
+    env: getEnvVars(app.id),
+    volumes: buildVolumeBinds(app.id),
+    cpuLimit: app.cpu_limit,
+    memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
+    healthCheckPath: app.health_check_path,
+  });
+  if (app.domain) {
+    await writeAppRoute({
+      appId: app.id,
+      containerName,
+      domain: app.domain,
+      customDomain: app.custom_domain,
+      port: app.port,
+      basicAuth: appBasicAuth(app),
+      ssoEnabled: !!app.sso_enabled,
+    });
+  }
+  updateApp(app.id, { status: "running", container_id: run.containerId });
+}
+
 export async function destroyApp(app: App): Promise<void> {
-  await removeContainerByName(appContainerName(app.id));
+  const containerName = appContainerName(app.id);
+  await removeContainerByName(containerName);
+  // The network goes with the app (after the container: it must be empty).
+  // A failure here leaves an empty network that the reconcile sweep removes.
+  await removeAppNetwork(docker as unknown as NetworkDocker, networkNameForContainer(containerName)).catch(() => {});
   await deleteAppRoute(app.id);
   deleteAllSources(app.id);
 }

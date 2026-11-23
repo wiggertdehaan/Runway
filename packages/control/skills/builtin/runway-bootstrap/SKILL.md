@@ -12,9 +12,18 @@ containers, leaked secrets).
 
 ## Day-one rules
 
-- **Pin everything.** No `:latest` base images, no unpinned
-  dependencies. Commit lock files (`pnpm-lock.yaml`,
-  `requirements.txt`, `go.sum`).
+- **Pin everything, but base images to the minor version.** No
+  `:latest` base images, no unpinned dependencies. Commit lock files
+  (`pnpm-lock.yaml`, `requirements.txt`, `go.sum`). For base images
+  use a *minor* pin that keeps receiving security patches:
+  `nginx:1.30-alpine`, `node:24-alpine`, `python:3.12-slim`. Do **not**
+  pin an exact patch (`nginx:1.30.6-alpine`, `node:24.1.0-slim`): it
+  freezes the image on whatever CVEs that patch shipped with and every
+  rebuild reproduces them. (Runway's rebuild will bump an exact patch
+  pin to the newest patch of the same minor and variant in a
+  build-time copy, but a minor pin gets the fix on every build, and
+  you control it.) Digest pins (`@sha256:…`) are never touched; use
+  them only if you accept refreshing them yourself.
 - **Run as non-root.** Drop to a dedicated user before `EXPOSE`.
   Persistent volumes only mount with correct ownership when the
   container is non-root from the start.

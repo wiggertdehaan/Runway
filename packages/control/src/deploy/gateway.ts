@@ -1,4 +1,4 @@
-import { mkdir, writeFile, unlink } from "node:fs/promises";
+import { mkdir, writeFile, unlink, access } from "node:fs/promises";
 import { join } from "node:path";
 import yaml from "js-yaml";
 import bcrypt from "bcryptjs";
@@ -7,15 +7,9 @@ import type { App } from "../db/apps.js";
 const GATEWAY_CONFIG_DIR =
   process.env.GATEWAY_CONFIG_DIR || "/gateway-config";
 
-/**
- * Write the static dashboard route into the shared gateway config
- * directory. Called at control startup so Traefik finds the route
- * as soon as the volume is populated. Idempotent.
- */
-export async function writeDashboardRoute(domain: string): Promise<void> {
-  await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
-
-  const doc = {
+/** The dashboard's route document. Pure, so the matchers can be asserted. */
+export function buildDashboardRouteDoc(domain: string): Record<string, unknown> {
+  return {
     http: {
       routers: {
         control: {
@@ -23,6 +17,24 @@ export async function writeDashboardRoute(domain: string): Promise<void> {
           entryPoints: ["websecure"],
           service: "control",
           tls: { certResolver: "letsencrypt" },
+        },
+        // S23: /auth/verify and /maintenance are for Traefik's own calls
+        // (forwardAuth and the quarantine rewrite reach control through the
+        // service URL, not through this router), so the dashboard's public
+        // address must not serve them. A higher priority than the router
+        // above, and an allow-list that matches no source answers 403.
+        "control-internal": {
+          rule: `Host(\`${domain}\`) && (Path(\`/auth/verify\`) || Path(\`/maintenance\`))`,
+          priority: 100000,
+          entryPoints: ["websecure"],
+          service: "control",
+          tls: { certResolver: "letsencrypt" },
+          middlewares: ["control-internal-deny"],
+        },
+      },
+      middlewares: {
+        "control-internal-deny": {
+          ipAllowList: { sourceRange: ["255.255.255.255/32"] },
         },
       },
       services: {
@@ -34,9 +46,17 @@ export async function writeDashboardRoute(domain: string): Promise<void> {
       },
     },
   };
+}
 
+/**
+ * Write the static dashboard route into the shared gateway config
+ * directory. Called at control startup so Traefik finds the route
+ * as soon as the volume is populated. Idempotent.
+ */
+export async function writeDashboardRoute(domain: string): Promise<void> {
+  await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
   const path = join(GATEWAY_CONFIG_DIR, "dashboard.yml");
-  await writeFile(path, yaml.dump(doc), "utf8");
+  await writeFile(path, yaml.dump(buildDashboardRouteDoc(domain)), "utf8");
 }
 
 export interface AppRouteConfig {
@@ -83,7 +103,16 @@ export function buildAppRouteDoc(cfg: AppRouteConfig): Record<string, unknown> {
   const basicAuthKey = `${routerKey}-basicauth`;
   const forwardAuthKey = `${routerKey}-forwardauth`;
 
+  const stripUserKey = `${routerKey}-stripuser`;
+
   const middlewares: Record<string, unknown> = {};
+  // S23: the app may trust X-Forwarded-User to mean "Runway signed this person
+  // in". Only forwardAuth may set it, so whatever the client sent is dropped
+  // first, on EVERY app (an empty value deletes the header in Traefik). For an
+  // SSO app forwardAuth then sets it from the verified session.
+  middlewares[stripUserKey] = {
+    headers: { customRequestHeaders: { "X-Forwarded-User": "" } },
+  };
   if (useBasicAuth) {
     middlewares[basicAuthKey] = {
       basicAuth: { users: [cfg.basicAuth!.htpasswd] },
@@ -99,7 +128,7 @@ export function buildAppRouteDoc(cfg: AppRouteConfig): Record<string, unknown> {
     };
   }
 
-  const routerMiddlewares: string[] = [];
+  const routerMiddlewares: string[] = [stripUserKey];
   if (useSso) routerMiddlewares.push(forwardAuthKey);
   else if (useBasicAuth) routerMiddlewares.push(basicAuthKey);
 
@@ -107,46 +136,24 @@ export function buildAppRouteDoc(cfg: AppRouteConfig): Record<string, unknown> {
   const allDomains = [cfg.domain];
   if (cfg.customDomain) allDomains.push(cfg.customDomain);
 
-  if (useSso && cfg.customDomain) {
-    // SSO only works on subdomains (session cookie scope). Split
-    // into two routers: subdomain with forwardAuth, custom domain
-    // without.
-    routers[routerKey] = {
-      rule: `Host(\`${cfg.domain}\`)`,
-      entryPoints: ["websecure"],
-      service: routerKey,
-      tls: { certResolver: "letsencrypt" },
-      middlewares: [forwardAuthKey],
-    };
-    routers[`${routerKey}-custom`] = {
-      rule: `Host(\`${cfg.customDomain}\`)`,
-      entryPoints: ["websecure"],
-      service: routerKey,
-      tls: {
-        certResolver: "letsencrypt",
-        domains: allDomains.map((d) => ({ main: d })),
-      },
-    };
-  } else {
-    const hostRule = allDomains
-      .map((d) => `Host(\`${d}\`)`)
-      .join(" || ");
-    const router: Record<string, unknown> = {
-      rule: hostRule,
-      entryPoints: ["websecure"],
-      service: routerKey,
-      tls: {
-        certResolver: "letsencrypt",
-        ...(cfg.customDomain
-          ? { domains: allDomains.map((d) => ({ main: d })) }
-          : {}),
-      },
-    };
-    if (routerMiddlewares.length > 0) {
-      router.middlewares = routerMiddlewares;
-    }
-    routers[routerKey] = router;
-  }
+  // One router for every hostname of the app, so the same middleware
+  // (forwardAuth for SSO apps, basicAuth otherwise) guards all of them.
+  // A separate router per host is how the custom domain once ended up
+  // without SSO; do not split them again.
+  const hostRule = allDomains.map((d) => `Host(\`${d}\`)`).join(" || ");
+  const router: Record<string, unknown> = {
+    rule: hostRule,
+    entryPoints: ["websecure"],
+    service: routerKey,
+    tls: {
+      certResolver: "letsencrypt",
+      ...(cfg.customDomain
+        ? { domains: allDomains.map((d) => ({ main: d })) }
+        : {}),
+    },
+  };
+  router.middlewares = routerMiddlewares;
+  routers[routerKey] = router;
 
   // Build metadata must never be served by an app container. The static
   // preset copies the whole build context into the nginx webroot, so any
@@ -204,6 +211,16 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
   await writeFile(path, yaml.dump(buildAppRouteDoc(cfg)), "utf8");
 }
 
+/** True when the app already has a route file in the gateway config. */
+export async function appRouteExists(appId: string): Promise<boolean> {
+  try {
+    await access(join(GATEWAY_CONFIG_DIR, `${appId}.yml`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function deleteAppRoute(appId: string): Promise<void> {
   const path = join(GATEWAY_CONFIG_DIR, `${appId}.yml`);
   try {
@@ -211,4 +228,61 @@ export async function deleteAppRoute(appId: string): Promise<void> {
   } catch (err: any) {
     if (err.code !== "ENOENT") throw err;
   }
+}
+
+export interface MaintenanceRouteConfig {
+  appId: string;
+  domain: string;
+  customDomain?: string | null;
+}
+
+/**
+ * Traefik config for a QUARANTINED app: the app's hosts are routed to the
+ * control plane's public /maintenance page instead of the (stopped)
+ * container. No SSO/basic-auth: the page carries no app data. Pure, so
+ * the matcher can be asserted in tests.
+ */
+export function buildMaintenanceRouteDoc(
+  cfg: MaintenanceRouteConfig
+): Record<string, unknown> {
+  const routerKey = `app-${cfg.appId}`;
+  const allDomains = [cfg.domain];
+  if (cfg.customDomain) allDomains.push(cfg.customDomain);
+  return {
+    http: {
+      routers: {
+        [routerKey]: {
+          rule: allDomains.map((d) => `Host(\`${d}\`)`).join(" || "),
+          entryPoints: ["websecure"],
+          service: `${routerKey}-maintenance`,
+          tls: {
+            certResolver: "letsencrypt",
+            ...(cfg.customDomain
+              ? { domains: allDomains.map((d) => ({ main: d })) }
+              : {}),
+          },
+          middlewares: [`${routerKey}-maintenance-path`],
+        },
+      },
+      middlewares: {
+        [`${routerKey}-maintenance-path`]: {
+          replacePath: { path: "/maintenance" },
+        },
+      },
+      services: {
+        [`${routerKey}-maintenance`]: {
+          loadBalancer: { servers: [{ url: "http://control:3000" }] },
+        },
+      },
+    },
+  };
+}
+
+/** Replace the app's route file with the maintenance route. */
+export async function writeMaintenanceRoute(
+  cfg: MaintenanceRouteConfig
+): Promise<void> {
+  await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
+  const path = join(GATEWAY_CONFIG_DIR, `${cfg.appId}.yml`);
+  await writeFile(path, yaml.dump(buildMaintenanceRouteDoc(cfg)), "utf8");
 }

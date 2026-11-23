@@ -16,7 +16,14 @@ export type SettingKey =
   | "oauth_google_client_secret"
   | "oauth_microsoft_client_id"
   | "oauth_microsoft_client_secret"
-  | "activity_log_offset";
+  | "activity_log_offset"
+  | "auto_rebuild_enabled"
+  | "auto_rebuild_day"
+  | "auto_rebuild_time"
+  | "auto_rebuild_last_date"
+  | "quarantine_term_days"
+  | "sessions_host_only_v1"
+  | "setup_token";
 
 export function getSetting(key: SettingKey): string | undefined {
   const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as
@@ -41,9 +48,10 @@ export function deleteSetting(key: SettingKey): void {
 
 /**
  * Default and ceiling for the deploy upload limit, in megabytes. The whole
- * tarball is buffered in memory during a deploy (`c.req.arrayBuffer()`), so
- * the ceiling guards against an admin setting a value that risks OOM on the
- * control container. Stored in the settings table as a plain integer.
+ * tarball is still held in memory once it has been received and checked
+ * (the upload itself is streamed to disk under this limit), so the ceiling
+ * guards against an admin setting a value that risks OOM on the control
+ * container. Stored in the settings table as a plain integer.
  */
 export const DEFAULT_MAX_UPLOAD_MB = 100;
 export const MAX_UPLOAD_MB_CEILING = 2048;
@@ -135,4 +143,23 @@ export function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 63);
+}
+
+/**
+ * Grace period (days) between the first sighting of an actively exploited
+ * (KEV) CVE in a running app's runtime packages and quarantine. Fractions
+ * are allowed (a test setup uses minutes); the floor is one minute so a
+ * bad value can never mean "quarantine immediately".
+ */
+export const DEFAULT_QUARANTINE_TERM_DAYS = 7;
+export const MIN_QUARANTINE_TERM_DAYS = 1 / 1440;
+export const MAX_QUARANTINE_TERM_DAYS = 90;
+
+export function clampQuarantineTermDays(parsed: number): number {
+  if (!Number.isFinite(parsed)) return DEFAULT_QUARANTINE_TERM_DAYS;
+  return Math.min(Math.max(parsed, MIN_QUARANTINE_TERM_DAYS), MAX_QUARANTINE_TERM_DAYS);
+}
+
+export function getQuarantineTermDays(): number {
+  return clampQuarantineTermDays(parseFloat(getSetting("quarantine_term_days") ?? ""));
 }

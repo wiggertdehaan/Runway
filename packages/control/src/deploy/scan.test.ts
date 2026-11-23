@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   effectiveThreshold,
   isValidThreshold,
+  parseTrivyOutput,
   THRESHOLDS,
   type Threshold,
 } from "./scan.js";
@@ -48,5 +49,25 @@ describe("effectiveThreshold", () => {
     for (const floor of cases) {
       expect(effectiveThreshold("none", floor, false)).toBe(floor);
     }
+  });
+});
+
+describe("parseTrivyOutput", () => {
+  it("keeps the package type and path, which tell app packages from OS ones", () => {
+    const raw = JSON.stringify({
+      Results: [
+        { Target: "img (alpine 3.24.4)", Class: "os-pkgs", Type: "alpine", Vulnerabilities: [{ VulnerabilityID: "CVE-1", PkgName: "musl", InstalledVersion: "1.2.5", FixedVersion: "1.2.6", Severity: "HIGH" }] },
+        { Target: "Python", Class: "lang-pkgs", Type: "python-pkg", Vulnerabilities: [{ VulnerabilityID: "CVE-2", PkgName: "pillow", InstalledVersion: "12.3.0", FixedVersion: "13.0.0", Severity: "CRITICAL" }] },
+        { Target: "Node.js", Class: "lang-pkgs", Type: "node-pkg", Vulnerabilities: [{ VulnerabilityID: "CVE-3", PkgName: "qs", PkgPath: "app/node_modules/qs/package.json", InstalledVersion: "6.14.2", FixedVersion: "6.16.1", Severity: "medium" }] },
+      ],
+    });
+    const out = parseTrivyOutput(raw);
+    expect(out.map((x) => x.pkgType)).toEqual(["alpine", "python-pkg", "node-pkg"]);
+    expect(out[1].pkgPath).toBeUndefined();
+    expect(out[2]).toMatchObject({ pkg: "qs", pkgPath: "app/node_modules/qs/package.json", severity: "MEDIUM", source: "image" });
+  });
+  it("returns nothing for empty or broken output", () => {
+    expect(parseTrivyOutput("")).toEqual([]);
+    expect(parseTrivyOutput("not json")).toEqual([]);
   });
 });

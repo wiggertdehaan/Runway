@@ -1,31 +1,36 @@
 # Dependabot is still read from the default branch (main), but every
 # PR it opens must target `develop` so our GitFlow stays clean —
 # upgrades flow develop → main via the normal release PR path.
+#
+# One npm entry covers the whole pnpm workspace (root + both packages)
+# so the grouping below spans all three package.json files and the
+# shared lockfile:
+#   - minor + patch updates arrive as ONE grouped PR per week
+#   - major updates are their own group, so a risky jump (a new
+#     @hono/node-server, dockerode, typescript, ...) never blocks or
+#     hides in the routine bump and can be reviewed on its own
 version: 2
 updates:
   - package-ecosystem: npm
-    directory: /
+    directories:
+      - /
+      - /packages/control
+      - /packages/mcp
     schedule:
       interval: weekly
     target-branch: develop
     open-pull-requests-limit: 10
     commit-message:
       prefix: deps
-
-  - package-ecosystem: npm
-    directory: /packages/control
-    schedule:
-      interval: weekly
-    target-branch: develop
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: deps
-
-  - package-ecosystem: npm
-    directory: /packages/mcp
-    schedule:
-      interval: weekly
-    target-branch: develop
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: deps
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      major:
+        patterns:
+          - "*"
+        update-types:
+          - major

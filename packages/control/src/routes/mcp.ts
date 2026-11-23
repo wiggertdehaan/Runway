@@ -2,6 +2,16 @@ import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { getDevTokenByToken, touchDevToken } from "../db/dev-tokens.js";
+import { getUser } from "../db/users.js";
+import { getUserTokenByToken, touchUserToken } from "../db/user-tokens.js";
+import { tokenKindOf } from "../util/token-hash.js";
+import { logDeniedAudit } from "../db/audit.js";
+import { getClientIp } from "../middleware/rate-limit.js";
+import {
+  enforceTokenLimit,
+  guessBlocked,
+  recordWrongKey,
+} from "../middleware/token-limit.js";
 import {
   getSkill,
   getSkillFile,
@@ -12,10 +22,11 @@ import {
 /**
  * Skill-distribution MCP server.
  *
- * Auth: `Authorization: Bearer rwd_<...>` matching a row in
- * `dev_tokens`. The token's `last_used_at` is updated on every
- * successful request so the dashboard can show whether a token is
- * still in active use.
+ * Auth: `Authorization: Bearer rwd_<...>` (a developer token) or
+ * `rwu_<...>` (a user token of any scope: skill text is read-only). Both are
+ * stored as hashes, expire, and can be revoked. The token's `last_used_at` is
+ * updated on every successful request so the dashboard can show whether a
+ * token is still in active use.
  *
  * Transport: stateless Streamable HTTP (single POST returns a JSON
  * response, no SSE session). One transport + one McpServer instance
@@ -90,17 +101,59 @@ function buildServer(): McpServer {
   return server;
 }
 
+/** S12: a refused /mcp request, as one counted row per source and window. */
+function mcpDenied(c: Parameters<typeof getClientIp>[0], reason: string) {
+  try {
+    logDeniedAudit({
+      actorType: "mcp",
+      action: "mcp_auth_denied",
+      ip: getClientIp(c),
+      reason,
+    });
+  } catch (err) {
+    console.error("audit write failed:", (err as Error).message);
+  }
+}
+
 mcpRoutes.all("/mcp", async (c) => {
+  // S21: see apiAuth. Same per-source cap on wrong keys.
+  const blocked = guessBlocked(c, "mcp");
+  if (blocked) return blocked;
+
   const header = c.req.header("Authorization");
   if (!header?.startsWith("Bearer ")) {
+    mcpDenied(c, "missing_header");
     return c.json({ error: "Missing or invalid Authorization header" }, 401);
   }
   const presented = header.slice(7);
-  const tokenRow = getDevTokenByToken(presented);
-  if (!tokenRow) {
-    return c.json({ error: "Invalid developer token" }, 401);
+
+  let limitActor: string;
+  if (tokenKindOf(presented) === "user-token") {
+    const userToken = getUserTokenByToken(presented);
+    const owner = userToken ? getUser(userToken.user_id) : undefined;
+    if (!userToken || !owner) {
+      recordWrongKey(c);
+      mcpDenied(c, "unknown_token");
+      return c.json({ error: "Invalid or expired token" }, 401);
+    }
+    limitActor = `user-token:${userToken.id}`;
+    // S21: everything this route serves is a read of skill text.
+    const limited = enforceTokenLimit(c, limitActor, "read", "mcp");
+    if (limited) return limited;
+    touchUserToken(userToken.id);
+  } else {
+    const tokenRow = getDevTokenByToken(presented);
+    if (!tokenRow) {
+      recordWrongKey(c);
+      mcpDenied(c, "unknown_token");
+      return c.json({ error: "Invalid or expired developer token" }, 401);
+    }
+    // The actor is the token's id (not the token), so it is safe to audit and to count by.
+    limitActor = `mcp-token:${tokenRow.id}`;
+    const limited = enforceTokenLimit(c, limitActor, "read", "mcp");
+    if (limited) return limited;
+    touchDevToken(tokenRow.id);
   }
-  touchDevToken(tokenRow.id);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

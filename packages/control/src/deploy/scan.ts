@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { extractTarSafe, tarLimits } from "./safe-tar.js";
 import { execFileSync } from "node:child_process";
 
 const execFileAsync = promisify(execFile);
@@ -21,6 +22,10 @@ export interface Finding {
   fixedVersion?: string;
   title?: string;
   location?: string;
+  /** Trivy package type ("alpine", "python-pkg", "node-pkg", ...). */
+  pkgType?: string;
+  /** Where the package sits in the image, when Trivy reports it. */
+  pkgPath?: string;
 }
 
 export interface ScanCounts {
@@ -81,7 +86,7 @@ export function emptyCounts(): ScanCounts {
   return { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
 }
 
-function countSeverity(findings: Finding[]): ScanCounts {
+export function countSeverity(findings: Finding[]): ScanCounts {
   const counts = emptyCounts();
   for (const f of findings) {
     switch (f.severity) {
@@ -107,9 +112,11 @@ function normalizeSeverity(raw: unknown): Severity {
 interface TrivyResult {
   Target?: string;
   Class?: string;
+  Type?: string;
   Vulnerabilities?: Array<{
     VulnerabilityID?: string;
     PkgName?: string;
+    PkgPath?: string;
     InstalledVersion?: string;
     FixedVersion?: string;
     Severity?: string;
@@ -130,7 +137,7 @@ interface TrivyResult {
   }>;
 }
 
-function parseTrivyOutput(raw: string): Finding[] {
+export function parseTrivyOutput(raw: string): Finding[] {
   const findings: Finding[] = [];
   if (!raw.trim()) return findings;
 
@@ -153,6 +160,8 @@ function parseTrivyOutput(raw: string): Finding[] {
         fixedVersion: v.FixedVersion,
         title: v.Title,
         location: target || undefined,
+        pkgType: result.Type || undefined,
+        pkgPath: v.PkgPath || undefined,
       });
     }
     for (const s of result.Secrets ?? []) {
@@ -192,10 +201,8 @@ export async function scanSource(tarBuffer: Buffer): Promise<Finding[]> {
   const srcDir = join(workDir, "src");
   try {
     await writeFile(tarPath, tarBuffer);
-    execFileSync("sh", [
-      "-c",
-      `mkdir -p ${srcDir} && tar xf ${tarPath} -C ${srcDir}`,
-    ]);
+    // S06: in-process, entry-checked unpack instead of `sh -c "tar xf"`.
+    await extractTarSafe(tarPath, srcDir, tarLimits(tarBuffer.length));
     const out = await runTrivy([
       "fs",
       "--scanners", "secret,misconfig",

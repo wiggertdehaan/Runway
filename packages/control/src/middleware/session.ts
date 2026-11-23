@@ -1,11 +1,9 @@
 import type { Context, Next } from "hono";
-import { getCookie } from "hono/cookie";
+import { readSessionToken } from "./cookies.js";
 import { getSessionUser } from "../db/sessions.js";
 import { countUsers, isAdmin } from "../db/users.js";
 import type { User } from "../db/users.js";
-import { getApp } from "../db/apps.js";
-
-export const SESSION_COOKIE = "runway_session";
+import { getApp, isAppOwner } from "../db/apps.js";
 
 export type WebEnv = { Variables: { user: User } };
 
@@ -19,7 +17,7 @@ export async function requireSession(c: Context<WebEnv>, next: Next) {
     return c.redirect("/setup");
   }
 
-  const token = getCookie(c, SESSION_COOKIE);
+  const token = readSessionToken(c);
   if (!token) return c.redirect("/login");
 
   const user = getSessionUser(token);
@@ -43,8 +41,9 @@ export async function requireAdmin(c: Context<WebEnv>, next: Next) {
 
 /**
  * Chain after requireSession on /apps/:id[/*]: allow access only when
- * the user is admin or the app was created by them. Apps with a NULL
- * created_by (pre-v0.3 rows) are treated as admin-only.
+ * the user is admin or owns the app (by user id, never by name). Apps
+ * without an owner (pre-v0.3 rows, or the owner was deleted) are
+ * admin-only.
  */
 export async function requireAppAccess(c: Context<WebEnv>, next: Next) {
   const user = c.get("user");
@@ -52,7 +51,7 @@ export async function requireAppAccess(c: Context<WebEnv>, next: Next) {
   if (!user || !id) return c.redirect("/?forbidden=1");
   if (isAdmin(user)) return next();
   const app = getApp(id);
-  if (!app || app.created_by !== user.username) {
+  if (!app || !isAppOwner(user, app)) {
     return c.redirect("/?forbidden=1");
   }
   await next();

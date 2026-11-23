@@ -129,6 +129,36 @@ export interface IdTokenClaims {
   email?: string;
   name?: string;
   nonce?: string;
+  /** Google: the address is owned by the account. Absent for Microsoft. */
+  email_verified?: boolean;
+  /**
+   * Microsoft optional claim "xms_edov": the email domain's owner is
+   * verified. Without it the `email` claim of a Microsoft token is
+   * whatever the tenant admin typed in.
+   */
+  xms_edov?: boolean;
+}
+
+function claimTrue(v: unknown): boolean {
+  return v === true || v === "true" || v === 1 || v === "1";
+}
+
+/**
+ * Is the `email` claim proven to belong to this person?
+ *
+ * Google sends `email_verified`. Microsoft sends no such claim, and its
+ * /common endpoint lets anyone create a tenant and put any address on a
+ * user, so for Microsoft we accept only the optional `xms_edov` claim and
+ * otherwise fail closed.
+ */
+export function isEmailVerified(
+  provider: "google" | "microsoft",
+  claims: IdTokenClaims
+): boolean {
+  if (!claims.email) return false;
+  return provider === "google"
+    ? claims.email_verified === true
+    : claims.xms_edov === true;
 }
 
 /**
@@ -147,5 +177,7 @@ export function decodeIdToken(idToken: string): IdTokenClaims {
     email: payload.email ?? undefined,
     name: payload.name ?? undefined,
     nonce: typeof payload.nonce === "string" ? payload.nonce : undefined,
+    email_verified: claimTrue(payload.email_verified),
+    xms_edov: claimTrue(payload.xms_edov),
   };
 }

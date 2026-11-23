@@ -44,6 +44,14 @@ If `fixedVersion` is empty:
   - If the package is unused in your code path, see if you can
     drop the dependency entirely.
 
+Check the `FROM` line first. If it pins an exact patch
+(`nginx:1.30.6-alpine`, `node:24.1.0-slim`), the CVE is probably already
+fixed in a newer patch of the same image. Loosen it to the minor tag
+(`nginx:1.30-alpine`, `node:24-slim`) and redeploy; that is almost
+always the whole fix and keeps future patches coming. (Runway rebuilds
+also raise exact patch pins automatically, but an explicit minor pin is
+clearer and works for normal deploys too.)
+
 Common base-image swap that resolves a cluster of HIGH findings:
 
 ```diff
