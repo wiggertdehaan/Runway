@@ -37,3 +37,28 @@ describe("design tokens", () => {
     expect(declarations({ a: "#fff" })).toBe("--a:#fff;");
   });
 });
+
+describe("app shell", () => {
+  const rule = (css: string, selector: string, from = 0): string => {
+    const i = css.indexOf(selector + "{", from);
+    expect(i).toBeGreaterThanOrEqual(0);
+    return css.slice(i, css.indexOf("}", i));
+  };
+
+  it("paints the sidebar column on the grid itself, so it runs the full page height", async () => {
+    const { APP_CSS } = await import("./styles.js");
+    const shell = rule(APP_CSS, ".shell");
+    // The sticky .side is only as tall as the viewport; the colour of its column
+    // must not depend on that (full-page captures, overscroll, zoomed-out pages).
+    expect(shell).toContain("linear-gradient(to right,var(--side)");
+    expect(shell).toContain("var(--sw)");
+    expect(shell).toContain("min-height:100dvh");
+    expect(rule(APP_CSS, ".side")).toContain("position:sticky");
+  });
+
+  it("drops the column background in the top-bar layout below 900px", async () => {
+    const { APP_CSS } = await import("./styles.js");
+    const mobile = APP_CSS.slice(APP_CSS.indexOf("@media (max-width:899px)"));
+    expect(rule(mobile, "  .shell")).toContain("background:none");
+  });
+});
