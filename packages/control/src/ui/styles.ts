@@ -375,6 +375,27 @@ button.ghost:hover{background:var(--bg2);opacity:1}
 @media(max-width:600px){.maint-h{flex-direction:column}.swr{padding:0.85rem}}
 @media(prefers-reduced-motion:reduce){.trk,.trk::after{transition:none}}
 .section-title{font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;margin-top:1.25rem;color:var(--mu)}
+.person{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:flex-start}
+.person-main{min-width:0;flex:1 1 16rem}
+.person-head{display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap}
+.person-head h2{margin:0;overflow-wrap:anywhere}
+.person-actions{display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end}
+.inline-form{margin:0}
+.reset-2fa label{display:block;margin-bottom:0.25rem}
+.reset-2fa input{width:12rem;max-width:100%}
+@media(max-width:699px){.person-actions{width:100%}.reset-2fa{width:100%}.reset-2fa .flex{flex-wrap:wrap}.reset-2fa input{flex:1 1 10rem;width:auto}}
+.empty{padding:1.5rem}
+.empty a,.hint a{color:var(--tx);text-decoration:underline;text-underline-offset:2px}
+.empty-hero{text-align:center;margin-bottom:1.5rem}
+.empty-hero .hint{max-width:34rem;margin:0.5rem auto 1rem}
+.steps{list-style:none;margin:0 0 1.25rem;padding:0;display:grid;gap:0.75rem}
+.steps li{display:flex;gap:0.75rem;align-items:flex-start}
+.steps .n{flex:none;width:1.6rem;height:1.6rem;border-radius:50%;border:1px solid var(--ctl);display:inline-flex;align-items:center;justify-content:center;font-size:0.8rem;font-weight:600;font-variant-numeric:tabular-nums}
+.steps small{display:block;color:var(--mu);font-size:var(--fs-s);margin-top:0.1rem}
+.empty-opt{border-top:1px solid var(--line);padding-top:1rem}
+.empty-opt h3{font-size:0.95rem;margin-bottom:0.25rem}
+.cp{display:flex;gap:0.5rem;align-items:flex-start;flex-wrap:wrap}
+.cp code{flex:1 1 16rem;min-width:0;overflow-wrap:anywhere;background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:0.5rem 0.65rem;font-size:0.8rem}
 `;
 
 export const APP_CSS = [themeCss(), ALIASES, BASE, SHELL, COMPONENTS].join("\n");
