@@ -16,6 +16,13 @@ const apps = [
 const titles = (items: PaletteItem[]) => items.map((i) => i.t);
 
 describe("buildPaletteItems", () => {
+  it("offers the overview to everyone, first", () => {
+    for (const admin of [true, false]) {
+      const items = buildPaletteItems({ admin, apps });
+      expect(items[0]).toMatchObject({ g: "Go to", t: "Overview", h: "/overview" });
+    }
+  });
+
   it("gives an owner no admin-only pages", () => {
     const t = titles(buildPaletteItems({ admin: false, apps }));
     expect(t).toEqual(expect.arrayContaining(["Apps", "Security", "Account"]));

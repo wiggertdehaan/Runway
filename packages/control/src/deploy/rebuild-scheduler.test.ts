@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { localParts, parseTime, normalizeTime, isRebuildDue } from "./rebuild-scheduler.js";
+import {
+  localParts,
+  parseTime,
+  normalizeTime,
+  isRebuildDue,
+  nextScheduledRebuild,
+  zonedToUtc,
+  formatScheduled,
+} from "./rebuild-scheduler.js";
 
 const sun5 = { enabled: true, day: 0, time: "05:00" };
 
@@ -47,5 +55,54 @@ describe("isRebuildDue", () => {
   });
   it("disabled never fires", () => {
     expect(isRebuildDue({ ...sun5, enabled: false }, at("2026-11-22", 0, 600), undefined)).toBe(false);
+  });
+});
+
+describe("zonedToUtc / formatScheduled", () => {
+  it("winter: Sunday 05:00 in Amsterdam is 04:00Z", () => {
+    expect(new Date(zonedToUtc("2026-11-29", 300)).toISOString()).toBe("2026-11-29T04:00:00.000Z");
+  });
+  it("summer: Sunday 05:00 in Amsterdam is 03:00Z", () => {
+    expect(new Date(zonedToUtc("2026-06-07", 300)).toISOString()).toBe("2026-06-07T03:00:00.000Z");
+  });
+  it("is right on the days the clocks change", () => {
+    // 2026-03-29 02:00 -> 03:00 (spring forward), 2026-10-25 03:00 -> 02:00 (fall back)
+    expect(new Date(zonedToUtc("2026-03-29", 300)).toISOString()).toBe("2026-03-29T03:00:00.000Z");
+    expect(new Date(zonedToUtc("2026-10-25", 300)).toISOString()).toBe("2026-10-25T04:00:00.000Z");
+  });
+  it("formats in the schedule's timezone", () => {
+    expect(formatScheduled(Date.parse("2026-11-29T04:00:00Z"))).toBe("Sun 29 Nov 05:00");
+    expect(formatScheduled(Date.parse("2026-06-07T03:00:00Z"))).toBe("Sun 7 Jun 05:00");
+  });
+});
+
+describe("nextScheduledRebuild", () => {
+  const d = (iso: string) => new Date(iso);
+  it("is off when switched off", () => {
+    expect(nextScheduledRebuild({ ...sun5, enabled: false }, d("2026-11-23T12:00:00Z"), undefined)).toEqual({ kind: "off" });
+  });
+  it("finds the coming Sunday from a Monday", () => {
+    const n = nextScheduledRebuild(sun5, d("2026-11-23T12:00:00Z"), undefined);
+    expect(n).toEqual({ kind: "at", at: Date.parse("2026-11-29T04:00:00Z") });
+  });
+  it("is later today on the right day before the time", () => {
+    const n = nextScheduledRebuild(sun5, d("2026-11-29T03:00:00Z"), undefined);
+    expect(n).toEqual({ kind: "at", at: Date.parse("2026-11-29T04:00:00Z") });
+  });
+  it("is due when the time has passed and today has not run yet", () => {
+    expect(nextScheduledRebuild(sun5, d("2026-11-29T07:00:00Z"), "2026-11-22")).toEqual({ kind: "due" });
+  });
+  it("is next week once today has run", () => {
+    const n = nextScheduledRebuild(sun5, d("2026-11-29T07:00:00Z"), "2026-11-29");
+    expect(n).toEqual({ kind: "at", at: Date.parse("2026-12-06T04:00:00Z") });
+  });
+  it("counts days in Amsterdam time, not UTC (Saturday 23:30Z is already Sunday there)", () => {
+    // 2026-11-28 23:30Z = Sunday 00:30 local, before 05:00: later the same Sunday
+    const n = nextScheduledRebuild(sun5, d("2026-11-28T23:30:00Z"), undefined);
+    expect(n).toEqual({ kind: "at", at: Date.parse("2026-11-29T04:00:00Z") });
+  });
+  it("crosses a clock change without skipping the week", () => {
+    const n = nextScheduledRebuild(sun5, d("2026-10-24T12:00:00Z"), undefined);
+    expect(n).toEqual({ kind: "at", at: Date.parse("2026-10-25T04:00:00Z") });
   });
 });

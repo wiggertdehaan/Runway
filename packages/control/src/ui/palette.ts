@@ -33,7 +33,8 @@ export interface PaletteApp {
 /** The entries one viewer may see. Pure: easy to test per role. */
 export function buildPaletteItems(opts: { admin: boolean; apps: PaletteApp[] }): PaletteItem[] {
   const items: PaletteItem[] = [
-    { g: "Go to", t: "Apps", h: "/", k: "home overview" },
+    { g: "Go to", t: "Overview", h: "/overview", k: "inbox attention needs action statistics summary" },
+    { g: "Go to", t: "Apps", h: "/", k: "home list" },
     { g: "Go to", t: "Security", h: "/security", k: "kev quarantine vulnerabilities risk" },
   ];
   if (opts.admin) {

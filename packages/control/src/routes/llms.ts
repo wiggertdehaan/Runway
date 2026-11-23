@@ -938,7 +938,7 @@ The first call (no \`since\`) returns the latest 20 events and \`next_cursor\`.
 Keep \`next_cursor\` and send it as \`since\` next time: you get only what is
 new, oldest first (\`has_more\` says there is another page). The server
 remembers nothing about you. If the cursor is older than the events the server
-keeps (30 days, 500 per app) the answer has \`cursor_expired: true\` and the
+keeps (60 days, 500 per app) the answer has \`cursor_expired: true\` and the
 oldest events that remain; events in between are lost.
 
 | Type | Codes |

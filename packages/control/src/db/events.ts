@@ -24,7 +24,7 @@ import {
 /** Longest the log keeps an event, and the most it keeps per app. */
 export function eventRetentionDays(): number {
   const n = Number(process.env.EVENTS_RETENTION_DAYS);
-  return Number.isFinite(n) && n >= 1 && n <= 3650 ? Math.floor(n) : 30;
+  return Number.isFinite(n) && n >= 1 && n <= 3650 ? Math.floor(n) : 60;
 }
 export function eventMaxPerApp(): number {
   const n = Number(process.env.EVENTS_MAX_PER_APP);
@@ -162,6 +162,29 @@ export function listEvents(opts: ListOptions): EventPage {
   const events = page.map(buildEventView).filter((e): e is EventView => e !== null);
   const nextCursor = page.length > 0 ? page[page.length - 1]!.id : since;
   return { events, hasMore, cursorExpired: expired, nextCursor };
+}
+
+/**
+ * Just (app, time, code) of every event since `sinceMs` for the given apps,
+ * oldest first. The overview counts and orders these; it never needs the
+ * detail, so no detail is read.
+ */
+export function listEventCodes(
+  appIds: string[],
+  sinceMs: number
+): Array<{ app_id: string; ts: string; code: string }> {
+  if (appIds.length === 0) return [];
+  return db
+    .prepare(
+      `SELECT app_id, ts, code FROM app_events
+       WHERE ts >= ? AND app_id IN (SELECT value FROM json_each(?))
+       ORDER BY id ASC`
+    )
+    .all(new Date(sinceMs).toISOString(), JSON.stringify(appIds)) as Array<{
+    app_id: string;
+    ts: string;
+    code: string;
+  }>;
 }
 
 export function getEventRow(id: number): EventRow | undefined {
