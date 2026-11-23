@@ -202,6 +202,31 @@ p.sec-ok{border:1px solid var(--line);border-left:3px solid var(--ok);border-rad
   .sec-tbl .sec-row td[data-label]:not(.sc-app)::before{content:attr(data-label);display:block;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--mu)}
   .sec-tbl .sc-act{padding-top:0.5rem}
 }
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.rr-head{display:flex;gap:1rem;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;margin-bottom:0.5rem}
+.rr-head h1{margin-bottom:0.25rem}
+.rr-lead{margin:0;max-width:42rem}
+.rr-how{margin:0 0 0.5rem}
+.rr-tiles{margin-bottom:1rem}
+.rr-tbl td{vertical-align:top}
+.rr-what{max-width:36rem}
+.rr-line{display:block;margin-bottom:0.2rem;overflow-wrap:anywhere}
+.rr-why{color:var(--mu)}
+.rr-scan{white-space:nowrap}
+.rr-scan-better{color:var(--ok)}
+.rr-scan-worse{color:var(--err)}
+.rr-more{margin-top:0.3rem;font-size:0.8rem}
+.rr-more summary{cursor:pointer;color:var(--mu)}
+.rr-more ul{margin:0.3rem 0 0;padding-left:1.1rem}
+.rr-more code{font-size:0.75rem;overflow-wrap:anywhere}
+.rr-earlier{border:1px solid var(--line);border-radius:var(--r3);background:var(--bg);margin-bottom:0.5rem;padding:0.6rem 0.9rem}
+.rr-earlier summary{cursor:pointer;overflow-wrap:anywhere}
+.rr-earlier[open] summary{margin-bottom:0.75rem}
+@media (max-width:699px){
+  .rr-head form,.rr-head button{width:100%}
+  .rr-what{max-width:none}
+  .rr-tbl .rr-scan{white-space:normal}
+}
 .overflow-menu{position:relative}
 .overflow-menu summary{list-style:none;cursor:pointer;color:var(--mu);font-size:1.1rem;padding:0.1rem 0.4rem;border-radius:4px;line-height:1}
 .overflow-menu summary:hover{color:var(--tx);background:var(--line)}

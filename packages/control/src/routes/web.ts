@@ -20,6 +20,7 @@ import {
   renderRebuildLine,
 } from "../ui/app-page.js";
 import { renderMaintenance } from "../ui/maintenance.js";
+import { renderEarlierRun, renderRunResult, runHeading } from "../ui/rebuild-result.js";
 
 const APP_VERSION = (() => {
   try {
@@ -2614,97 +2615,6 @@ webRoutes.post("/settings/prune-build-cache", async (c) => {
 
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-const OUTCOME_BADGE: Record<string, string> = {
-  rebuilt: "badge-running",
-  rolled_back: "badge-stopped",
-  blocked: "badge-stopped",
-  failed: "badge-stopped",
-  skipped: "badge-stopped",
-};
-
-function renderCounts(x: RebuildAppResult["before"]): string {
-  if (!x) return '<span class="meta">n/a</span>';
-  const c = x.counts;
-  return `${c.critical}C / ${c.high}H / ${c.medium}M &middot; <strong>${x.kev} KEV</strong>`;
-}
-
-function renderEscalation(r: RebuildAppResult): string {
-  return (r.escalation ?? [])
-    .map((e) => {
-      const tag =
-        e.kind === "minor" && e.outcome === "applied"
-          ? '<span class="badge badge-running">auto-minor</span>'
-          : e.kind === "major"
-            ? '<span class="badge badge-building">major available</span>'
-            : `<span class="badge badge-stopped">minor ${escapeHtml(e.outcome)}</span>`;
-      return `<div style="margin-bottom:0.25rem">${tag} ${escapeHtml(e.detail)}</div>`;
-    })
-    .join("");
-}
-
-const DEP_OUTCOME_BADGE: Record<string, string> = {
-  applied: "badge-running",
-  ineffective: "badge-building",
-  blocked: "badge-stopped",
-  unhealthy: "badge-stopped",
-  failed: "badge-stopped",
-};
-
-/** Dependency updates of one rebuild: what was raised, and what was not. */
-function renderDeps(r: RebuildAppResult): string {
-  return (r.deps ?? [])
-    .map((d) => {
-      if (d.outcome === "skipped") {
-        const what = d.to ? `${d.pkg} ${d.to}` : d.pkg;
-        return `<div style="margin-bottom:0.25rem"><span class="badge badge-stopped">dependency skipped</span> ${escapeHtml(what)}: ${escapeHtml(d.detail ?? "")}</div>`;
-      }
-      const label =
-        d.outcome === "applied"
-          ? "dependency updated"
-          : d.outcome === "ineffective"
-            ? "dependency raised, finding remains"
-            : `dependency ${d.outcome}`;
-      const move = `${escapeHtml(d.pkg)} ${escapeHtml(d.from)} &rarr; ${escapeHtml(d.to)}${d.kind === "major" ? " (major)" : ""}`;
-      const why = d.outcome === "applied" || !d.detail ? "" : `: ${escapeHtml(d.detail)}`;
-      return `<div style="margin-bottom:0.25rem"><span class="badge ${DEP_OUTCOME_BADGE[d.outcome] ?? ""}">${escapeHtml(label)}</span> ${move}${why}</div>`;
-    })
-    .join("");
-}
-
-function renderBases(r: RebuildAppResult): string {
-  const lines = (r.base_images ?? []).map((b) => {
-    const short = b.image.replace(/^docker\.io\/(library\/)?/, "");
-    return `<div style="font-family:monospace;font-size:0.72rem" title="${escapeHtml(b.digest)}">${escapeHtml(short)}${baseBadge(b)}</div>`;
-  });
-  if (lines.length === 0 && r.patched?.length) {
-    // Build never produced a log (e.g. failed): still say what we tried.
-    return r.patched.map((p) => `<div style="font-family:monospace;font-size:0.72rem">tried ${escapeHtml(p.from)} &rarr; ${escapeHtml(p.to)}</div>`).join("");
-  }
-  return lines.join("") || "&mdash;";
-}
-
-function renderRebuildResults(run: RebuildRun): string {
-  if (run.results.length === 0) {
-    return `<p class="meta">${run.status === "running" ? "Starting&hellip;" : "No apps needed a rebuild."}</p>`;
-  }
-  const rows = run.results
-    .map(
-      (r) => `<tr>
-        <td>${escapeHtml(r.app_name ?? r.app_id)}</td>
-        <td><span class="badge ${OUTCOME_BADGE[r.outcome] ?? ""}">${escapeHtml(r.outcome.replace("_", " "))}</span></td>
-        <td>${renderCounts(r.before)}</td>
-        <td>${renderCounts(r.after)}</td>
-        <td class="meta">${renderBases(r)}</td>
-        <td class="meta">${renderEscalation(r)}${renderDeps(r)}${escapeHtml(r.detail ?? "")}${r.duration_s !== undefined ? ` (${r.duration_s}s)` : ""}</td>
-      </tr>`
-    )
-    .join("");
-  return `<table>
-    <thead><tr><th>App</th><th>Result</th><th>Before</th><th>After</th><th>Base image</th><th>Note</th></tr></thead>
-    <tbody>${rows}</tbody>
-  </table>`;
-}
-
 webRoutes.get("/rebuild", async (c) => {
   const user = c.get("user");
   const schedule = readSchedule();
@@ -2719,26 +2629,22 @@ webRoutes.get("/rebuild", async (c) => {
   const dayOptions = WEEKDAY_NAMES.map(
     (n, i) => `<option value="${i}"${i === schedule.day ? " selected" : ""}>${n}</option>`
   ).join("");
-  const history = runs
-    .slice(1)
-    .map(
-      (r) => `<details style="margin-top:0.5rem"><summary class="meta">Run #${r.id} &middot; ${escapeHtml(r.trigger)} &middot; ${escapeHtml(formatRelative(r.started_at))}</summary>${renderRebuildResults(r)}</details>`
-    )
-    .join("");
+  const rel = { relative: (iso: string) => formatRelative(iso) };
+  const history = runs.slice(1).map((r) => renderEarlierRun(r, rel)).join("");
 
   const termMs = getQuarantineTermDays() * 86_400_000;
   const qRows = listQuarantine();
   const quarantineTable = qRows.length
-    ? `<table style="margin-top:1rem"><thead><tr><th>App</th><th>State</th><th>Actively exploited</th><th>Term ends</th><th>Exemption</th></tr></thead><tbody>${qRows
+    ? `<table class="apps-tbl sec-tbl" style="margin-top:1rem" aria-label="Apps with an actively exploited vulnerability"><thead><tr><th>App</th><th>State</th><th>Actively exploited</th><th>Term ends</th><th>Exemption</th></tr></thead><tbody>${qRows
         .map((q) => {
           const a = getApp(q.app_id);
           const ex = getActiveExemption(q.app_id);
-          return `<tr>
-            <td><a href="/apps/${encodeURIComponent(q.app_id)}#quarantine">${escapeHtml(a?.name ?? q.app_id)}</a></td>
-            <td><span class="badge ${q.state === "quarantined" ? "badge-quarantined" : "badge-building"}">${q.state === "quarantined" ? "quarantined" : "term running"}</span></td>
-            <td class="meta">${escapeHtml(Object.keys(q.kev_first_seen).join(", "))}</td>
-            <td class="meta">${escapeHtml(fmtUtc(deadlineOf(q, termMs)))}</td>
-            <td class="meta">${ex ? escapeHtml(`until ${fmtUtc(ex.until)}: ${ex.reason}`) : "&mdash;"}</td>
+          return `<tr class="sec-row ${q.state === "quarantined" ? "sec-row-err" : "sec-row-warn"}">
+            <td class="sc-app" data-label="App"><a class="app-name" href="/apps/${encodeURIComponent(q.app_id)}#quarantine">${escapeHtml(a?.name ?? q.app_id)}</a></td>
+            <td class="sc-state" data-label="State"><span class="tag ${q.state === "quarantined" ? "tag-err" : "tag-warn"}">${q.state === "quarantined" ? "Offline" : "Term running"}</span></td>
+            <td class="sc-cve" data-label="Actively exploited"><code>${escapeHtml(Object.keys(q.kev_first_seen).join(", "))}</code></td>
+            <td class="meta" data-label="Term ends">${escapeHtml(fmtUtc(deadlineOf(q, termMs)))}</td>
+            <td class="meta" data-label="Exemption">${ex ? escapeHtml(`until ${fmtUtc(ex.until)}: ${ex.reason}`) : "&mdash;"}</td>
           </tr>`;
         })
         .join("")}</tbody></table>`
@@ -2750,34 +2656,38 @@ webRoutes.get("/rebuild", async (c) => {
       `
       ${running ? '<meta http-equiv="refresh" content="10" />' : ""}
       <div class="container">
-        <h1>Rebuild</h1>
-        ${flash}
-        <div class="card">
-          <h2>Rebuild all apps</h2>
-          <p class="meta">
-            Rebuilds every deployed app from its stored source <strong>without the BuildKit cache</strong>,
-            one after another. Exact patch pins in <code>FROM</code> (e.g. <code>nginx:1.30.6-alpine</code>) are raised to the newest
-            patch of the same minor in a build-time copy (per-app opt-out). A rebuild goes live only if it is not worse than the
-            running version (no new critical, no new actively exploited CVE) and the new container passes its health check;
-            otherwise the old version keeps running and the reason is shown here. A container that fails its health check is
-            replaced by the previous deploy automatically. Takes a few minutes per app; the live apps keep
-            serving until their own swap.
-          </p>
+        <div class="rr-head">
+          <div>
+            <h1>Rebuild</h1>
+            <p class="meta rr-lead">Keeps every app on the newest safe base image and dependencies. Apps are rebuilt one after another; live apps keep serving until their own swap.</p>
+          </div>
           <form method="POST" action="/rebuild/run" onsubmit="return confirm('Rebuild all apps now?')">
             <button type="submit" style="width:auto"${running ? " disabled" : ""}>${running ? "Run in progress&hellip;" : "Rebuild all apps"}</button>
           </form>
         </div>
+        ${flash}
+        <details class="attn-how rr-how">
+          <summary>How a rebuild works</summary>
+          <p class="meta">
+            Each app is rebuilt from its stored source <strong>without the BuildKit cache</strong>. Exact patch pins in
+            <code>FROM</code> (e.g. <code>nginx:1.30.6-alpine</code>) are raised to the newest patch of the same minor in a
+            build-time copy (per-app opt-out). A rebuild goes live only if it is not worse than the running version (no new
+            critical, no new actively exploited CVE) and the new container passes its health check; otherwise the old version
+            keeps running and the reason is shown here. A container that fails its health check is replaced by the previous
+            deploy automatically. Critical and high are the findings before and after; actively exploited (CISA KEV) CVEs are
+            listed when there are any.
+          </p>
+        </details>
 
-        <div class="card">
-          <h2>${latest ? `Latest run #${latest.id}` : "No runs yet"}</h2>
-          ${
-            latest
-              ? `<p class="meta">${escapeHtml(latest.trigger)} &middot; started ${escapeHtml(formatRelative(latest.started_at))} &middot; ${latest.status === "running" ? "<strong>running</strong>" : "finished"}. Before/after = critical / high / medium findings and actively exploited (CISA KEV) CVEs; "before" is a fresh scan of the version that was running.</p>${renderRebuildResults(latest)}`
-              : '<p class="meta">Nothing has been rebuilt yet.</p>'
-          }
-          ${history}
-        </div>
+        <h2 class="sec-h">${latest ? `Run #${latest.id} result` : "No runs yet"}</h2>
+        ${
+          latest
+            ? `${runHeading(latest, rel)}${renderRunResult(latest, rel)}`
+            : '<p class="meta">Nothing has been rebuilt yet.</p>'
+        }
+        ${history ? `<h2 class="sec-h">Earlier runs</h2>${history}` : ""}
 
+        <h2 class="sec-h">Settings</h2>
         <div class="card">
           <h2>Automatic weekly rebuild</h2>
           <p class="meta">
@@ -2796,7 +2706,7 @@ webRoutes.get("/rebuild", async (c) => {
         </div>
 
         <div class="card">
-          <h2>KEV quarantine</h2>
+          <h2>KEV quarantine term</h2>
           <p class="meta">
             An actively exploited CVE (CISA KEV) in a running app's runtime packages starts a term and notifies the
             owner and the webhook on day 0. If it is still there when the term ends and one last rebuild (with minor
