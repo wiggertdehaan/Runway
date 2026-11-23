@@ -3,6 +3,7 @@ import { logger } from "hono/logger";
 import { securityHeaders } from "./middleware/security.js";
 import { verifyCsrf } from "./middleware/csrf.js";
 import { apiRateLimit } from "./middleware/rate-limit.js";
+import { assetRoutes } from "./routes/assets.js";
 import { apiRoutes } from "./routes/api.js";
 import { llmsRoutes } from "./routes/llms.js";
 import { mcpRoutes } from "./routes/mcp.js";
@@ -27,6 +28,9 @@ app.route("/", mcpRoutes);
 // must be registered before the web routes so its path is matched
 // instead of falling through to the session-guarded dashboard.
 app.route("/", llmsRoutes);
+
+// Self-hosted static assets (htmx). Public, before the session-guarded web routes.
+app.route("/", assetRoutes);
 
 // OAuth and forward-auth routes (before web so /auth/* matches first)
 app.route("/", oauthRoutes);
