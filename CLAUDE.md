@@ -376,6 +376,22 @@ without knowing why.
   need headroom: raise `RUNWAY_PIDS_LIMIT` before relaxing a profile.
 - Out of scope here: control as non-root and BuildKit privileged (S07, S16).
 
+### The second factor has a per-user limit (S09)
+
+`auth/twofa-limit.ts`. Every 2FA guess (authenticator code or backup code)
+is charged to the USER in the `twofa_attempts` table BEFORE the code is
+looked at, by `verifySecondFactor()` in `routes/web.ts`. The sign-in and
+every signed-in action that asks for a code (turn 2FA off, new backup codes,
+an admin resetting someone else's 2FA) use that one function and share one
+counter. The 5th wrong code locks for 1 minute, the 6th for 5, the 7th to 9th
+for 15, and from the 10th an hour (plus an `2fa_bruteforce_suspected` audit
+line). A correct password does NOT reset it; a correct code, an admin
+unlock (Users page) or 24 hours without a failure does. While a lock runs the
+code is not looked at at all, so a correct code is refused like a wrong one.
+Do not add a new place that calls `verifyAndConsumeTotp` for a signed-in or
+pre-auth user without going through `verifySecondFactor`. The per-IP limit on
+the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
+
 ### Uploads are streamed to disk and checked before use (S06)
 - `POST /api/v1/app/deploy` streams the body to `UPLOAD_DIR` (default
   `<db dir>/uploads`, on the data volume: `/tmp` is a tmpfs, i.e. RAM) with a

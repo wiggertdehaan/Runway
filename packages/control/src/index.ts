@@ -12,6 +12,7 @@ import { listApps } from "./db/apps.js";
 import { appContainerName } from "./deploy/index.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
+import { pruneAttempts } from "./auth/twofa-limit.js";
 import { refreshDb } from "./deploy/scan.js";
 import { startActivityTailer } from "./deploy/activity-tailer.js";
 import { startPeriodicScanner } from "./deploy/periodic-scanner.js";
@@ -35,6 +36,7 @@ startActivityTailer();
 setInterval(() => {
   deleteExpiredSessions();
   cleanupExpiredEntries();
+  pruneAttempts();
 }, 60 * 60 * 1000);
 deleteExpiredSessions();
 

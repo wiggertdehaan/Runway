@@ -144,6 +144,27 @@ export function migrate() {
     );
   `);
 
+  // S09: failed second-factor attempts per user. Kept in the database (not
+  // in memory) so a restart does not hand an attacker a fresh set of guesses,
+  // and keyed on the user (not the IP) so a password-holder cannot reset it
+  // by signing in again. See auth/twofa-limit.ts for the schedule.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS twofa_attempts (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      failures INTEGER NOT NULL DEFAULT 0,
+      last_failure_at INTEGER NOT NULL DEFAULT 0,
+      locked_until INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  // S09: failed attempts against one pre-auth session. After a handful the
+  // session is destroyed, so the attacker must enter the password again.
+  const preauthCols = db.prepare("PRAGMA table_info(preauth_sessions)").all() as Array<{
+    name: string;
+  }>;
+  if (!preauthCols.some((c) => c.name === "failures")) {
+    db.exec(`ALTER TABLE preauth_sessions ADD COLUMN failures INTEGER NOT NULL DEFAULT 0`);
+  }
+
   // Upgrade legacy users tables so existing installations pick up
   // the totp columns. ADD COLUMN is supported by SQLite.
   const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{

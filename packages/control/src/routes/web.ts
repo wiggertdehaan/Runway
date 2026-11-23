@@ -96,9 +96,20 @@ import {
   createPreauthSession,
   deletePreauthSession,
   getPreauthUserId,
+  recordPreauthFailure,
 } from "../db/preauth.js";
 import { generateTotpSecret, totpUri } from "../auth/totp.js";
 import { verifyAndConsumeTotp } from "../db/totp-history.js";
+import {
+  MAX_FAILURES_PER_PREAUTH,
+  SEVERE_AT,
+  beginAttempt,
+  lockRemainingSeconds,
+  lockedUsers,
+  recordSuccess as recordTwoFactorSuccess,
+  unlock as unlockTwoFactor,
+  waitText,
+} from "../auth/twofa-limit.js";
 import { verifyPassword } from "../auth/password.js";
 import {
   consumeBackupCode,
@@ -521,16 +532,78 @@ webRoutes.post("/login", async (c) => {
 
 // ── Second factor ────────────────────────────────────────
 
+// The per-IP limit on second-factor guesses has its own key, so a correct
+// password (which clears the login counter) does not wipe it. It is generous
+// on purpose: one office behind one address must not lock itself out. The
+// per-user counter (auth/twofa-limit.ts) is the real brake.
+const TWOFA_IP_SCOPE = (ip: string) => `2fa:${ip}`;
+const TWOFA_IP_MAX = 30;
+
+/**
+ * Check a second factor for a user, charging the attempt to that user
+ * BEFORE the code is looked at (S09). Used by the sign-in and by every
+ * signed-in action that asks for a code (turn 2FA off, new backup codes,
+ * reset someone else's 2FA), so a hijacked session cannot be used to guess
+ * either.
+ *
+ *  - "locked": too many failures. The code was not even looked at, so a
+ *    correct code gets the same answer as a wrong one.
+ *  - "bad": wrong, malformed or already used. All of these look the same.
+ */
+async function verifySecondFactor(
+  user: User,
+  raw: string,
+  opts: { allowBackup: boolean; ip: string; via?: string }
+): Promise<"ok" | "bad" | "locked"> {
+  const begin = beginAttempt(user.id);
+  if (!begin.allowed) return "locked";
+
+  const code = raw.replace(/\s+/g, "");
+  let ok = false;
+  if (/^\d{6}$/.test(code)) {
+    ok = verifyAndConsumeTotp(user.id, user.totp_secret!, code);
+  } else if (opts.allowBackup) {
+    ok = await consumeBackupCode(user.id, code);
+  }
+  if (ok) {
+    recordTwoFactorSuccess(user.id);
+    return "ok";
+  }
+
+  const where = `IP: ${opts.ip}${opts.via ? `, ${opts.via}` : ""}`;
+  logAudit(user.id, user.username, "2fa_failed", { detail: where });
+  if (begin.lockSeconds > 0) {
+    logAudit(user.id, user.username, "2fa_locked", {
+      detail: `locked for ${waitText(begin.lockSeconds)} after ${begin.failures} failed attempts; ${where}`,
+    });
+  }
+  if (begin.failures === SEVERE_AT) {
+    logAudit(user.id, user.username, "2fa_bruteforce_suspected", {
+      detail: `${begin.failures} failed second-factor attempts in a row; an administrator can lift the lock on the Users page; ${where}`,
+    });
+  }
+  return "bad";
+}
+
 webRoutes.get("/login/2fa", (c) => {
   const token = getCookieValue(c, PREAUTH_COOKIE);
   if (!token || !getPreauthUserId(token)) return c.redirect("/login");
   const error = c.req.query("error");
   const locked = c.req.query("locked");
   const ip = getClientIp(c);
-  const remaining = isRateLimited(ip) ? remainingLockoutSeconds(ip) : 0;
+  const userId = getPreauthUserId(token);
+  // The per-user lock (S09) is the one that matters; the per-IP limit is a
+  // second line of defence with its own scope so it is not wiped by a
+  // correct password.
+  const userLock = userId ? lockRemainingSeconds(userId) : 0;
+  const remaining = userLock
+    ? userLock
+    : isRateLimited(TWOFA_IP_SCOPE(ip), TWOFA_IP_MAX)
+      ? remainingLockoutSeconds(TWOFA_IP_SCOPE(ip))
+      : 0;
 
   const errorMsg = remaining
-    ? `<div class="error">Too many failed attempts. Try again in ${Math.ceil(remaining / 60)} minute${remaining > 60 ? "s" : ""}.</div>`
+    ? `<div class="error">Too many failed attempts. Try again in ${waitText(remaining)}.</div>`
     : locked
       ? `<div class="error">Too many failed attempts. Try again later.</div>`
       : error
@@ -561,7 +634,7 @@ webRoutes.get("/login/2fa", (c) => {
 
 webRoutes.post("/login/2fa", async (c) => {
   const ip = getClientIp(c);
-  if (isRateLimited(ip)) return c.redirect("/login/2fa?locked=1");
+  if (isRateLimited(TWOFA_IP_SCOPE(ip), TWOFA_IP_MAX)) return c.redirect("/login/2fa?locked=1");
 
   const token = getCookieValue(c, PREAUTH_COOKIE);
   if (!token) return c.redirect("/login");
@@ -574,24 +647,24 @@ webRoutes.post("/login/2fa", async (c) => {
   if (!user || !isTotpEnabled(user)) return c.redirect("/login");
 
   const body = await c.req.parseBody();
-  const raw = (body["code"] as string | undefined)?.trim() ?? "";
-  const code = raw.replace(/\s+/g, "");
+  const raw = (body["code"] as string | undefined) ?? "";
 
-  let ok = false;
-  if (/^\d{6}$/.test(code)) {
-    ok = verifyAndConsumeTotp(user.id, user.totp_secret!, code);
-  } else {
-    ok = await consumeBackupCode(user.id, code);
-  }
-  if (!ok) {
-    recordFailedAttempt(ip);
-    logAudit(user.id, user.username, "2fa_failed", {
-      detail: `IP: ${ip}`,
-    });
+  const result = await verifySecondFactor(user, raw, { allowBackup: true, ip });
+  if (result === "locked") return c.redirect("/login/2fa?locked=1");
+  if (result === "bad") {
+    recordFailedAttempt(TWOFA_IP_SCOPE(ip));
+    // After a handful of misses on this one pre-auth session it is
+    // destroyed: the password has to be entered again, and that does not
+    // reset the per-user counter.
+    if (recordPreauthFailure(token) >= MAX_FAILURES_PER_PREAUTH) {
+      deletePreauthSession(token);
+      deleteCookie(c, PREAUTH_COOKIE, { path: "/" });
+      return c.redirect("/login?locked=1");
+    }
     return c.redirect("/login/2fa?error=1");
   }
 
-  clearAttempts(ip);
+  clearAttempts(TWOFA_IP_SCOPE(ip));
 
   deletePreauthSession(token);
   deleteCookie(c, PREAUTH_COOKIE, { path: "/" });
@@ -2185,11 +2258,13 @@ webRoutes.get("/users", (c) => {
   const adminCount = countAdmins();
   const allApps = listApps();
   const ctx = { currentUserId: current.id, adminCount };
+  const locked = lockedUsers();
   const people: PersonRow[] = users.map((u) => ({
     id: u.id,
     username: u.username,
     role: u.role === "admin" ? "admin" : "member",
     totpEnabled: isTotpEnabled(u),
+    twoFaLockedUntil: locked.get(u.id) ?? null,
     createdAt: u.created_at,
     appNames: allApps
       .filter((a) => a.owner_user_id === u.id)
@@ -2378,12 +2453,17 @@ webRoutes.post("/users/:id/2fa/reset", async (c) => {
     return c.redirect("/users?error=needs_2fa");
   }
   const body = await c.req.parseBody();
-  const code = ((body["code"] as string | undefined) ?? "").trim();
-  if (!verifyAndConsumeTotp(current.id, current.totp_secret!, code)) {
-    return c.redirect("/users?error=1");
-  }
+  const code = (body["code"] as string | undefined) ?? "";
+  const checked = await verifySecondFactor(current, code, {
+    allowBackup: false,
+    ip: getClientIp(c),
+    via: "admin 2FA reset",
+  });
+  if (checked === "locked") return c.redirect("/users?error=2fa_locked");
+  if (checked !== "ok") return c.redirect("/users?error=1");
 
   clearTotp(target.id);
+  recordTwoFactorSuccess(target.id);
   deleteBackupCodes(target.id);
   // Invalidate any active sessions for the target so a stale session
   // cannot continue to act with the pre-reset 2FA trust level.
@@ -2392,6 +2472,24 @@ webRoutes.post("/users/:id/2fa/reset", async (c) => {
     targetUserId: target.id,
     targetUsername: target.username,
   });
+  return c.redirect("/users");
+});
+
+/**
+ * Lift the second-factor lock of a person who tripped it (S09). Admin-only
+ * through the /users/* guard, and CSRF-checked like every POST. Writes an
+ * audit line so an unlock after a suspected attack is on record.
+ */
+webRoutes.post("/users/:id/2fa/unlock", (c) => {
+  const current = c.get("user");
+  const target = getUser(c.req.param("id"));
+  if (!target) return c.redirect("/users");
+  if (unlockTwoFactor(target.id)) {
+    logAudit(current.id, current.username, "2fa_unlocked", {
+      targetUserId: target.id,
+      targetUsername: target.username,
+    });
+  }
   return c.redirect("/users");
 });
 
@@ -3680,7 +3778,13 @@ webRoutes.get("/account", (c) => {
       "Account",
       `
       <h1>Account</h1>
-      ${error ? '<div class="error">That code did not work. Try again.</div>' : ""}
+      ${
+        error === "locked"
+          ? `<div class="error">Too many failed attempts. Try again in ${waitText(lockRemainingSeconds(user.id) || 60)}.</div>`
+          : error
+            ? '<div class="error">That code did not work. Try again.</div>'
+            : ""
+      }
       <div class="card">
         <h2>${escapeHtml(user.username)}</h2>
         <p class="meta" style="margin-top:0.5rem">
@@ -3904,11 +4008,14 @@ webRoutes.post("/account/2fa/disable", async (c) => {
   if (!isTotpEnabled(user)) return c.redirect("/account");
 
   const body = await c.req.parseBody();
-  const code = ((body["code"] as string | undefined) ?? "").trim();
-  const ok =
-    verifyAndConsumeTotp(user.id, user.totp_secret!, code) ||
-    (await consumeBackupCode(user.id, code));
-  if (!ok) return c.redirect("/account?error=1");
+  const code = (body["code"] as string | undefined) ?? "";
+  const checked = await verifySecondFactor(user, code, {
+    allowBackup: true,
+    ip: getClientIp(c),
+    via: "turn 2FA off",
+  });
+  if (checked === "locked") return c.redirect("/account?error=locked");
+  if (checked !== "ok") return c.redirect("/account?error=1");
 
   clearTotp(user.id);
   deleteBackupCodes(user.id);
@@ -3921,10 +4028,14 @@ webRoutes.post("/account/2fa/regenerate", async (c) => {
   if (!isTotpEnabled(user)) return c.redirect("/account");
 
   const body = await c.req.parseBody();
-  const code = ((body["code"] as string | undefined) ?? "").trim();
-  if (!verifyAndConsumeTotp(user.id, user.totp_secret!, code)) {
-    return c.redirect("/account?error=1");
-  }
+  const code = (body["code"] as string | undefined) ?? "";
+  const checked = await verifySecondFactor(user, code, {
+    allowBackup: false,
+    ip: getClientIp(c),
+    via: "new backup codes",
+  });
+  if (checked === "locked") return c.redirect("/account?error=locked");
+  if (checked !== "ok") return c.redirect("/account?error=1");
 
   const codes = generateBackupCodes(10);
   await storeBackupCodes(user.id, codes);
