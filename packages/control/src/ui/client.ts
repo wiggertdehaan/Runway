@@ -54,6 +54,35 @@ document.addEventListener('click', function(e) {
     if (!m.contains(e.target)) m.removeAttribute('open');
   });
 });
+// App page tabs are radio inputs; a link like /apps/x#scan or #security
+// must open the tab that holds that element. The tab also goes into the
+// URL, so a copied link reopens the same tab.
+var APP_TAB_IDS = ['deploys', 'security', 'config', 'access'];
+function tabForHash(hash) {
+  var id = (hash || '').replace(/^#/, '');
+  if (!id) return null;
+  if (APP_TAB_IDS.indexOf(id) !== -1) return id;
+  var el = document.getElementById(id);
+  var panel = el && el.closest ? el.closest('.tab-panel') : null;
+  if (!panel) return null;
+  for (var i = 0; i < APP_TAB_IDS.length; i++) {
+    if (panel.classList.contains('panel-' + APP_TAB_IDS[i])) return APP_TAB_IDS[i];
+  }
+  return null;
+}
+function applyTabHash() {
+  var tab = tabForHash(location.hash);
+  var radio = tab ? document.getElementById('tab-' + tab) : null;
+  if (radio) radio.checked = true;
+}
+document.addEventListener('change', function(e) {
+  var t = e && e.target;
+  if (t && t.name === 'app-tab' && t.id && history.replaceState) {
+    history.replaceState(null, '', location.pathname + location.search + '#' + t.id.replace('tab-', ''));
+  }
+});
+addEventListener('hashchange', applyTabHash);
+applyTabHash();
 function featureToggle(checkbox) {
   var body = checkbox.closest('.card').querySelector('.feature-body');
   if (body) { body.classList.toggle('disabled', !checkbox.checked); }

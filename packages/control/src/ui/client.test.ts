@@ -19,7 +19,8 @@ function stubWindow() {
   };
   const ctx = vm.createContext({
     document,
-    location: { pathname: "/" },
+    location: { pathname: "/", search: "", hash: "" },
+    addEventListener: (t: string, f: (e: unknown) => void) => void (listeners["win:" + t] ??= []).push(f),
     localStorage: { getItem: () => null, setItem: () => {} },
   });
   return { ctx, listeners, attrs };
@@ -43,6 +44,24 @@ describe("dashboard client script", () => {
     expect(filtered).toBe(0);
     listeners["htmx:afterSwap"][0]({ detail: { target: { id: "apps-live" } } });
     expect(filtered).toBe(1);
+  });
+
+  it("maps a link target to the app-page tab that holds it", () => {
+    const { ctx } = stubWindow();
+    const doc = (ctx as { document: { getElementById: (id: string) => unknown } }).document;
+    const panels: Record<string, string> = { scan: "panel-security", quarantine: "panel-security", sso: "panel-access" };
+    doc.getElementById = (id: string) =>
+      panels[id]
+        ? { closest: () => ({ classList: { contains: (c: string) => c === panels[id] } }) }
+        : null;
+    vm.runInContext(CLIENT_JS, ctx);
+    const tabFor = (h: string) => vm.runInContext(`tabForHash(${JSON.stringify(h)})`, ctx);
+    expect(tabFor("#config")).toBe("config");
+    expect(tabFor("#scan")).toBe("security");
+    expect(tabFor("#quarantine")).toBe("security");
+    expect(tabFor("#sso")).toBe("access");
+    expect(tabFor("#nope")).toBeNull();
+    expect(tabFor("")).toBeNull();
   });
 
   it("pre-paint snippet only reads storage and sets attributes on <html>", () => {
@@ -86,7 +105,7 @@ function homeDom(search = "") {
     },
     getElementById: (id: string) => (id === "app-search" ? searchBox : id === "no-match" ? noMatch : null),
   };
-  const ctx = vm.createContext({ document, location: { pathname: "/" }, localStorage: { getItem: () => null, setItem: () => {} } });
+  const ctx = vm.createContext({ document, location: { pathname: "/", search: "", hash: "" }, addEventListener() {}, localStorage: { getItem: () => null, setItem: () => {} } });
   vm.runInContext(CLIENT_JS, ctx);
   const visible = () => rows.filter((r) => r.style.display !== "none").map((r) => r.getAttribute("data-name"));
   const pressed = () => chips.filter((c) => c.getAttribute("aria-pressed") === "true").map((c) => c.getAttribute("data-chip"));

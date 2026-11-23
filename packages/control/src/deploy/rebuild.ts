@@ -528,9 +528,19 @@ export class RebuildBusyError extends Error {
 }
 
 let activeRunId: number | null = null;
+let activeRunApps: string[] | null = null;
 
 export function activeRebuildRunId(): number | null {
   return activeRunId;
+}
+
+/**
+ * The run that is busy now, and which apps it covers (null = all apps).
+ * Lets an app's own page say "a rebuild is running" without exposing
+ * the run list, which is admin-only.
+ */
+export function activeRebuildRun(): { runId: number; appIds: string[] | null } | null {
+  return activeRunId === null ? null : { runId: activeRunId, appIds: activeRunApps };
 }
 
 export interface RunOptions {
@@ -540,6 +550,8 @@ export interface RunOptions {
   /** Scheduled mode: only apps with KEV / critical-with-fix and auto_rebuild on. */
   onlyVulnerable?: boolean;
   log?: Logger;
+  /** Called once when the run is over, with what happened per app (audit trail). */
+  onFinished?: (results: RebuildAppResult[]) => void;
 }
 
 /**
@@ -551,8 +563,10 @@ export function startRebuildRun(opts: RunOptions): number {
   if (activeRunId !== null) throw new RebuildBusyError();
   const runId = createRebuildRun(opts.trigger);
   activeRunId = runId;
+  activeRunApps = opts.appIds ?? null;
   void executeRun(runId, opts).finally(() => {
     activeRunId = null;
+    activeRunApps = null;
   });
   return runId;
 }
@@ -625,6 +639,11 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
   } finally {
     saveRebuildResults(runId, results);
     finishRebuildRun(runId);
+    try {
+      opts.onFinished?.(results);
+    } catch (err: any) {
+      log.error(`[rebuild] run ${runId} onFinished failed: ${err?.message ?? err}`);
+    }
     // Scheduled runs with nothing to do stay quiet; manual runs and
     // anything that did work report back.
     if (opts.trigger === "manual" || results.length > 0) {
