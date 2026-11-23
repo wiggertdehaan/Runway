@@ -593,6 +593,10 @@ apiRoutes.delete("/app/volumes/:path{.+}", (c) => {
   return c.json({ app_id: app.id, deleted: mountPath });
 });
 
+
+const SSO_CUSTOM_DOMAIN_WARNING =
+  "SSO only works on the app's Runway address. On the custom domain visitors are refused (403) until SSO is turned off or the custom domain is removed.";
+
 // ── Custom domain ───────────────────────────────────────
 apiRoutes.put("/app/domain", async (c) => {
   const app = c.get("app");
@@ -641,7 +645,12 @@ apiRoutes.put("/app/domain", async (c) => {
     });
   }
 
-  return c.json(toConfigResponse(updated));
+  return c.json({
+    ...toConfigResponse(updated),
+    ...(updated.sso_enabled && updated.custom_domain
+      ? { warning: SSO_CUSTOM_DOMAIN_WARNING }
+      : {}),
+  });
 });
 
 // ── Basic auth ──────────────────────────────────────────
@@ -793,6 +802,9 @@ apiRoutes.put("/app/sso", async (c) => {
     app_id: updated.id,
     sso_enabled: !!updated.sso_enabled,
     allowed_emails: getAppAllowedEmails(updated.id),
+    ...(updated.sso_enabled && updated.custom_domain
+      ? { warning: SSO_CUSTOM_DOMAIN_WARNING }
+      : {}),
   });
 });
 

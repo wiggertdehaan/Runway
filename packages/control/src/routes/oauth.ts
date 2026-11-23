@@ -26,6 +26,7 @@ import { createSession, getSessionUser } from "../db/sessions.js";
 import { getAppByDomain } from "../db/apps.js";
 import { isEmailAllowedForApp } from "../db/app-emails.js";
 import { logAudit } from "../db/audit.js";
+import { decideForwardAuth, normalizeHost, type ForwardAuthDecision } from "../auth/forward-auth.js";
 
 export const oauthRoutes = new Hono();
 
@@ -263,35 +264,29 @@ oauthRoutes.get("/auth/verify", (c) => {
   const forwardedUri = c.req.header("x-forwarded-uri") ?? "/";
   const forwardedProto = c.req.header("x-forwarded-proto") ?? "https";
 
-  if (!forwardedHost) {
-    return c.text("OK", 200);
+  // Fail closed: any error while deciding (database, parsing) is a "no".
+  let decision: ForwardAuthDecision;
+  try {
+    const host = normalizeHost(forwardedHost);
+    const app = host ? getAppByDomain(host) : undefined;
+    const token = getCookie(c, SESSION_COOKIE);
+    decision = decideForwardAuth({
+      host,
+      app,
+      hasSession: !!token,
+      user: token ? getSessionUser(token) : undefined,
+      emailAllowed: isEmailAllowedForApp,
+    });
+  } catch (err) {
+    console.error("forward-auth failed, denying:", err);
+    return c.text("Forbidden", 403);
   }
 
-  const app = getAppByDomain(forwardedHost);
-  if (!app || !app.sso_enabled) {
-    return c.text("OK", 200);
+  if (decision.action === "deny") return c.text(decision.message, decision.status);
+  if (decision.action === "login") {
+    return redirectToLogin(c, forwardedProto, normalizeHost(forwardedHost), forwardedUri);
   }
-
-  const token = getCookie(c, SESSION_COOKIE);
-  if (!token) {
-    return redirectToLogin(c, forwardedProto, forwardedHost, forwardedUri);
-  }
-
-  const user = getSessionUser(token);
-  if (!user) {
-    return redirectToLogin(c, forwardedProto, forwardedHost, forwardedUri);
-  }
-
-  if (!user.email) {
-    return c.text("Forbidden: no email linked to your account", 403);
-  }
-
-  if (!isEmailAllowedForApp(app.id, user.email)) {
-    return c.text("Forbidden: your email is not in the allowlist for this app", 403);
-  }
-
-  // Authorized — inject user header for the app
-  c.header("X-Forwarded-User", user.email);
+  c.header("X-Forwarded-User", decision.user);
   return c.text("OK", 200);
 });
 

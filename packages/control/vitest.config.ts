@@ -1,4 +1,6 @@
 import { defineConfig } from "vitest/config";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export default defineConfig({
   test: {
@@ -9,6 +11,7 @@ export default defineConfig({
     // several test files in parallel workers a shared on-disk file races on
     // its WAL pragma ("database is locked"), so tests get a private
     // in-memory database each.
-    env: { DB_PATH: ":memory:" },
+    // Route tests that save an app write its Traefik file; keep that out of /gateway-config.
+    env: { DB_PATH: ":memory:", GATEWAY_CONFIG_DIR: join(tmpdir(), "runway-test-gateway") },
   },
 });

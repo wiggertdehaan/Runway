@@ -1720,7 +1720,7 @@ webRoutes.get("/apps/:id", async (c) => {
             <div class="card" id="sso">
               <h2>SSO protection</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
-                Protect this app with Single Sign-On via the subdomain.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
+                Protect this app with Single Sign-On via the subdomain.${app.custom_domain ? ' <strong style="color:var(--status-warn)">SSO does not work on a custom domain: visitors of the custom domain are refused until you turn SSO off or remove the custom domain.</strong>' : ""}${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
               </p>
               <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso">
                 <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">

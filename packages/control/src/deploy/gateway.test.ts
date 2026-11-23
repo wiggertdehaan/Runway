@@ -137,3 +137,49 @@ describe("buildAppRouteDoc — build-metadata block", () => {
     }
   });
 });
+
+describe("buildAppRouteDoc — SSO covers every hostname (S05)", () => {
+  const sso = { ssoEnabled: true, customDomain: "www.example.test" };
+
+  it("puts forwardAuth on one router that matches both hosts", () => {
+    const r = routers(baseCfg(sso));
+    expect(r["app-abc123"].rule).toBe(
+      "Host(`example.test`) || Host(`www.example.test`)"
+    );
+    expect(r["app-abc123"].middlewares).toEqual(["app-abc123-forwardauth"]);
+  });
+
+  it("has no router for the custom domain without the middleware", () => {
+    const r = routers(baseCfg(sso));
+    expect(r["app-abc123-custom"]).toBeUndefined();
+    for (const [key, router] of Object.entries(r)) {
+      if (key.endsWith("-blockmeta")) continue; // 403s everything it matches
+      if (String(router.rule).includes("www.example.test")) {
+        expect(router.middlewares).toContain("app-abc123-forwardauth");
+      }
+    }
+  });
+
+  it("still lists both hosts for the certificate", () => {
+    const r = routers(baseCfg(sso));
+    expect(r["app-abc123"].tls.domains).toEqual([
+      { main: "example.test" },
+      { main: "www.example.test" },
+    ]);
+  });
+
+  it("leaves non-SSO apps without forwardAuth, with or without a custom domain", () => {
+    for (const customDomain of [null, "www.example.test"]) {
+      const doc = buildAppRouteDoc(baseCfg({ customDomain })) as any;
+      expect(doc.http.routers["app-abc123"].middlewares).toBeUndefined();
+      expect(doc.http.middlewares["app-abc123-forwardauth"]).toBeUndefined();
+    }
+  });
+
+  it("defines the forwardAuth middleware it references", () => {
+    const doc = buildAppRouteDoc(baseCfg(sso)) as any;
+    expect(doc.http.middlewares["app-abc123-forwardauth"].forwardAuth.address).toBe(
+      "http://control:3000/auth/verify"
+    );
+  });
+});
