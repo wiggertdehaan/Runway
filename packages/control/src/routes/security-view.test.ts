@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  attentionWhen,
   fmtCountdown,
   offlineAt,
   sortAtRisk,
@@ -75,33 +76,72 @@ describe("sortAtRisk", () => {
   });
 });
 
+describe("attentionWhen", () => {
+  it("leads with the countdown and shows the exact moment", () => {
+    expect(attentionWhen(app(), NOW)).toEqual({
+      headline: "Goes offline in 3d",
+      tone: "warn",
+      detail: "2026-11-25 12:00 UTC",
+    });
+  });
+  it("turns urgent on the last day", () => {
+    expect(attentionWhen(app({ deadline: iso(NOW + 5 * HOUR) }), NOW).tone).toBe("err");
+  });
+  it("says offline since when quarantined", () => {
+    const w = attentionWhen(app({ state: "quarantined", quarantinedAt: iso(NOW - HOUR) }), NOW);
+    expect(w.headline).toBe("Offline since 2026-11-22 11:00 UTC");
+    expect(w.tone).toBe("err");
+  });
+  it("uses the end of an active exemption", () => {
+    const w = attentionWhen(app({ deadline: iso(NOW - DAY), exemptUntil: iso(NOW + 2 * DAY) }), NOW);
+    expect(w.headline).toBe("Goes offline in 2d");
+    expect(w.detail).toBe("Exemption until 2026-11-24 12:00 UTC");
+  });
+});
+
 describe("renderSecurityAttention", () => {
   it("renders nothing when no app is at risk", () => {
     expect(renderSecurityAttention([], NOW)).toBe("");
   });
-  it("says when each app goes offline, who owns it and why", () => {
+  it("puts the countdown, the CVEs and a link to the app first", () => {
     const html = renderSecurityAttention([app()], NOW);
+    expect(html).toContain("1 app needs attention");
     expect(html).toContain("Goes offline in 3d");
     expect(html).toContain("2026-11-25 12:00 UTC");
-    expect(html).toContain("wiggert");
     expect(html).toContain("CVE-2026-1");
     expect(html).toContain('href="/apps/abc123#quarantine"');
     expect(html).toContain("1 will go offline if nothing is done");
+  });
+  it("keeps the policy text behind a disclosure, after the rows", () => {
+    const html = renderSecurityAttention([app()], NOW);
+    expect(html.indexOf("attn-list")).toBeLessThan(html.indexOf("<details"));
+    expect(html).toContain("What happens next?");
+  });
+  it("is role aware: only an administrator gets a Rebuild button and the owner name", () => {
+    const admin = renderSecurityAttention([app()], NOW, true);
+    expect(admin).toContain('action="/apps/abc123/rebuild"');
+    expect(admin).toContain("owner wiggert");
+    expect(admin).toContain("A rebuild or a new deploy");
+    const owner = renderSecurityAttention([app()], NOW, false);
+    expect(owner).not.toContain("/rebuild");
+    expect(owner).not.toContain("owner wiggert");
+    expect(owner).toContain("your agent can do this");
   });
   it("counts offline and pending apps separately and lists offline first", () => {
     const html = renderSecurityAttention(
       [app({ id: "p", name: "Pending" }), app({ id: "d", name: "Down", state: "quarantined", quarantinedAt: iso(NOW - HOUR) })],
       NOW
     );
+    expect(html).toContain("2 apps need attention");
     expect(html).toContain("1 offline, 1 will go offline if nothing is done");
-    expect(html).toContain("since 2026-11-22 11:00 UTC");
+    expect(html).toContain("Offline since 2026-11-22 11:00 UTC");
     expect(html.indexOf("Down")).toBeLessThan(html.indexOf("Pending"));
   });
   it("marks the last day as urgent", () => {
     expect(renderSecurityAttention([app({ deadline: iso(NOW + 5 * HOUR) })], NOW)).toContain(
-      'color:var(--status-error)">Goes offline in 5h'
+      "attn-err\">Goes offline in 5h"
     );
-    expect(renderSecurityAttention([app()], NOW)).toContain('color:var(--status-warn)">Goes offline in 3d');
+    expect(renderSecurityAttention([app()], NOW)).toContain("attn-warn\">Goes offline in 3d");
   });
   it("shows an active exemption and the postponed moment", () => {
     const html = renderSecurityAttention([app({ deadline: iso(NOW - DAY), exemptUntil: iso(NOW + 2 * DAY) })], NOW);
@@ -109,7 +149,7 @@ describe("renderSecurityAttention", () => {
     expect(html).toContain("Exemption until 2026-11-24 12:00 UTC");
   });
   it("escapes app names, owners and CVE text", () => {
-    const html = renderSecurityAttention([app({ name: "<script>x</script>", owner: 'a"b', cves: ["<b>"] })], NOW);
+    const html = renderSecurityAttention([app({ name: "<script>x</script>", owner: 'a"b', cves: ["<b>"] })], NOW, true);
     expect(html).not.toContain("<script>x");
     expect(html).toContain("&lt;script&gt;x");
     expect(html).toContain("a&quot;b");

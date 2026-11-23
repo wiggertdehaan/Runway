@@ -36,11 +36,6 @@ export interface ScanCoverage {
   scanned: number;
 }
 
-// The dashboard stylesheet has no table rules; tables carry their own.
-const TABLE = 'style="width:100%;border-collapse:collapse"';
-const TH = 'style="text-align:left;padding:0.4rem 0.6rem;font-size:0.8rem;font-weight:500;color:var(--text-muted)"';
-const TD = 'style="padding:0.5rem 0.6rem;vertical-align:top;border-top:1px solid var(--border)"';
-
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 /** The list refreshes daily; past this age something is wrong. */
@@ -114,52 +109,75 @@ export function sortAtRisk(apps: AtRiskApp[]): AtRiskApp[] {
   });
 }
 
-function statusCell(app: AtRiskApp, now: number): string {
+/**
+ * What happens to one app, as a short headline plus an optional detail
+ * line. The countdown is the headline: it is the one thing that decides
+ * how soon somebody has to act.
+ */
+export function attentionWhen(app: AtRiskApp, now: number): { headline: string; tone: "err" | "warn"; detail: string | null } {
   if (app.state === "quarantined") {
     const since = parse(app.quarantinedAt);
-    return `<strong style="color:var(--status-error)">Offline</strong>${
-      since !== null ? ` since ${esc(utc(since))}` : ""
-    }<div class="meta">Comes back by itself once a rebuild or deploy fixes it.</div>`;
+    return {
+      headline: since !== null ? `Offline since ${utc(since)}` : "Offline",
+      tone: "err",
+      detail: "Comes back by itself once a rebuild or deploy fixes it.",
+    };
   }
   const at = offlineAt(app);
-  if (at === null) return `<strong style="color:var(--status-warn)">Goes offline</strong> unless fixed`;
+  if (at === null) return { headline: "Goes offline unless fixed", tone: "warn", detail: null };
   const left = at - now;
-  const colour = left < URGENT_MS ? "var(--status-error)" : "var(--status-warn)";
   const exempt = parse(app.exemptUntil);
-  const note =
-    exempt !== null && exempt > now
-      ? `<div class="meta">Exemption until ${esc(utc(exempt))}</div>`
-      : "";
-  return `<strong style="color:${colour}">Goes offline ${esc(fmtCountdown(left))}</strong><div class="meta">${esc(utc(at))}</div>${note}`;
+  return {
+    headline: `Goes offline ${fmtCountdown(left)}`,
+    tone: left < URGENT_MS ? "err" : "warn",
+    detail:
+      exempt !== null && exempt > now ? `Exemption until ${utc(exempt)}` : utc(at),
+  };
 }
 
 /**
- * Banner listing every app that is offline or will go offline. Empty
- * string when there is nothing to show.
+ * Strip above the apps listing every app that is offline or will go
+ * offline. One row per app: name, the countdown, the CVE ids, and what
+ * you can do about it. The long policy text sits behind a disclosure so
+ * the app comes first. Empty string when there is nothing to show.
+ *
+ * `admin` decides the wording and the actions: an administrator can
+ * start a rebuild right here; an owner is told to redeploy (or open the
+ * app for the steps).
  */
-export function renderSecurityAttention(apps: AtRiskApp[], now: number): string {
+export function renderSecurityAttention(apps: AtRiskApp[], now: number, admin = false): string {
   if (apps.length === 0) return "";
   const sorted = sortAtRisk(apps);
   const offline = sorted.filter((a) => a.state === "quarantined").length;
   const pending = sorted.length - offline;
+  const title = `${sorted.length} app${sorted.length === 1 ? "" : "s"} need${sorted.length === 1 ? "s" : ""} attention`;
   const counts: string[] = [];
   if (offline > 0) counts.push(`${offline} offline`);
   if (pending > 0) counts.push(`${pending} will go offline if nothing is done`);
   const rows = sorted
-    .map(
-      (a) => `<tr>
-        <td ${TD}><a href="/apps/${encodeURIComponent(a.id)}#quarantine" style="color:var(--brand)">${esc(a.name)}</a></td>
-        <td ${TD} class="meta">${a.owner ? esc(a.owner) : "&mdash;"}</td>
-        <td ${TD}>${statusCell(a, now)}</td>
-        <td ${TD} class="meta">${esc(a.cves.join(", "))}</td>
-      </tr>`
-    )
+    .map((a) => {
+      const w = attentionWhen(a, now);
+      const id = encodeURIComponent(a.id);
+      const rebuild = admin
+        ? `<form method="POST" action="/apps/${id}/rebuild" class="attn-form"><button type="submit" class="ghost">Rebuild</button></form>`
+        : "";
+      return `<li class="attn-row">
+        <div class="attn-main">
+          <div class="attn-top"><a class="app-name" href="/apps/${id}#quarantine">${esc(a.name)}</a> <strong class="attn-when attn-${w.tone}">${esc(w.headline)}</strong></div>
+          <div class="meta">${esc(a.cves.join(", "))}${a.owner && admin ? ` &middot; owner ${esc(a.owner)}` : ""}${w.detail ? ` &middot; ${esc(w.detail)}` : ""}</div>
+        </div>
+        <div class="attn-acts"><a class="btn-link" href="/apps/${id}#quarantine">Open</a>${rebuild}</div>
+      </li>`;
+    })
     .join("");
-  return `<div class="card" style="border-color:var(--status-error);margin-bottom:1rem">
-    <strong>Security attention</strong> <span class="meta">&middot; ${esc(counts.join(", "))}</span>
-    <p class="meta" style="margin:0.25rem 0 0.5rem">These apps contain a vulnerability that is being actively exploited (CISA KEV). The owner fixes it with a rebuild or a new deploy. If nothing happens, one last automatic rebuild is tried at the time shown and the app is taken offline when that does not fix it.</p>
-    <table ${TABLE}><thead><tr><th ${TH}>App</th><th ${TH}>Owner</th><th ${TH}>What happens</th><th ${TH}>Actively exploited</th></tr></thead><tbody>${rows}</tbody></table>
-  </div>`;
+  const how = admin
+    ? "Each of these apps contains a vulnerability that is being actively exploited (CISA KEV). A rebuild or a new deploy with fixed dependencies clears it. If nothing happens, one last automatic rebuild is tried at the time shown and the app is taken offline when that does not fix it."
+    : "Each of these apps contains a vulnerability that is being actively exploited (CISA KEV). Redeploy it with fixed dependencies (your agent can do this), or open the app for the steps. If nothing happens, one last automatic rebuild is tried at the time shown and the app is taken offline when that does not fix it.";
+  return `<section class="attn" aria-label="Security attention">
+    <div class="attn-head"><strong>${esc(title)}</strong> <span class="meta">&middot; ${esc(counts.join(", "))}</span></div>
+    <ul class="attn-list">${rows}</ul>
+    <details class="attn-how"><summary>What happens next?</summary><p class="meta">${esc(how)}</p></details>
+  </section>`;
 }
 
 /** Small badge for an app card; empty unless the app is counting down. */

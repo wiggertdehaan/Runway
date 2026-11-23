@@ -6,7 +6,8 @@ import type { Context } from "hono";
 import { HTMX_INTEGRITY, HTMX_PATH } from "./assets.js";
 import { APP_CSS } from "../ui/styles.js";
 import { CLIENT_JS, PREPAINT_JS } from "../ui/client.js";
-import { appStatus, countStates, summaryParts, type AppStatus } from "../ui/status.js";
+import { appStatus, countStates, type AppStatus } from "../ui/status.js";
+import { homeChips, needsAttention, renderChips } from "../ui/home.js";
 
 const APP_VERSION = (() => {
   try {
@@ -716,9 +717,9 @@ async function renderAppsLive(
   const statuses = apps.map((app, i) =>
     statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now)
   );
-  const appCards = apps
+  const appRows = apps
     .map((app, i) =>
-      renderAppCard(
+      renderAppRow(
         app,
         dashboardDomain,
         allStats[i] ?? null,
@@ -726,17 +727,19 @@ async function renderAppsLive(
           lastRequestAt: app.last_request_at,
           buckets: buckets.get(app.id) ?? [],
         },
-        statuses[i]
+        statuses[i],
+        admin
       )
     )
     .join("");
 
-  const parts = summaryParts(countStates(statuses)).map((p) =>
-    p.state === "failed" || p.state === "offline"
-      ? `<span style="color:var(--status-error)">${escapeHtml(p.text)}</span>`
-      : p.state === "live"
-        ? `<span style="color:var(--status-success)">${escapeHtml(p.text)}</span>`
-        : escapeHtml(p.text)
+  // Unconfigured apps (no name or runtime yet) have no state: they count
+  // in "All" and in nothing else.
+  const configuredIdx = apps.map((a, i) => (a.name && a.runtime ? i : -1)).filter((i) => i >= 0);
+  const chips = homeChips(
+    countStates(configuredIdx.map((i) => statuses[i])),
+    configuredIdx.filter((i) => needsAttention(statuses[i])).length,
+    apps.length - configuredIdx.length
   );
 
   // The search input is rendered (and preserved) whenever there are
@@ -744,15 +747,15 @@ async function renderAppsLive(
   // survives live updates even if the app count briefly dips.
   const filterBlock =
     apps.length > 0
-      ? `<div class="dashboard-filter" id="app-search-wrap" hx-preserve="true" style="margin-top:0.75rem">
+      ? `<div class="dashboard-filter" id="app-search-wrap" hx-preserve="true">
           <input type="search" id="app-search" placeholder="Search apps..." oninput="filterApps()" style="font-size:0.85rem" />
         </div>`
       : "";
 
   const header =
     apps.length > 0
-      ? `<div style="margin-bottom:1rem">
-          <p class="meta">${parts.join(" &middot; ")}</p>
+      ? `<div class="apps-bar">
+          ${renderChips(chips)}
           ${filterBlock}
         </div>`
       : "";
@@ -776,8 +779,11 @@ async function renderAppsLive(
             or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:var(--tx)">API docs</a>.
           </p>
         </div>`
-      : `<div class="app-grid">${appCards}</div>
-         <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your search.</p>`;
+      : `<table class="apps-tbl">
+          <thead><tr><th>App</th><th>Status</th><th>Address</th><th>Runtime</th><th>Traffic, 7 days</th><th><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>${appRows}</tbody>
+        </table>
+         <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your filter.</p>`;
 
   const scannedIds = listPeriodicScanAppIds();
   const runningApps = apps.filter((a) => a.status === "running");
@@ -792,7 +798,7 @@ async function renderAppsLive(
     admin
   );
 
-  return `${renderSecurityAttention([...atRisk.values()], now)}${header}${kevStatus}${body}`;
+  return `${renderSecurityAttention([...atRisk.values()], now, admin)}${header}${kevStatus}${body}`;
 }
 
 webRoutes.get("/", async (c) => {
@@ -869,7 +875,7 @@ webRoutes.get("/", async (c) => {
           }
         });
       </script>
-      ${!baseDomain ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
+      ${!baseDomain && isAdmin(user) ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
       <div id="apps-live" hx-get="/partials/apps" hx-trigger="every 5s" hx-swap="innerHTML">
         ${appsHtml}
       </div>
@@ -1353,126 +1359,107 @@ function renderSparkline(buckets: number[], tone: ActivityTone): string {
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" width="100%" height="20" style="display:block" aria-hidden="true">${bars}</svg>`;
 }
 
-function renderActivityRow(
+function renderActivityCell(
   lastRequestAt: string | null,
   buckets: number[]
 ): string {
   const { label, tone } = formatActivity(lastRequestAt);
   const total = buckets.reduce((s, v) => s + v, 0);
   const tooltip = total > 0 ? `${total} requests in the last 7 days` : "";
-  return `
-    <div style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)" title="${escapeHtml(tooltip)}">
-      <div class="flex between" style="margin-bottom:0.3rem">
-        <span class="stat-label">Activity</span>
-        <span style="font-size:0.7rem;color:${activityToneColor(tone)};font-weight:500">${escapeHtml(label)}</span>
-      </div>
+  return `<div title="${escapeHtml(tooltip)}">
+      <span class="act-label" style="color:${activityToneColor(tone)}">${escapeHtml(label)}</span>
       ${renderSparkline(buckets, tone)}
     </div>`;
 }
 
-function renderAppCard(
+/**
+ * One app as a table row on desktop and as a card on a phone (same
+ * markup, the stylesheet switches). The name links to the app page; the
+ * row carries the attributes the client filter reads (data-status,
+ * data-attn, data-name, data-domain).
+ */
+function renderAppRow(
   app: ReturnType<typeof listApps>[number],
   dashboardDomain: string,
   stats: AppStats | null = null,
   activity: { lastRequestAt: string | null; buckets: number[] } | null = null,
-  status: AppStatus | null = null
+  status: AppStatus | null = null,
+  admin = false
 ): string {
   const configured = !!(app.name && app.runtime);
-  const title = configured
-    ? escapeHtml(app.name!)
-    : '<span class="meta">Unconfigured</span>';
+  const id = encodeURIComponent(app.id);
+  const displayName = app.name ?? app.id;
+  const nameCell = configured
+    ? `<a class="app-name" href="/apps/${id}">${escapeHtml(displayName)}</a>${
+        admin && app.created_by ? `<div class="meta">${escapeHtml(app.created_by)}</div>` : ""
+      }`
+    : `<a class="app-name" href="/apps/${id}"><span class="meta">Unconfigured</span></a>`;
 
   const domain = app.custom_domain ?? app.domain;
-  const domainLink = domain
-    ? `<a href="https://${encodeURI(domain)}" target="_blank" rel="noopener noreferrer" style="color:var(--brand);text-decoration:none;font-size:0.95rem;font-weight:500;display:block;margin-bottom:0.5rem">${escapeHtml(domain)} &#8599;</a>`
-    : "";
+  const domainCell = domain
+    ? `<a href="https://${encodeURI(domain)}" target="_blank" rel="noopener noreferrer">${escapeHtml(domain)} &#8599;</a>`
+    : `<span class="meta">&mdash;</span>`;
 
-  const llmsTxtUrl = dashboardDomain
-    ? `https://${dashboardDomain}/llms.txt`
-    : "/llms.txt";
+  const llmsTxtUrl = dashboardDomain ? `https://${dashboardDomain}/llms.txt` : "/llms.txt";
   const claudeInstruction = `Fetch ${llmsTxtUrl} and deploy this project using API key ${app.api_key}`;
 
-  // When stats were pre-fetched (bulk render, either on first page
-  // load or inside /partials/apps), render the values inline so the
-  // card never flickers. Fall back to the hx-get placeholder pattern
-  // when no stats were provided (keeps the function usable in other
-  // call sites).
-  const statsBlock = !configured
-    ? ""
-    : stats
-      ? `<div class="stats">
-          <div><div class="stat-label">Runtime</div><div class="stat-value">${escapeHtml(app.runtime!)}</div></div>
-          <div><div class="stat-label">Image</div><div class="stat-value">${escapeHtml(formatBytes(stats.imageBytes))}</div></div>
-          <div><div class="stat-label">Memory</div><div class="stat-value">${escapeHtml(formatBytes(stats.memoryBytes))}</div></div>
-          <div><div class="stat-label">Uptime</div><div class="stat-value">${escapeHtml(formatRelative(stats.startedAt))}</div></div>
-        </div>`
-      : `<div hx-get="/apps/${encodeURIComponent(app.id)}/stats" hx-trigger="load" hx-swap="outerHTML">
-          <div class="stats" style="grid-template-columns:repeat(4,1fr);gap:0.5rem;padding:0.5rem;margin-top:0.5rem">
-            <div><div class="stat-label">Runtime</div><div class="stat-value" style="font-size:0.8rem">${escapeHtml(app.runtime!)}</div></div>
-            <div><div class="stat-label">Image</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-            <div><div class="stat-label">Memory</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-            <div><div class="stat-label">Uptime</div><div class="stat-value meta" style="font-size:0.8rem">...</div></div>
-          </div>
-        </div>`;
-
-  // One status word + at most one security chip, on their own line
-  // under the name so a long name is never cut off by badges.
   const st = status ?? statusOf(app, stats, undefined, Date.now());
-  const statusLine = configured
+  const statusCell = configured
     ? `<div class="app-status">${renderStatusChip(st)}${renderSecurityChip(app.id, st)}</div>`
+    : `<span class="meta">Not deployed</span>`;
+
+  // Runtime and memory in one cell; image size and uptime go in the tooltip.
+  const resTitle = stats
+    ? `Image ${formatBytes(stats.imageBytes)}, up ${formatRelative(stats.startedAt)}`
+    : "";
+  const resCell = configured
+    ? `<span title="${escapeHtml(resTitle)}">${escapeHtml(app.runtime!)}${stats ? ` &middot; ${escapeHtml(formatBytes(stats.memoryBytes))}` : ""}</span>`
     : "";
 
-  const initials = app.created_by
-    ? app.created_by.slice(0, 2).toUpperCase()
-    : "";
-  const avatar = initials
-    ? `<span title="${escapeHtml(app.created_by ?? "")}" style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--border);color:var(--text-muted);font-size:0.6rem;font-weight:600;flex-shrink:0">${escapeHtml(initials)}</span>`
-    : "";
+  const activityCell =
+    configured && activity ? renderActivityCell(activity.lastRequestAt, activity.buckets) : "";
 
   const overflowMenu = `
     <details class="overflow-menu">
-      <summary>&#8943;</summary>
+      <summary aria-label="More actions for ${escapeHtml(displayName)}">&#8943;</summary>
       <div class="overflow-dropdown">
-        ${configured ? `<a href="/apps/${encodeURIComponent(app.id)}" class="overflow-item" style="text-decoration:none">Settings</a>` : ""}
+        <a href="/apps/${id}" class="overflow-item" style="text-decoration:none">${configured ? "Open app page" : "Set up"}</a>
         <button type="button" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy deploy instruction</button>
         <button type="button" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)">Copy API key</button>
-        <form method="POST" action="/apps/${encodeURIComponent(app.id)}/delete" style="margin:0" data-app-name="${escapeHtml(configured ? app.name! : app.id)}" onsubmit="return confirmDelete(this)">
+        <form method="POST" action="/apps/${id}/delete" style="margin:0" data-app-name="${escapeHtml(displayName)}" onsubmit="return confirmDelete(this)">
           <button type="submit" class="overflow-danger">Delete app</button>
         </form>
       </div>
     </details>`;
 
-  const unconfiguredBlock = !configured
-    ? `<div style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--border)">
-        <p style="font-size:0.8rem;margin:0 0 0.5rem;color:var(--text-muted)">
-          Paste this in <a href="https://claude.ai/code" target="_blank" rel="noopener" style="color:var(--brand)">Claude Code</a>:
-        </p>
-        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;margin:0 0 0.5rem;font-size:0.65rem;white-space:pre-wrap;word-break:break-all;color:var(--tx);user-select:all">${escapeHtml(claudeInstruction)}</pre>
-        <button type="button" style="padding:0.25rem 0.6rem;font-size:0.75rem;width:auto" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy</button>
-      </div>`
-    : "";
+  const key = configured ? st.state : "new";
+  const attn = configured && needsAttention(st) ? "1" : "0";
+  const attrs = `data-app-row data-name="${escapeHtml(displayName)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${key}" data-attn="${attn}"`;
 
-  const activityBlock =
-    configured && activity
-      ? renderActivityRow(activity.lastRequestAt, activity.buckets)
-      : "";
+  if (!configured) {
+    return `
+    <tr class="app-row status-new" ${attrs}>
+      <td colspan="6" class="c-name">
+        ${nameCell}
+        <div class="setup">
+          <p class="meta" style="margin:0 0 0.5rem">Paste this in <a href="https://claude.ai/code" target="_blank" rel="noopener" style="color:var(--tx)">Claude Code</a> inside your project:</p>
+          <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:var(--r1);padding:0.4rem 0.6rem;margin:0 0 0.5rem;font-size:0.7rem;white-space:pre-wrap;word-break:break-all;color:var(--tx);user-select:all">${escapeHtml(claudeInstruction)}</pre>
+          <button type="button" style="padding:0.25rem 0.75rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy</button>
+        </div>
+        <div class="c-menu">${overflowMenu}</div>
+      </td>
+    </tr>`;
+  }
 
   return `
-    <div class="card app-card status-${configured ? st.state : "new"}" data-name="${escapeHtml(app.name ?? app.id)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${configured ? st.state : "new"}"${!configured ? ' style="border-color:var(--status-info-bg)"' : ""}>
-      <div class="flex between" style="margin-bottom:0.25rem">
-        <div style="display:flex;align-items:center;gap:0.5rem;min-width:0">
-          ${avatar}
-          <h2 style="font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</h2>
-        </div>
-        ${overflowMenu}
-      </div>
-      ${statusLine}
-      ${domainLink}
-      ${statsBlock}
-      ${activityBlock}
-      ${unconfiguredBlock}
-    </div>
-  `;
+    <tr class="app-row status-${key}" ${attrs}>
+      <td class="c-name">${nameCell}</td>
+      <td class="c-status">${statusCell}</td>
+      <td class="c-url">${domainCell}</td>
+      <td class="c-res">${resCell}</td>
+      <td class="c-act">${activityCell}</td>
+      <td class="c-menu">${overflowMenu}</td>
+    </tr>`;
 }
 
 webRoutes.get("/apps/:id/stats", async (c) => {
