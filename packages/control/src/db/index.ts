@@ -1,5 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
+import { ensureUniqueDomainIndexes } from "./domain-index.js";
+import { backfillOwnerUserIds } from "./owner-migration.js";
 
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), "runway.db");
 
@@ -29,6 +31,29 @@ export function migrate() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+    -- S02: sign-ins of SSO app hosts, separate from the dashboard session.
+    CREATE TABLE IF NOT EXISTS sso_tickets (
+      hash TEXT PRIMARY KEY,
+      host TEXT NOT NULL,
+      app_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      parent_token TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sso_tickets_parent ON sso_tickets(parent_token);
+
+    CREATE TABLE IF NOT EXISTS sso_sessions (
+      hash TEXT PRIMARY KEY,
+      host TEXT NOT NULL,
+      app_id TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      parent_token TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sso_sessions_parent ON sso_sessions(parent_token);
+    CREATE INDEX IF NOT EXISTS idx_sso_sessions_user ON sso_sessions(user_id);
 
     CREATE TABLE IF NOT EXISTS preauth_sessions (
       token TEXT PRIMARY KEY,
@@ -133,6 +158,25 @@ export function migrate() {
   if (!userColumns.some((c) => c.name === "oauth_provider")) {
     db.exec(`ALTER TABLE users ADD COLUMN oauth_provider TEXT`);
   }
+  // S01: the provider identity (`sub`) an OAuth user first signed in with.
+  // Later logins must present the same one, so a second account that merely
+  // claims the same email address cannot take the account over.
+  if (!userColumns.some((c) => c.name === "oauth_sub")) {
+    db.exec(`ALTER TABLE users ADD COLUMN oauth_sub TEXT`);
+  }
+  // S01: who may create an account by signing in with Google/Microsoft.
+  // Empty by default: nobody new gets in until an admin allows them.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_access (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL CHECK (kind IN ('email','domain')),
+      value TEXT NOT NULL,
+      one_time INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(kind, value)
+    );
+  `);
   if (!userColumns.some((c) => c.name === "totp_secret")) {
     db.exec(`ALTER TABLE users ADD COLUMN totp_secret TEXT`);
   }
@@ -209,11 +253,29 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "custom_domain")) {
     db.exec(`ALTER TABLE apps ADD COLUMN custom_domain TEXT`);
   }
+  // S03: one app per hostname. Creates the unique indexes unless the
+  // installation already holds duplicates, which are then reported.
+  ensureUniqueDomainIndexes(db);
   if (!appCols.some((c) => c.name === "health_check_path")) {
     db.exec(`ALTER TABLE apps ADD COLUMN health_check_path TEXT`);
   }
   if (!appCols.some((c) => c.name === "created_by")) {
     db.exec(`ALTER TABLE apps ADD COLUMN created_by TEXT`);
+  }
+  // S13: ownership by user id. The column and the one-time fill of it share
+  // a transaction, so a crash cannot leave the column added but empty (the
+  // fill would then never run). See owner-migration.ts for why it must not
+  // be repeated on later starts.
+  if (!appCols.some((c) => c.name === "owner_user_id")) {
+    db.exec("BEGIN");
+    try {
+      db.exec(`ALTER TABLE apps ADD COLUMN owner_user_id TEXT`);
+      backfillOwnerUserIds(db);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   }
   if (!appCols.some((c) => c.name === "scan_threshold")) {
     db.exec(`ALTER TABLE apps ADD COLUMN scan_threshold TEXT NOT NULL DEFAULT 'none'`);
@@ -446,4 +508,27 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_periodic_scans_app_recent
       ON app_periodic_scans(app_id, created_at DESC);
   `);
+
+  // S02: until now the session cookie was set on `.{base_domain}`, so every
+  // deployed app received a valid dashboard session. Those tokens are
+  // therefore treated as exposed: once, on the first start of this version,
+  // every dashboard session is ended. Users sign in again (one time). The
+  // marker keeps later starts from signing everyone out again. A fresh
+  // install has no sessions, so this is a no-op there.
+  const marker = db
+    .prepare(`SELECT 1 AS done FROM settings WHERE key = 'sessions_host_only_v1'`)
+    .get();
+  if (!marker) {
+    db.exec("BEGIN");
+    try {
+      db.exec(`DELETE FROM sessions`);
+      db.prepare(
+        `INSERT INTO settings (key, value, updated_at) VALUES ('sessions_host_only_v1', '1', datetime('now'))`
+      ).run();
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
 }

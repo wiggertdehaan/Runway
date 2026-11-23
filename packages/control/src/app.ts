@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { securityHeaders } from "./middleware/security.js";
 import { verifyCsrf } from "./middleware/csrf.js";
+import { expireLegacySessionCookie } from "./middleware/cookies.js";
 import { apiRateLimit } from "./middleware/rate-limit.js";
 import { assetRoutes } from "./routes/assets.js";
 import { apiRoutes } from "./routes/api.js";
@@ -14,6 +15,14 @@ export const app = new Hono();
 
 app.use(logger());
 app.use(securityHeaders);
+// S02: browsers that still hold the old domain-wide session cookie are told to
+// drop it (those sessions were ended on upgrade). Not on forward-auth calls:
+// their Set-Cookie would only be relayed on a refusal, and that path already
+// answers with its own headers.
+app.use(async (c, next) => {
+  if (c.req.path !== "/auth/verify") expireLegacySessionCookie(c);
+  await next();
+});
 app.use(verifyCsrf);
 app.use(apiRateLimit);
 

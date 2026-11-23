@@ -221,7 +221,7 @@ form.
 For deployed apps, SSO acts as a gateway-level auth layer. Toggle
 "SSO protection" on the app detail page and manage an email
 allowlist — only users with a matching Runway account can reach the
-app. Traefik's forward-auth middleware checks the session cookie on
+app. Traefik's forward-auth middleware checks a per-app sign-in cookie on
 every request; no code changes in the app needed.
 
 - **Provider support**: Google OAuth2 and Microsoft OAuth2.
@@ -229,9 +229,11 @@ every request; no code changes in the app needed.
   account linked by email.
 - **Email allowlist**: per-app, managed via dashboard, API
   (`PUT /app/sso`), or MCP (`runway_set_sso`).
-- **Cookie scope**: the session cookie is set on `.{base_domain}`
-  so it's shared across the dashboard and all app subdomains.
-  Custom domains are **not** SSO-protected (different cookie scope).
+- **Cookie scope**: the dashboard session cookie is host-only, so a
+  deployed app never receives it. Each SSO app host (the Runway address
+  and a custom domain alike) gets its own short-lived cookie after a
+  one-time redirect through the dashboard, and that cookie is valid for
+  that host only. Signing out of the dashboard ends them all.
 - **Precedence**: when both SSO and basic auth are enabled on an
   app, SSO takes precedence.
 
@@ -447,7 +449,8 @@ isolation.
 - **CSRF protection** uses the double-submit cookie pattern with timing-safe
   comparison on all POST forms.
 - **Sessions** are random 32-byte tokens stored in SQLite with a 30-day TTL.
-  Cookies are `HttpOnly` and `SameSite=Lax`. Expired sessions are cleaned
+  Cookies are `HttpOnly`, `Secure` and `SameSite=Lax`; over HTTPS they are
+  host-only with the `__Host-` prefix. Expired sessions are cleaned
   up hourly.
 - **Login rate limiting** — after 5 failed password or 2FA attempts from the
   same IP within 15 minutes, further login attempts are blocked until the
@@ -459,11 +462,10 @@ isolation.
   ID tokens are decoded (not signature-verified) after a direct HTTPS
   code exchange with the provider, which is safe because the token was
   just issued to us. A random `state` cookie prevents CSRF on the OAuth
-  redirect. Session cookies are scoped to `.{base_domain}` when SSO is
-  active so Traefik's forward-auth on app subdomains can read them.
-  Custom domains do not share this cookie and are therefore not
-  SSO-protected. OAuth client secrets are stored in the settings table
-  (SQLite on disk, same trust boundary as password hashes).
+  redirect. The dashboard session cookie is host-only; SSO app hosts
+  sign in through a one-time ticket and get their own host-only cookie.
+  OAuth client secrets are stored in the settings table (SQLite on disk,
+  same trust boundary as password hashes).
 - **Traefik** is configured with the dashboard disabled. Do not add
   `--api.insecure=true` on a public server. Traefik does not have access
   to the Docker socket at all — routing is driven by YAML files in a

@@ -61,7 +61,11 @@ function validateSkillIds(
   }
   return { ok: true, ids: requested };
 }
-import { validateCustomDomain } from "../util/domain.js";
+import {
+  checkGeneratedDomain,
+  isUniqueViolation,
+  validateCustomDomain,
+} from "../util/domain.js";
 
 type Env = { Variables: { app: App } };
 
@@ -162,6 +166,21 @@ apiRoutes.post("/app/configure", async (c) => {
     return c.json({ error: "name must contain letters or digits" }, 400);
   }
   const domain = baseDomain ? `${slug}.${baseDomain}` : null;
+  if (domain) {
+    const problem = checkGeneratedDomain(domain, app.id);
+    if (problem === "conflict") {
+      return c.json(
+        { error: "That name is already in use. Choose a different name." },
+        409
+      );
+    }
+    if (problem === "reserved") {
+      return c.json(
+        { error: "That name is reserved. Choose a different name." },
+        400
+      );
+    }
+  }
   const port = defaultPortForRuntime(runtime as Runtime);
 
   const patch: Parameters<typeof updateApp>[1] = {
@@ -190,7 +209,19 @@ apiRoutes.post("/app/configure", async (c) => {
     skillIds = result.ids;
   }
 
-  const updated = updateApp(app.id, patch);
+  let updated;
+  try {
+    updated = updateApp(app.id, patch);
+  } catch (err) {
+    // Lost a race against another app taking the same hostname.
+    if (isUniqueViolation(err)) {
+      return c.json(
+        { error: "That name is already in use. Choose a different name." },
+        409
+      );
+    }
+    throw err;
+  }
   if (!updated) {
     return c.json({ error: "App not found" }, 404);
   }
@@ -562,6 +593,7 @@ apiRoutes.delete("/app/volumes/:path{.+}", (c) => {
   return c.json({ app_id: app.id, deleted: mountPath });
 });
 
+
 // ── Custom domain ───────────────────────────────────────
 apiRoutes.put("/app/domain", async (c) => {
   const app = c.get("app");
@@ -585,9 +617,17 @@ apiRoutes.put("/app/domain", async (c) => {
     return c.json({ error: message }, 400);
   }
 
-  const updated = updateApp(app.id, {
-    custom_domain: validation.domain,
-  });
+  let updated;
+  try {
+    updated = updateApp(app.id, {
+      custom_domain: validation.domain,
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      return c.json({ error: "Domain already in use by another app" }, 400);
+    }
+    throw err;
+  }
   if (!updated) return c.json({ error: "App not found" }, 404);
 
   if (updated.domain) {

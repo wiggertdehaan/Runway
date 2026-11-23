@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { html, raw } from "hono/html";
-import { deleteCookie, setCookie } from "hono/cookie";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import { HTMX_INTEGRITY, HTMX_PATH } from "./assets.js";
 import { APP_CSS } from "../ui/styles.js";
@@ -31,7 +31,7 @@ const APP_VERSION = (() => {
     return "dev";
   }
 })();
-import { listApps, createApp, deleteApp, getApp, type App } from "../db/apps.js";
+import { listApps, createApp, deleteApp, getApp, ownerUsernameOf, type App } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import {
@@ -85,6 +85,10 @@ import {
   type User,
   ROLES,
 } from "../db/users.js";
+import { safeReturn } from "./oauth.js";
+import { safeReturnTo } from "../auth/oauth-access.js";
+import { parseAccessEntry } from "../auth/oauth-access.js";
+import { addAccess, listAccess, removeAccess } from "../db/oauth-access.js";
 import { createSession, deleteAllUserSessions, deleteSession, getSessionUser } from "../db/sessions.js";
 import {
   createPreauthSession,
@@ -138,12 +142,17 @@ import {
   type RebuildRun,
 } from "../db/rebuild-runs.js";
 import {
-  SESSION_COOKIE,
   requireAdmin,
   requireAppAccess,
   requireSession,
   type WebEnv,
 } from "../middleware/session.js";
+import {
+  clearSessionCookie,
+  expireLegacySessionCookie,
+  readSessionToken,
+  setSessionCookie,
+} from "../middleware/cookies.js";
 import { logAudit, getRecentAuditEntries } from "../db/audit.js";
 import { updateApp } from "../db/apps.js";
 import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
@@ -210,19 +219,14 @@ function isSecureRequest(c: Context): boolean {
 }
 
 const PREAUTH_COOKIE = "runway_preauth";
+// Where to go after a successful sign-in (the SSO handshake sends people to
+// /login first). A short host-only cookie, relative paths only.
+const LOGIN_RETURN_COOKIE = "runway_login_return";
 
-function sessionCookieOptions(c: Context) {
-  const baseDomain = getSetting("base_domain");
-  return {
-    httpOnly: true,
-    sameSite: "Lax" as const,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30,
-    secure: isSecureRequest(c),
-    // Set domain-wide cookie when base_domain is configured so the
-    // session is readable by forward-auth on app subdomains.
-    ...(baseDomain ? { domain: `.${baseDomain}` } : {}),
-  };
+function takeLoginReturn(c: Context): string {
+  const raw = getCookie(c, LOGIN_RETURN_COOKIE);
+  if (raw !== undefined) deleteCookie(c, LOGIN_RETURN_COOKIE, { path: "/", secure: isSecureRequest(c) });
+  return safeReturnTo(raw, () => false);
 }
 
 function preauthCookieOptions(c: Context) {
@@ -248,9 +252,10 @@ function escapeHtml(value: string): string {
 function layout(
   title: string,
   body: string,
-  opts?: { username?: string; csrf?: string; isAdmin?: boolean }
+  opts?: { username?: string; userId?: string; csrf?: string; isAdmin?: boolean }
 ) {
   const username = opts?.username;
+  const userId = opts?.userId;
   const csrf = opts?.csrf;
   const admin = opts?.isAdmin ?? false;
   if (csrf) {
@@ -276,7 +281,7 @@ function layout(
       ].join("")
     : "";
   // One read of the apps this viewer may see feeds the sidebar counter and the palette.
-  const visibleApps = username ? appsVisibleTo(username, admin) : [];
+  const visibleApps = username && userId ? appsVisibleTo(userId, admin) : [];
   const secCount = username ? navCount(collectAtRisk(visibleApps).size) : "";
   const palBtn = paletteButtons();
   const paletteHtml = username ? renderPalette(buildPaletteItems({ admin, apps: visibleApps })) : "";
@@ -402,7 +407,7 @@ webRoutes.post("/setup", async (c) => {
   }
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "user_created", {
     targetUserId: user.id,
     targetUsername: user.username,
@@ -412,6 +417,17 @@ webRoutes.post("/setup", async (c) => {
 
 webRoutes.get("/login", (c) => {
   if (countUsers() === 0) return c.redirect("/setup");
+  expireLegacySessionCookie(c);
+  const wanted = safeReturnTo(c.req.query("return_to"), () => false);
+  if (wanted !== "/") {
+    setCookie(c, LOGIN_RETURN_COOKIE, wanted, {
+      httpOnly: true,
+      sameSite: "Lax",
+      path: "/",
+      maxAge: 5 * 60,
+      secure: isSecureRequest(c),
+    });
+  }
   const error = c.req.query("error");
   const locked = c.req.query("locked");
   const ip = getClientIp(c);
@@ -425,7 +441,8 @@ webRoutes.get("/login", (c) => {
         ? '<div class="error">Invalid username or password.</div>'
         : "";
 
-  const returnTo = c.req.query("return_to") ?? "";
+  // S17: do not even pass an off-site target on to the OAuth start route.
+  const returnTo = c.req.query("return_to") ? safeReturn(c.req.query("return_to")) : "";
   const returnParam = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
 
   const hasGoogle = !!getSetting("oauth_google_client_id");
@@ -440,7 +457,9 @@ webRoutes.get("/login", (c) => {
 
   const oauthError = error === "oauth_state" || error === "oauth_no_code" || error === "oauth_exchange" || error === "oauth_no_email" || error === "oauth_nonce"
     ? '<div class="error">OAuth login failed. Please try again.</div>'
-    : "";
+    : error === "oauth_denied"
+      ? '<div class="error">This account cannot sign in here yet. Ask your administrator for an invitation.</div>'
+      : "";
 
   return c.html(
     authLayout(
@@ -493,9 +512,9 @@ webRoutes.post("/login", async (c) => {
   }
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "login");
-  return c.redirect("/");
+  return c.redirect(takeLoginReturn(c));
 });
 
 // ── Second factor ────────────────────────────────────────
@@ -576,9 +595,9 @@ webRoutes.post("/login/2fa", async (c) => {
   deleteCookie(c, PREAUTH_COOKIE, { path: "/" });
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "login_2fa");
-  return c.redirect("/");
+  return c.redirect(takeLoginReturn(c));
 });
 
 webRoutes.post("/login/2fa/cancel", (c) => {
@@ -589,9 +608,9 @@ webRoutes.post("/login/2fa/cancel", (c) => {
 });
 
 webRoutes.post("/logout", (c) => {
-  const token = getCookieValue(c, SESSION_COOKIE);
+  const token = readSessionToken(c);
   if (token) deleteSession(token);
-  deleteCookie(c, SESSION_COOKIE, { path: "/" });
+  clearSessionCookie(c);
   return c.redirect("/login");
 });
 
@@ -668,7 +687,7 @@ function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
     out.set(a.id, {
       id: a.id,
       name: a.name ?? a.id,
-      owner: a.created_by,
+      owner: ownerUsernameOf(a),
       state: q.state,
       cves: Object.keys(q.kev_first_seen),
       deadline: deadlineOf(q, termMs),
@@ -680,8 +699,8 @@ function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
 }
 
 /** The apps this viewer may see: all for an admin, their own for an owner. */
-function appsVisibleTo(username: string, admin: boolean): App[] {
-  return admin ? listApps() : listApps().filter((a) => a.created_by === username);
+function appsVisibleTo(userId: string, admin: boolean): App[] {
+  return admin ? listApps() : listApps().filter((a) => a.owner_user_id === userId);
 }
 
 /** App-page section: quarantine status, exemption, owner notices. */
@@ -742,7 +761,7 @@ async function renderAppsLive(
   const admin = isAdmin(user);
   const apps = admin
     ? listApps()
-    : listApps().filter((a) => a.created_by === user.username);
+    : listApps().filter((a) => a.owner_user_id === user.id);
   // Pre-fetch live container state + memory + image size for every
   // app so each card renders with real values inline. Without this
   // the outer swap would paint "..." placeholders that a second
@@ -828,14 +847,14 @@ async function renderAppsLive(
 webRoutes.get("/security", async (c) => {
   const user = c.get("user");
   const admin = isAdmin(user);
-  const apps = appsVisibleTo(user.username, admin);
+  const apps = appsVisibleTo(user.id, admin);
   const now = Date.now();
   const atRisk = collectAtRisk(apps);
   const allStats = await getAppStatsBulk(apps);
   const rows: SecurityApp[] = apps.map((app, i) => ({
     id: app.id,
     name: app.name ?? app.id,
-    owner: app.created_by,
+    owner: ownerUsernameOf(app),
     kev: atRisk.get(app.id),
     status: statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now),
     hasImage: !!app.image_tag,
@@ -853,7 +872,7 @@ webRoutes.get("/security", async (c) => {
     layout(
       "Security",
       renderSecurityPage({ apps: rows, now, admin, kevStatusHtml, termDays: getQuarantineTermDays() }),
-      { username: user.username, csrf: csrfField(c), isAdmin: admin }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: admin }
     )
   );
 });
@@ -937,7 +956,7 @@ webRoutes.get("/", async (c) => {
         ${appsHtml}
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -964,7 +983,7 @@ webRoutes.post("/apps", async (c) => {
   const enabled = new Set(listEnabledSkills().map((s) => s.id));
   const valid = requested.filter((id) => enabled.has(id));
 
-  const app = createApp(user.username);
+  const app = createApp({ id: user.id, username: user.username });
   if (valid.length > 0) {
     setAppSkillIds(app.id, valid);
   }
@@ -1437,7 +1456,7 @@ function renderAppRow(
   const displayName = app.name ?? app.id;
   const nameCell = configured
     ? `<a class="app-name" href="/apps/${id}">${escapeHtml(displayName)}</a>${
-        admin && app.created_by ? `<div class="meta">${escapeHtml(app.created_by)}</div>` : ""
+        admin ? `<div class="meta">${escapeHtml(ownerUsernameOf(app) ?? "No owner (admin only)")}</div>` : ""
       }`
     : `<a class="app-name" href="/apps/${id}"><span class="meta">Unconfigured</span></a>`;
 
@@ -1630,7 +1649,7 @@ webRoutes.get("/apps/:id", async (c) => {
           ${appUrlHost ? `<a href="https://${escapeHtml(appUrlHost)}" target="_blank" rel="noopener noreferrer">${escapeHtml(appUrlHost)} &#8599;</a>` : "No domain yet"}
           ${app.runtime ? `<span>${escapeHtml(app.runtime)}</span>` : ""}
           <span>${lastDeploy ? `Last deploy ${escapeHtml(formatRelative(lastDeploy.created_at))}` : "Not deployed yet"}</span>
-          ${admin && app.created_by ? `<span>Owner ${escapeHtml(app.created_by)}</span>` : ""}
+          ${admin ? `<span>${ownerUsernameOf(app) ? `Owner ${escapeHtml(ownerUsernameOf(app)!)}` : "No owner (admin only)"}</span>` : ""}
         </p>
       </header>
       ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Saved.</div>' : ""}
@@ -1714,7 +1733,7 @@ webRoutes.get("/apps/:id", async (c) => {
             <div class="card" id="sso">
               <h2>SSO protection</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
-                Protect this app with Single Sign-On via the subdomain.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
+                Protect this app with Single Sign-On, on its Runway address and on its custom domain.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
               </p>
               <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso">
                 <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
@@ -1854,7 +1873,7 @@ webRoutes.get("/apps/:id", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: admin }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: admin }
     )
   );
 });
@@ -2169,7 +2188,7 @@ webRoutes.get("/users", (c) => {
     totpEnabled: isTotpEnabled(u),
     createdAt: u.created_at,
     appNames: allApps
-      .filter((a) => a.created_by === u.username)
+      .filter((a) => a.owner_user_id === u.id)
       .map((a) => a.name ?? a.id),
   }));
   const rows = people.map((p) => renderPersonCard(p, ctx)).join("");
@@ -2190,11 +2209,79 @@ webRoutes.get("/users", (c) => {
           <button type="submit">Add user</button>
         </div>
       </form>
+      ${renderOAuthAccessCard(error)}
       ${rows}
     `,
-      { username: current.username, csrf: csrfField(c), isAdmin: isAdmin(current) }
+      { username: current.username, userId: current.id, csrf: csrfField(c), isAdmin: isAdmin(current) }
     )
   );
+});
+
+function renderOAuthAccessCard(error: string | undefined): string {
+  const configured =
+    !!getSetting("oauth_google_client_id") || !!getSetting("oauth_microsoft_client_id");
+  const rows = listAccess();
+  const list = rows.length
+    ? rows
+        .map((r) => {
+          const label =
+            r.kind === "domain"
+              ? `Everyone at <strong>@${escapeHtml(r.value)}</strong>`
+              : `<strong>${escapeHtml(r.value)}</strong>${r.one_time ? ' <span class="tag">Invitation, one use</span>' : ""}`;
+          return `<li class="flex" style="justify-content:space-between;align-items:center;margin:0.4rem 0">
+            <span>${label}</span>
+            <form method="POST" action="/users/oauth-access/${r.id}/delete"><button type="submit" class="ghost">Remove</button></form>
+          </li>`;
+        })
+        .join("")
+    : '<li class="hint">Nobody yet. People with Google or Microsoft cannot create an account until you add them.</li>';
+  const msg =
+    error === "oauth_access_invalid"
+      ? '<div class="error">Enter an email address (ann@example.com) or a domain (example.com).</div>'
+      : "";
+  return `<div class="card" id="oauth-access">
+      <h2>Sign in with Google or Microsoft</h2>
+      <p class="hint">${
+        configured
+          ? "Only these people can create an account by signing in with Google or Microsoft. Anyone who already has an account keeps signing in as before."
+          : "Google and Microsoft sign-in is not set up (see Settings, Single Sign-On). Once it is, only the people below can create an account."
+      } Adding a whole domain lets everyone with that address in, so use it only for a domain you control (not gmail.com).</p>
+      ${msg}
+      <ul style="list-style:none;padding:0">${list}</ul>
+      <form method="POST" action="/users/oauth-access">
+        <div class="flex">
+          <input type="text" name="entry" placeholder="ann@example.com or example.com" aria-label="Email address or domain" autocomplete="off" autocapitalize="none" spellcheck="false" required style="flex:1" />
+          <label style="white-space:nowrap"><input type="checkbox" name="invite" value="1" /> One use</label>
+          <button type="submit">Allow</button>
+        </div>
+      </form>
+    </div>`;
+}
+
+webRoutes.post("/users/oauth-access", async (c) => {
+  const body = await c.req.parseBody();
+  const entry = parseAccessEntry(String(body["entry"] ?? ""));
+  if (!entry) return c.redirect("/users?error=oauth_access_invalid#oauth-access");
+  const current = c.get("user");
+  const added = addAccess(entry, {
+    invite: body["invite"] === "1",
+    createdBy: current.username,
+  });
+  if (added) {
+    logAudit(current.id, current.username, "oauth_access_added", {
+      detail: `${entry.kind}=${entry.value}${body["invite"] === "1" && entry.kind === "email" ? " (invitation)" : ""}`,
+    });
+  }
+  return c.redirect("/users#oauth-access");
+});
+
+webRoutes.post("/users/oauth-access/:id/delete", (c) => {
+  const id = Number(c.req.param("id"));
+  const current = c.get("user");
+  if (Number.isInteger(id) && removeAccess(id)) {
+    logAudit(current.id, current.username, "oauth_access_removed", { detail: `id=${id}` });
+  }
+  return c.redirect("/users#oauth-access");
 });
 
 webRoutes.post("/users", async (c) => {
@@ -2230,10 +2317,11 @@ webRoutes.post("/users/:id/delete", (c) => {
   if (target.role === "admin" && countAdmins() <= 1) {
     return c.redirect("/users?error=last_admin");
   }
-  deleteUser(id);
+  const orphaned = deleteUser(id) ?? 0;
   logAudit(current.id, current.username, "user_deleted", {
     targetUserId: target.id,
     targetUsername: target.username,
+    detail: orphaned > 0 ? `${orphaned} app(s) now without an owner (admin-only)` : undefined,
   });
   return c.redirect("/users");
 });
@@ -2483,7 +2571,7 @@ webRoutes.get("/settings", (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -2662,7 +2750,7 @@ webRoutes.get("/rebuild", async (c) => {
           ${quarantineTable}
         </div>
       </div>`,
-      { username: user.username, csrf: csrfField(c), isAdmin: true }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: true }
     )
   );
 });
@@ -2771,7 +2859,7 @@ webRoutes.post("/apps/:id/auto-rebuild", async (c) => {
 // calls must carry `X-Requested-With: runway`, which a cross-site form
 // cannot set; the session cookie is SameSite=Lax as a second layer.
 async function adminApi(c: any, next: any) {
-  const token = getCookieValue(c, SESSION_COOKIE);
+  const token = readSessionToken(c);
   const user = token ? getSessionUser(token) : undefined;
   if (!user) return c.json({ error: "Not signed in" }, 401);
   if (!isAdmin(user)) return c.json({ error: "Admin only" }, 403);
@@ -3008,7 +3096,7 @@ webRoutes.get("/audit", (c) => {
         </table>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3176,7 +3264,7 @@ webRoutes.get("/skills", (c) => {
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3425,7 +3513,7 @@ webRoutes.get("/health", async (c) => {
       </div>
       <div class="health-grid">${tiles}</div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3578,7 +3666,7 @@ webRoutes.get("/account", (c) => {
       ${twofaCard}
       ${tokensCard}
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3625,7 +3713,7 @@ webRoutes.post("/account/tokens", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3664,10 +3752,10 @@ webRoutes.post("/account/password", async (c) => {
   // fresh one so the current tab stays signed in. Other devices are
   // logged out on their next request.
   deleteAllUserSessions(user.id);
-  const oldToken = getCookieValue(c, SESSION_COOKIE);
+  const oldToken = readSessionToken(c);
   if (oldToken) deleteSession(oldToken);
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
 
   logAudit(user.id, user.username, "password_changed", {
     targetUserId: user.id,
@@ -3734,7 +3822,7 @@ webRoutes.get("/account/2fa/verify", async (c) => {
         </form>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3775,7 +3863,7 @@ webRoutes.post("/account/2fa/verify", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });
@@ -3834,7 +3922,7 @@ webRoutes.post("/account/2fa/regenerate", async (c) => {
         </div>
       </div>
     `,
-      { username: user.username, csrf: csrfField(c), isAdmin: isAdmin(user) }
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
 });

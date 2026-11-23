@@ -1,5 +1,6 @@
 import { getSetting } from "../db/settings.js";
-import { getAppByDomain } from "../db/apps.js";
+import { isDomainTaken } from "../db/apps.js";
+import { normalizeHost } from "../db/domain-index.js";
 
 export type CustomDomainError = "format" | "reserved" | "conflict";
 export type CustomDomainResult =
@@ -25,7 +26,7 @@ export function validateCustomDomain(
   raw: string,
   appId: string
 ): CustomDomainResult {
-  const trimmed = raw.trim().toLowerCase();
+  const trimmed = normalizeHost(raw);
   if (!trimmed) return { ok: true, domain: null };
 
   if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(trimmed)) {
@@ -45,10 +46,34 @@ export function validateCustomDomain(
     }
   }
 
-  const clash = getAppByDomain(trimmed);
-  if (clash && clash.id !== appId) {
+  if (isDomainTaken(trimmed, appId)) {
     return { ok: false, error: "conflict" };
   }
 
   return { ok: true, domain: trimmed };
+}
+
+export type GeneratedDomainError = "reserved" | "conflict";
+
+/**
+ * Check the subdomain generated from an app's name (slug.base_domain)
+ * before /app/configure stores it. Two apps with the same name would
+ * otherwise get the same hostname (S03). The caller's own current domain
+ * is fine (re-configuring with the same name). The answer carries no
+ * information about the other app, only that the name is not available.
+ */
+export function checkGeneratedDomain(
+  domain: string,
+  appId: string
+): GeneratedDomainError | null {
+  const host = normalizeHost(domain);
+  const dashboardDomain = normalizeHost(process.env.DASHBOARD_DOMAIN ?? "");
+  if (dashboardDomain && host === dashboardDomain) return "reserved";
+  if (isDomainTaken(host, appId)) return "conflict";
+  return null;
+}
+
+/** A write that lost a race against the unique index. */
+export function isUniqueViolation(err: unknown): boolean {
+  return err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
 }

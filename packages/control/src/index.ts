@@ -1,7 +1,15 @@
 import { serve } from "@hono/node-server";
 import { migrate } from "./db/index.js";
 import { app } from "./app.js";
-import { writeDashboardRoute } from "./deploy/gateway.js";
+import {
+  writeDashboardRoute,
+  writeAppRoute,
+  appRouteExists,
+  appBasicAuth,
+} from "./deploy/gateway.js";
+import { repairSsoRoutes } from "./deploy/gateway-sync.js";
+import { listApps } from "./db/apps.js";
+import { appContainerName } from "./deploy/index.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
 import { refreshDb } from "./deploy/scan.js";
@@ -63,6 +71,28 @@ if (dashboardDomain) {
   console.warn(
     "DASHBOARD_DOMAIN not set; skipping Traefik dashboard route bootstrap."
   );
+}
+
+// Routes written by an older version leave an SSO app's custom domain open;
+// rewrite them now so the fix does not wait for the next deploy.
+try {
+  await repairSsoRoutes({
+    listApps,
+    routeExists: appRouteExists,
+    writeRoute: (a) =>
+      writeAppRoute({
+        appId: a.id,
+        containerName: appContainerName(a.id),
+        domain: a.domain!,
+        customDomain: a.custom_domain,
+        port: a.port,
+        basicAuth: appBasicAuth(a),
+        ssoEnabled: !!a.sso_enabled,
+      }),
+    log: (m) => console.log(m),
+  });
+} catch (err) {
+  console.error("SSO route repair failed:", err);
 }
 
 const port = parseInt(process.env.PORT || "3000", 10);

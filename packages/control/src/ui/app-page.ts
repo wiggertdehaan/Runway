@@ -23,17 +23,17 @@ export const APP_TABS = ["deploys", "security", "config", "access"] as const;
 export type AppTab = (typeof APP_TABS)[number];
 
 /**
- * Who may start a rebuild of an app: an admin, or the user who created it.
+ * Who may start a rebuild of an app: an admin, or the app's owner (by user id).
  * The route also sits behind requireAppAccess, which enforces the same rule
  * for every /apps/:id/* path; this is the second, explicit check so the
  * rebuild route stays safe if that middleware is ever reordered.
  */
 export function mayRebuild(
-  user: { username: string; role: string },
-  app: { created_by: string | null }
+  user: { id: string; role: string },
+  app: { owner_user_id: string | null }
 ): boolean {
   if (user.role === "admin") return true;
-  return app.created_by !== null && app.created_by === user.username;
+  return app.owner_user_id !== null && app.owner_user_id === user.id;
 }
 
 /** Why a rebuild cannot start for this app right now, or null when it can. */
@@ -48,8 +48,8 @@ export function rebuildBlockedReason(app: { image_tag: string | null }): string 
  * without a hidden coupling.
  */
 export function mayRescan(
-  user: { username: string; role: string },
-  app: { created_by: string | null }
+  user: { id: string; role: string },
+  app: { owner_user_id: string | null }
 ): boolean {
   return mayRebuild(user, app);
 }

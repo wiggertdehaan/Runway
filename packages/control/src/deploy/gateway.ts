@@ -1,4 +1,4 @@
-import { mkdir, writeFile, unlink } from "node:fs/promises";
+import { mkdir, writeFile, unlink, access } from "node:fs/promises";
 import { join } from "node:path";
 import yaml from "js-yaml";
 import bcrypt from "bcryptjs";
@@ -107,46 +107,26 @@ export function buildAppRouteDoc(cfg: AppRouteConfig): Record<string, unknown> {
   const allDomains = [cfg.domain];
   if (cfg.customDomain) allDomains.push(cfg.customDomain);
 
-  if (useSso && cfg.customDomain) {
-    // SSO only works on subdomains (session cookie scope). Split
-    // into two routers: subdomain with forwardAuth, custom domain
-    // without.
-    routers[routerKey] = {
-      rule: `Host(\`${cfg.domain}\`)`,
-      entryPoints: ["websecure"],
-      service: routerKey,
-      tls: { certResolver: "letsencrypt" },
-      middlewares: [forwardAuthKey],
-    };
-    routers[`${routerKey}-custom`] = {
-      rule: `Host(\`${cfg.customDomain}\`)`,
-      entryPoints: ["websecure"],
-      service: routerKey,
-      tls: {
-        certResolver: "letsencrypt",
-        domains: allDomains.map((d) => ({ main: d })),
-      },
-    };
-  } else {
-    const hostRule = allDomains
-      .map((d) => `Host(\`${d}\`)`)
-      .join(" || ");
-    const router: Record<string, unknown> = {
-      rule: hostRule,
-      entryPoints: ["websecure"],
-      service: routerKey,
-      tls: {
-        certResolver: "letsencrypt",
-        ...(cfg.customDomain
-          ? { domains: allDomains.map((d) => ({ main: d })) }
-          : {}),
-      },
-    };
-    if (routerMiddlewares.length > 0) {
-      router.middlewares = routerMiddlewares;
-    }
-    routers[routerKey] = router;
+  // One router for every hostname of the app, so the same middleware
+  // (forwardAuth for SSO apps, basicAuth otherwise) guards all of them.
+  // A separate router per host is how the custom domain once ended up
+  // without SSO; do not split them again.
+  const hostRule = allDomains.map((d) => `Host(\`${d}\`)`).join(" || ");
+  const router: Record<string, unknown> = {
+    rule: hostRule,
+    entryPoints: ["websecure"],
+    service: routerKey,
+    tls: {
+      certResolver: "letsencrypt",
+      ...(cfg.customDomain
+        ? { domains: allDomains.map((d) => ({ main: d })) }
+        : {}),
+    },
+  };
+  if (routerMiddlewares.length > 0) {
+    router.middlewares = routerMiddlewares;
   }
+  routers[routerKey] = router;
 
   // Build metadata must never be served by an app container. The static
   // preset copies the whole build context into the nginx webroot, so any
@@ -202,6 +182,16 @@ export async function writeAppRoute(cfg: AppRouteConfig): Promise<void> {
   await mkdir(GATEWAY_CONFIG_DIR, { recursive: true });
   const path = join(GATEWAY_CONFIG_DIR, `${cfg.appId}.yml`);
   await writeFile(path, yaml.dump(buildAppRouteDoc(cfg)), "utf8");
+}
+
+/** True when the app already has a route file in the gateway config. */
+export async function appRouteExists(appId: string): Promise<boolean> {
+  try {
+    await access(join(GATEWAY_CONFIG_DIR, `${appId}.yml`));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function deleteAppRoute(appId: string): Promise<void> {

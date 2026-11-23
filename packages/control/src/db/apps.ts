@@ -1,6 +1,7 @@
 import type { SQLInputValue } from "node:sqlite";
 import { customAlphabet, nanoid } from "nanoid";
 import { db } from "./index.js";
+import { normalizeHost } from "./domain-index.js";
 
 // Lowercase alphabet for app ids so they round-trip cleanly into
 // Docker image and container names (which must be lowercase).
@@ -35,7 +36,10 @@ export interface App {
   health_check_path: string | null;
   image_tag: string | null;
   container_id: string | null;
+  /** Historical label (the creator's username at the time). Never used for rights. */
   created_by: string | null;
+  /** Who owns the app. NULL = no owner: admin-only. The only field rights are checked on. */
+  owner_user_id: string | null;
   scan_threshold: string;
   scan_floor_exempt: number;
   sso_enabled: number;
@@ -59,14 +63,25 @@ export function isConfigured(app: App): boolean {
 /**
  * Create a fresh app. Only an API key is generated here; name, runtime,
  * and domain are set later via the MCP configure flow.
+ *
+ * `owner` is the user the app belongs to; routes pass the signed-in user.
+ * A bare username string is resolved to that account once, right now, and
+ * never kept as the owner (S13: a name is not an identity). A string that
+ * matches no account gives an app without an owner.
  */
-export function createApp(createdBy?: string): App {
+export function createApp(owner?: { id: string; username: string } | string): App {
   const id = generateAppId();
   const api_key = `rwy_${nanoid(32)}`;
+  const ref =
+    typeof owner === "string"
+      ? (db.prepare(`SELECT id, username FROM users WHERE username = ?`).get(owner) as
+          | { id: string; username: string }
+          | undefined) ?? null
+      : owner ?? null;
 
   db.prepare(
-    `INSERT INTO apps (id, api_key, name, runtime, created_by) VALUES (?, ?, NULL, NULL, ?)`
-  ).run(id, api_key, createdBy ?? null);
+    `INSERT INTO apps (id, api_key, name, runtime, created_by, owner_user_id) VALUES (?, ?, NULL, NULL, ?, ?)`
+  ).run(id, api_key, ref?.username ?? (typeof owner === "string" ? owner : null), ref?.id ?? null);
 
   return getApp(id)!;
 }
@@ -82,10 +97,50 @@ export function getAppByKey(api_key: string): App | undefined {
     .get(api_key) as unknown as App | undefined;
 }
 
+/**
+ * The app answering to a hostname. Hostnames are case-insensitive and a
+ * trailing dot is the same name. With the uniqueness rules there is at most
+ * one; the ORDER BY only matters on an installation that still holds
+ * duplicates from before S03, where the oldest app (the original owner of
+ * the name) wins deterministically instead of whichever row SQLite returns.
+ */
 export function getAppByDomain(domain: string): App | undefined {
+  const host = normalizeHost(domain);
   return db
-    .prepare(`SELECT * FROM apps WHERE domain = ? OR custom_domain = ?`)
-    .get(domain, domain) as unknown as App | undefined;
+    .prepare(
+      `SELECT * FROM apps WHERE lower(domain) = ? OR lower(custom_domain) = ?
+       ORDER BY created_at ASC, id ASC LIMIT 1`
+    )
+    .get(host, host) as unknown as App | undefined;
+}
+
+/** Is this hostname already used by an app other than `exceptAppId`? */
+export function isDomainTaken(domain: string, exceptAppId: string): boolean {
+  const host = normalizeHost(domain);
+  const row = db
+    .prepare(
+      `SELECT 1 AS taken FROM apps
+        WHERE id != ? AND (lower(domain) = ? OR lower(custom_domain) = ?) LIMIT 1`
+    )
+    .get(exceptAppId, host, host);
+  return !!row;
+}
+
+/** Does this user own the app? An app without an owner is nobody's. */
+export function isAppOwner(
+  user: { id: string },
+  app: { owner_user_id: string | null }
+): boolean {
+  return app.owner_user_id !== null && app.owner_user_id === user.id;
+}
+
+/** Current username of an app's owner, for display only; null when it has none. */
+export function ownerUsernameOf(app: { owner_user_id: string | null }): string | null {
+  if (!app.owner_user_id) return null;
+  const row = db
+    .prepare(`SELECT username FROM users WHERE id = ?`)
+    .get(app.owner_user_id) as { username: string } | undefined;
+  return row?.username ?? null;
 }
 
 export function listApps(): App[] {

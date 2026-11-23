@@ -747,10 +747,10 @@ curl -sS -X PUT ${base}/api/v1/app/sso \\
   -d '{"enabled":false}'
 \`\`\`
 
-SSO takes effect immediately via Traefik forward-auth on the
-subdomain. When both SSO and basic auth are enabled, SSO takes
-precedence. No redeploy required. Custom domain routes do not carry
-the session cookie and are not SSO-protected.
+SSO takes effect immediately via Traefik forward-auth, on the app's
+Runway address and on its custom domain alike. When both SSO and basic
+auth are enabled, SSO takes precedence. No redeploy required. A visitor
+signs in through the dashboard once per app host.
 
 ## Deploy history & rollback
 

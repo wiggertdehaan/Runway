@@ -282,27 +282,64 @@ without knowing why.
 - `packages/control/src/routes/oauth.ts` — mounted in `app.ts`
   before web routes. Contains:
   - `GET /auth/{google,microsoft}` — redirects to provider consent
-  - `GET /auth/{google,microsoft}/callback` — exchanges code, looks
-    up or auto-provisions a Runway user by email, creates session
+  - `GET /auth/{google,microsoft}/callback` — exchanges code, then
+    `decideOAuthLogin` (pure, `auth/oauth-access.ts`) decides: an
+    unverified email never signs in, links or provisions (Google needs
+    `email_verified`; Microsoft only counts with the optional
+    `xms_edov` claim, otherwise fail closed); an existing account signs
+    in and is pinned to the provider `sub` on first use; an unknown
+    address gets an account ONLY if it is on the `oauth_access`
+    allowlist (address or domain) or has a one-use invitation, managed
+    on the Users page. All refusals show the same message and are
+    audited as `oauth_denied` with the reason. `return_to` is validated
+    by `safeReturnTo` (relative path or one of our hosts) at the start
+    and again at the callback.
   - `GET /auth/verify` — Traefik forward-auth endpoint, called on
-    every request to SSO-protected app subdomains. Checks session
-    cookie + email allowlist.
+    every request to SSO-protected app hosts. Checks the app-host cookie
+    + email allowlist (decision in `auth/forward-auth.ts`, fail-closed).
+  - `GET /sso/start` — dashboard side of the handshake (see below).
 - `packages/control/src/db/app-emails.ts` — per-app email allowlist
   CRUD (add, remove, check, replace-all).
-- **Session cookie domain**: when `base_domain` is configured, the
-  session cookie is set on `.{base_domain}` (both in `web.ts` and
-  `oauth.ts`) so it's readable by the forward-auth middleware on
-  app subdomains. Custom domains are outside this cookie scope and
-  therefore not SSO-protected.
-- **Gateway**: `writeAppRoute()` emits a `forwardAuth` middleware
-  when `ssoEnabled` is true. If the app also has a custom domain,
-  two separate Traefik routers are generated: the subdomain router
-  has forwardAuth, the custom-domain router does not.
+- **Two separate sign-ins (S02)**: the dashboard session cookie is
+  host-only (no `Domain`; `__Host-runway_session` over HTTPS, plain name
+  on http for local dev; see `middleware/cookies.ts`), so an app never
+  receives it. An SSO app host has its own cookie (`__Host-runway_sso`,
+  host-only, 8 h, hashed in `sso_sessions`). Handshake: `/auth/verify`
+  without an app cookie redirects to the dashboard `/sso/start?host&uri`;
+  the dashboard (login first if needed, `runway_login_return` cookie
+  carries the way back) checks the host is a known SSO app (Runway
+  address or custom domain: this is what prevents an open redirect) and
+  that the user is on the app's allowlist, then redirects to
+  `https://<host><uri>?__runway_ticket=...`; `/auth/verify` on that host
+  spends the one-time, 60 s, host-bound ticket (`sso_tickets`), sets the
+  cookie and redirects to the clean URL. App sign-ins hang off the
+  dashboard session (JOIN on `sessions.token`): sign-out, expiry,
+  password change or deleting the user ends them. The app itself still
+  receives its own host's cookie (Traefik forwards cookies); it is worth
+  nothing anywhere else. Never set a cookie with `Domain=.{base_domain}`
+  again, and keep the `__Host-` prefix and the "only the prefixed name is
+  read over HTTPS" rule (a subdomain could otherwise plant a session).
+  `migrate()` ends all dashboard sessions once (`sessions_host_only_v1`).
+- **Gateway**: `writeAppRoute()` emits one router for all hostnames of the
+  app, with a `forwardAuth` middleware when `ssoEnabled` is true, so the
+  custom domain is protected exactly like the Runway address.
 - **SSO vs basic auth**: when both are enabled on an app, SSO takes
   precedence — the forwardAuth middleware replaces basicAuth.
 - OAuth client credentials are stored in the settings table
   (`oauth_google_client_id`, `oauth_google_client_secret`,
   `oauth_microsoft_client_id`, `oauth_microsoft_client_secret`).
+
+### App ownership is a user id, not a name
+- `apps.owner_user_id` is the only field rights are checked on
+  (`isAppOwner`, `mayRebuild`/`mayRescan`, `requireAppAccess`,
+  `appsVisibleTo`). `apps.created_by` is a historical label that keeps a
+  rollback to an older release working; never compare it with a username.
+- An app with `owner_user_id` NULL has no owner and is admin-only. That is
+  the state after the owner was deleted (`deleteUser` clears it in the same
+  transaction) and for rows that never had an owner.
+- The one-time fill from the old name (`db/owner-migration.ts`) runs only in
+  the transaction that adds the column. Do not make it re-run: it would
+  hand an ownerless app to whoever has since taken that username.
 
 ## Migrations
 
