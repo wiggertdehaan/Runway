@@ -2,6 +2,13 @@ import type { SQLInputValue } from "node:sqlite";
 import { customAlphabet, nanoid } from "nanoid";
 import { db } from "./index.js";
 import { normalizeHost } from "./domain-index.js";
+import {
+  hashToken,
+  newToken,
+  placeholderFor,
+  safeEqualHex,
+  tokenHint,
+} from "../util/token-hash.js";
 
 // Lowercase alphabet for app ids so they round-trip cleanly into
 // Docker image and container names (which must be lowercase).
@@ -25,7 +32,18 @@ export function defaultPortForRuntime(runtime: Runtime): number {
 export interface App {
   id: string;
   name: string | null;
+  /**
+   * NOT the key. Keys are stored as hashes (S10); this column holds the
+   * non-secret placeholder `hashed:<id>`. The plaintext exists only on the
+   * object `createApp` and `rotateAppKey` hand back, once.
+   */
   api_key: string;
+  api_key_hash: string | null;
+  /** Last four characters of the key, so two keys can be told apart in a list. */
+  api_key_hint: string | null;
+  /** Hash of the key a rotation replaced, valid until `prev_key_expires_at`. */
+  prev_key_hash: string | null;
+  prev_key_expires_at: string | null;
   runtime: Runtime | null;
   port: number;
   domain: string | null;
@@ -74,7 +92,7 @@ export function isConfigured(app: App): boolean {
  */
 export function createApp(owner?: { id: string; username: string } | string): App {
   const id = generateAppId();
-  const api_key = `rwy_${nanoid(32)}`;
+  const api_key = newToken("app-key");
   const ref =
     typeof owner === "string"
       ? (db.prepare(`SELECT id, username FROM users WHERE username = ?`).get(owner) as
@@ -82,11 +100,21 @@ export function createApp(owner?: { id: string; username: string } | string): Ap
           | undefined) ?? null
       : owner ?? null;
 
+  // S10: only the hash is stored. The plaintext leaves this function once, on
+  // the returned object, for the caller to show to the person who asked.
   db.prepare(
-    `INSERT INTO apps (id, api_key, name, runtime, created_by, owner_user_id) VALUES (?, ?, NULL, NULL, ?, ?)`
-  ).run(id, api_key, ref?.username ?? (typeof owner === "string" ? owner : null), ref?.id ?? null);
+    `INSERT INTO apps (id, api_key, api_key_hash, api_key_hint, name, runtime, created_by, owner_user_id)
+     VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)`
+  ).run(
+    id,
+    placeholderFor(id),
+    hashToken(api_key),
+    tokenHint(api_key),
+    ref?.username ?? (typeof owner === "string" ? owner : null),
+    ref?.id ?? null
+  );
 
-  return getApp(id)!;
+  return { ...getApp(id)!, api_key };
 }
 
 export function getApp(id: string): App | undefined {
@@ -94,10 +122,99 @@ export function getApp(id: string): App | undefined {
     | unknown as App | undefined;
 }
 
-export function getAppByKey(api_key: string): App | undefined {
-  return db
-    .prepare(`SELECT * FROM apps WHERE api_key = ?`)
-    .get(api_key) as unknown as App | undefined;
+/**
+ * The app a presented key belongs to: its current key, or (for a short while
+ * after a rotation that asked for an overlap) the key it replaced.
+ * Lookup is by hash; the match is then confirmed in constant time.
+ */
+export function getAppByKey(presented: string, now = Date.now()): App | undefined {
+  const hash = hashToken(presented);
+  const current = db
+    .prepare(`SELECT * FROM apps WHERE api_key_hash = ?`)
+    .get(hash) as unknown as App | undefined;
+  if (current && current.api_key_hash && safeEqualHex(current.api_key_hash, hash)) {
+    return current;
+  }
+
+  const previous = db
+    .prepare(`SELECT * FROM apps WHERE prev_key_hash = ?`)
+    .get(hash) as unknown as App | undefined;
+  if (
+    previous &&
+    previous.prev_key_hash &&
+    previous.prev_key_expires_at &&
+    safeEqualHex(previous.prev_key_hash, hash) &&
+    Date.parse(previous.prev_key_expires_at.replace(" ", "T") + "Z") > now
+  ) {
+    return previous;
+  }
+
+  // A row written by something that does not know about hashes yet (an old
+  // process during a rolling upgrade, a restore of an old backup) still has
+  // its plaintext key and no hash. Take it over on first use.
+  const legacy = db
+    .prepare(`SELECT * FROM apps WHERE api_key_hash IS NULL AND api_key = ?`)
+    .get(presented) as unknown as App | undefined;
+  if (legacy) {
+    db.prepare(
+      `UPDATE apps SET api_key_hash = ?, api_key_hint = ?, api_key = ? WHERE id = ? AND api_key_hash IS NULL`
+    ).run(hash, tokenHint(presented), placeholderFor(legacy.id), legacy.id);
+    return getApp(legacy.id);
+  }
+  return undefined;
+}
+
+/**
+ * S11: replace an app's key. With `graceMinutes` > 0 the old key keeps working
+ * for that long (so a pipeline can be updated without a gap); with 0 it stops
+ * at once. Rotating again while an overlap is running ends the older overlap:
+ * there is never more than one extra key. Returns the new key, once.
+ */
+export function rotateAppKey(
+  appId: string,
+  graceMinutes = 0,
+  now = Date.now()
+): { app: App; key: string } | null {
+  const existing = getApp(appId);
+  if (!existing) return null;
+  const key = newToken("app-key");
+  const grace = Math.max(0, Math.min(Math.floor(graceMinutes), MAX_KEY_GRACE_MINUTES));
+  const prevHash = grace > 0 ? existing.api_key_hash : null;
+  const prevExpires =
+    grace > 0 ? new Date(now + grace * 60_000).toISOString().slice(0, 19).replace("T", " ") : null;
+  db.prepare(
+    `UPDATE apps
+        SET api_key_hash = ?, api_key_hint = ?, api_key = ?,
+            prev_key_hash = ?, prev_key_expires_at = ?, updated_at = datetime('now')
+      WHERE id = ?`
+  ).run(hashToken(key), tokenHint(key), placeholderFor(appId), prevHash, prevExpires, appId);
+  return { app: { ...getApp(appId)!, api_key: key }, key };
+}
+
+/** End an overlap early: the replaced key stops working now. */
+export function revokePreviousKey(appId: string): boolean {
+  return (
+    db
+      .prepare(
+        `UPDATE apps SET prev_key_hash = NULL, prev_key_expires_at = NULL WHERE id = ? AND prev_key_hash IS NOT NULL`
+      )
+      .run(appId).changes > 0
+  );
+}
+
+/** Longest overlap a rotation may ask for: one week. */
+export const MAX_KEY_GRACE_MINUTES = 7 * 24 * 60;
+
+/** Is an overlap still running for this app? */
+export function previousKeyActive(
+  app: Pick<App, "prev_key_hash" | "prev_key_expires_at">,
+  now = Date.now()
+): boolean {
+  return (
+    !!app.prev_key_hash &&
+    !!app.prev_key_expires_at &&
+    Date.parse(app.prev_key_expires_at.replace(" ", "T") + "Z") > now
+  );
 }
 
 /**
@@ -144,6 +261,25 @@ export function ownerUsernameOf(app: { owner_user_id: string | null }): string |
     .prepare(`SELECT username FROM users WHERE id = ?`)
     .get(app.owner_user_id) as { username: string } | undefined;
   return row?.username ?? null;
+}
+
+/**
+ * May this person see (and, as owner or admin, manage) this app? The one rule
+ * behind the dashboard's app list and the API's user tokens: an admin sees all
+ * apps, an owner their own (by user id), nobody else's, and an app without an
+ * owner is admin-only.
+ */
+export function appVisibleTo(
+  user: { id: string; role: string },
+  app: { owner_user_id: string | null }
+): boolean {
+  return user.role === "admin" || isAppOwner(user, app);
+}
+
+/** The apps this viewer may see: all for an admin, their own for an owner. */
+export function appsVisibleTo(userId: string, admin: boolean): App[] {
+  const user = { id: userId, role: admin ? "admin" : "member" };
+  return listApps().filter((a) => appVisibleTo(user, a));
 }
 
 export function listApps(): App[] {

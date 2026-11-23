@@ -166,8 +166,21 @@ import {
   readSessionToken,
   setSessionCookie,
 } from "../middleware/cookies.js";
-import { logAudit, getRecentAuditEntries } from "../db/audit.js";
-import { updateApp } from "../db/apps.js";
+import { logAudit, getRecentAuditEntries, apiAuditRetentionDays } from "../db/audit.js";
+import { parseAuditFilter, renderAuditFilters, renderAuditRows } from "../ui/audit.js";
+import { appVisibleTo, appsVisibleTo, isAppOwner, previousKeyActive, revokePreviousKey, rotateAppKey, updateApp } from "../db/apps.js";
+import { forgetKey, peekKey, rememberKey } from "../util/key-reveal.js";
+import {
+  createUserToken,
+  getUserTokenById,
+  listAllUserTokens,
+  listUserTokens,
+  revokeUserToken,
+  TokenLimitError,
+} from "../db/user-tokens.js";
+import { deleteDevTokenAsAdmin, listAllDevTokens } from "../db/dev-tokens.js";
+import { grantableScopes, isScope, USER_TOKEN_DEFAULT_DAYS, USER_TOKEN_MAX_DAYS } from "../util/token-scopes.js";
+import { renderNewTokenForm, renderTokenTable } from "../ui/token-lists.js";
 import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
 import { describeBaseImage, lineOf, parseImageRef } from "../deploy/base-images.js";
 import {
@@ -773,11 +786,6 @@ function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
   return out;
 }
 
-/** The apps this viewer may see: all for an admin, their own for an owner. */
-function appsVisibleTo(userId: string, admin: boolean): App[] {
-  return admin ? listApps() : listApps().filter((a) => a.owner_user_id === userId);
-}
-
 /** App-page section: quarantine status, exemption, owner notices. */
 function renderQuarantineSection(app: App, admin: boolean): string {
   const q = getQuarantine(app.id);
@@ -862,7 +870,8 @@ async function renderAppsLive(
           buckets: buckets.get(app.id) ?? [],
         },
         statuses[i],
-        admin
+        admin,
+        user.id
       )
     )
     .join("");
@@ -1059,6 +1068,9 @@ webRoutes.post("/apps", async (c) => {
   const valid = requested.filter((id) => enabled.has(id));
 
   const app = createApp({ id: user.id, username: user.username });
+  // S10: createApp hands the plaintext back once. Keep it in memory for this
+  // person, so the home page can show it for a few minutes.
+  rememberKey(app.id, user.id, app.api_key);
   if (valid.length > 0) {
     setAppSkillIds(app.id, valid);
   }
@@ -1524,7 +1536,8 @@ function renderAppRow(
   stats: AppStats | null = null,
   activity: { lastRequestAt: string | null; buckets: number[] } | null = null,
   status: AppStatus | null = null,
-  admin = false
+  admin = false,
+  viewerId = ""
 ): string {
   const configured = !!(app.name && app.runtime);
   const id = encodeURIComponent(app.id);
@@ -1541,7 +1554,11 @@ function renderAppRow(
     : `<span class="meta">&mdash;</span>`;
 
   const llmsTxtUrl = dashboardDomain ? `https://${dashboardDomain}/llms.txt` : "/llms.txt";
-  const claudeInstruction = `Fetch ${llmsTxtUrl} and deploy this project using API key ${app.api_key}`;
+  // S10: keys are stored hashed, so the dashboard has a key to show only for a
+  // few minutes after it was made (see util/key-reveal.ts), and only to the
+  // person who made it. Otherwise the instruction carries a placeholder.
+  const revealedKey = viewerId ? peekKey(app.id, viewerId) : null;
+  const claudeInstruction = `Fetch ${llmsTxtUrl} and deploy this project using API key ${revealedKey ?? "<paste your API key here>"}`;
 
   const st = status ?? statusOf(app, stats, undefined, Date.now());
   const statusCell = configured
@@ -1565,7 +1582,11 @@ function renderAppRow(
       <div class="overflow-dropdown">
         <a href="/apps/${id}" class="overflow-item" style="text-decoration:none">${configured ? "Open app page" : "Set up"}</a>
         <button type="button" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy deploy instruction</button>
-        <button type="button" data-copy="${escapeHtml(app.api_key)}" onclick="copyText(this)">Copy API key</button>
+        ${
+          revealedKey
+            ? `<button type="button" data-copy="${escapeHtml(revealedKey)}" onclick="copyText(this)">Copy API key</button>`
+            : `<a href="/apps/${id}#access" class="overflow-item" style="text-decoration:none">Rotate API key</a>`
+        }
         <form method="POST" action="/apps/${id}/delete" style="margin:0" data-app-name="${escapeHtml(displayName)}" onsubmit="return confirmDelete(this)">
           <button type="submit" class="overflow-danger">Delete app</button>
         </form>
@@ -1585,6 +1606,11 @@ function renderAppRow(
           <p class="meta" style="margin:0 0 0.5rem">Paste this in <a href="https://claude.ai/code" target="_blank" rel="noopener" style="color:var(--tx)">Claude Code</a> inside your project:</p>
           <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:var(--r1);padding:0.4rem 0.6rem;margin:0 0 0.5rem;font-size:0.7rem;white-space:pre-wrap;word-break:break-all;color:var(--tx);user-select:all">${escapeHtml(claudeInstruction)}</pre>
           <button type="button" style="padding:0.25rem 0.75rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy</button>
+          ${
+            revealedKey
+              ? `<p class="meta" style="margin:0.5rem 0 0">This key is shown for a few minutes only and is stored as a hash. Copy it now.</p>`
+              : `<p class="meta" style="margin:0.5rem 0 0">Keys are not stored in a readable form. <a href="/apps/${id}#access" style="color:var(--tx)">Rotate the key</a> to get a new one.</p>`
+          }
         </div>
         <div class="c-menu">${overflowMenu}</div>
       </td>
@@ -1623,6 +1649,86 @@ webRoutes.post("/apps/:id/delete", async (c) => {
     deleteApp(app.id);
   }
   return c.redirect("/");
+});
+
+/**
+ * The API-key card on the Access tab (S10, S11). A stored key cannot be shown;
+ * a new one is shown here once, for a few minutes, to the person who made it.
+ */
+function renderApiKeyCard(app: App, revealed: string | null): string {
+  const id = encodeURIComponent(app.id);
+  const hint = app.api_key_hint ? `<code>${escapeHtml(`rwy_…${app.api_key_hint}`)}</code>` : "";
+  const overlap = previousKeyActive(app)
+    ? `<p class="meta" style="margin:0.75rem 0 0">The previous key still works until ${escapeHtml(app.prev_key_expires_at ?? "")} UTC.
+         <form method="POST" action="/apps/${id}/key/end-overlap" style="display:inline"><button type="submit" class="ghost" style="width:auto;padding:0.2rem 0.6rem">End it now</button></form></p>`
+    : "";
+  const fresh = revealed
+    ? `<div class="notice" style="border:1px solid var(--ok);border-radius:var(--r1);padding:0.75rem;margin:0.75rem 0">
+         <strong>New key. Copy it now: it is not shown again.</strong>
+         <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:var(--r1);padding:0.5rem 0.6rem;margin:0.5rem 0;word-break:break-all;white-space:pre-wrap;user-select:all">${escapeHtml(revealed)}</pre>
+         <button type="button" style="width:auto;padding:0.25rem 0.75rem;font-size:0.8rem" data-copy="${escapeHtml(revealed)}" onclick="copyText(this)">Copy key</button>
+         <form method="POST" action="/apps/${id}/key/hide" style="display:inline"><button type="submit" class="ghost" style="width:auto;padding:0.25rem 0.75rem;font-size:0.8rem">I have copied it</button></form>
+       </div>`
+    : "";
+  return `
+            <div class="card" id="api-key">
+              <h2>API key</h2>
+              <p class="hint" style="margin:0.5rem 0 0.75rem">
+                The key that lets a script, a CI job or an agent deploy this app.
+                It is kept as a one-way hash, so an existing key cannot be shown again${hint ? ` (yours ends in ${hint})` : ""}.
+                Lost it, or shared it where you should not have? Rotate it.
+              </p>
+              ${fresh}
+              <form method="POST" action="/apps/${id}/key/rotate">
+                <div class="flex" style="gap:0.5rem;flex-wrap:wrap;align-items:center">
+                  <label for="key-grace" class="meta">Old key</label>
+                  <select id="key-grace" name="grace" style="width:auto">
+                    <option value="0">stops working now</option>
+                    <option value="60">keeps working for 1 hour</option>
+                    <option value="1440">keeps working for 24 hours</option>
+                    <option value="10080">keeps working for 7 days</option>
+                  </select>
+                  <button type="submit">Rotate key</button>
+                </div>
+              </form>
+              ${overlap}
+            </div>
+`;
+}
+
+webRoutes.post("/apps/:id/key/rotate", async (c) => {
+  const user = c.get("user");
+  const app = getApp(c.req.param("id"));
+  // requireAppAccess has already limited /apps/:id/* to admins and the owner.
+  if (!app || !appVisibleTo(user, app)) return c.redirect("/?forbidden=1");
+  const body = await c.req.parseBody();
+  const raw = Number(body["grace"]);
+  const grace = [0, 60, 1440, 10080].includes(raw) ? raw : 0;
+  const rotated = rotateAppKey(app.id, grace);
+  if (!rotated) return c.redirect("/?forbidden=1");
+  rememberKey(app.id, user.id, rotated.key);
+  logAudit(user.id, user.username, "app_key_rotated", {
+    detail: `${app.id} overlap ${grace} min${isAppOwner(user, app) ? "" : " (by administrator)"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}#access`);
+});
+
+webRoutes.post("/apps/:id/key/end-overlap", (c) => {
+  const user = c.get("user");
+  const app = getApp(c.req.param("id"));
+  if (!app || !appVisibleTo(user, app)) return c.redirect("/?forbidden=1");
+  if (revokePreviousKey(app.id)) {
+    logAudit(user.id, user.username, "app_key_overlap_ended", { detail: app.id });
+  }
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}#access`);
+});
+
+webRoutes.post("/apps/:id/key/hide", (c) => {
+  const user = c.get("user");
+  const app = getApp(c.req.param("id"));
+  if (!app || !appVisibleTo(user, app)) return c.redirect("/?forbidden=1");
+  if (peekKey(app.id, user.id)) forgetKey(app.id);
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}#access`);
 });
 
 // ── App detail (env vars + volumes) ─────────────────────
@@ -1770,6 +1876,7 @@ webRoutes.get("/apps/:id", async (c) => {
 
           <!-- ── Access tab ─────────────────────────── -->
           <div class="tab-panel panel-access">
+            ${renderApiKeyCard(app, peekKey(app.id, user.id))}
             <div class="card">
               <h2>Custom domain</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
@@ -2289,11 +2396,75 @@ webRoutes.get("/users", (c) => {
         </div>
       </form>
       ${renderOAuthAccessCard(error)}
+      ${renderAdminTokensCard(c.req.query("token_revoked"))}
       ${rows}
     `,
       { username: current.username, userId: current.id, csrf: csrfField(c), isAdmin: isAdmin(current) }
     )
   );
+});
+
+function renderAdminTokensCard(revoked: string | undefined): string {
+  const userTokens = listAllUserTokens().map((t) => ({ ...t, hint: t.token_hint }));
+  const devTokens = listAllDevTokens().map((t) => ({
+    id: t.id,
+    name: t.name,
+    hint: t.token_hint,
+    scope: null,
+    expires_at: t.expires_at,
+    last_used_at: t.last_used_at,
+    revoked_at: null,
+    username: t.username,
+  }));
+  return `<div class="card" id="api-tokens">
+      <h2>Tokens</h2>
+      <p class="hint">Every access token and skill token on this server. Revoking one ends it at once; the person can make a new one. The tokens themselves are never shown.</p>
+      ${revoked ? '<p style="color:var(--ok)">Token revoked.</p>' : ""}
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.25rem">Access tokens</h3>
+      ${renderTokenTable(userTokens, {
+        revokeAction: (t) => `/users/tokens/${t.id}/revoke`,
+        showOwner: true,
+        empty: "Nobody has made an access token yet.",
+        confirmText: "Revoke this token? Whatever uses it loses access straight away.",
+      })}
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.25rem">Skill tokens</h3>
+      ${renderTokenTable(devTokens, {
+        revokeAction: (t) => `/users/dev-tokens/${t.id}/revoke`,
+        showOwner: true,
+        empty: "Nobody has made a skill token yet.",
+        confirmText: "Revoke this token? Claude Code sessions using it lose access.",
+      })}
+    </div>`;
+}
+
+webRoutes.post("/users/tokens/:id/revoke", (c) => {
+  const current = c.get("user");
+  const id = c.req.param("id");
+  const done = revokeUserToken(id, current.id);
+  if (done) {
+    const owner = getUser(done.user_id);
+    logAudit(current.id, current.username, "user_token_revoked", {
+      targetUserId: done.user_id,
+      targetUsername: owner?.username,
+      detail: `${id} (by administrator)`,
+    });
+  }
+  return c.redirect("/users?token_revoked=1#api-tokens");
+});
+
+webRoutes.post("/users/dev-tokens/:id/revoke", (c) => {
+  const current = c.get("user");
+  const id = c.req.param("id");
+  const done = deleteDevTokenAsAdmin(id);
+  if (done) {
+    const owner = getUser(done.user_id);
+    logAudit(current.id, current.username, "dev_token_revoked", {
+      targetUserId: done.user_id,
+      targetUsername: owner?.username,
+      detail: `${id} (by administrator)`,
+    });
+  }
+  return c.redirect("/users?token_revoked=1#api-tokens");
 });
 
 function renderOAuthAccessCard(error: string | undefined): string {
@@ -3178,36 +3349,22 @@ webRoutes.post("/settings/webhook", async (c) => {
 
 webRoutes.get("/audit", (c) => {
   const user = c.get("user");
-  const entries = getRecentAuditEntries(50);
-
-  const rows = entries
-    .map((e) => {
-      const target =
-        e.target_username
-          ? `${escapeHtml(e.target_username)}`
-          : '<span class="meta">—</span>';
-      return `
-        <tr>
-          <td class="meta">${escapeHtml(e.created_at)}</td>
-          <td>${escapeHtml(e.username)}</td>
-          <td><code>${escapeHtml(e.action)}</code></td>
-          <td>${target}</td>
-          <td class="meta">${e.detail ? escapeHtml(e.detail) : "—"}</td>
-        </tr>`;
-    })
-    .join("");
+  const filter = parseAuditFilter(c.req.query("type"));
+  const entries = getRecentAuditEntries(100, filter);
+  const rows = renderAuditRows(entries);
 
   return c.html(
     layout(
       "Audit log",
       `
       <h1>Audit log</h1>
+      ${renderAuditFilters(filter)}
       <div class="card" style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
           <thead>
             <tr style="text-align:left;border-bottom:1px solid var(--line)">
               <th style="padding:0.5rem 0.75rem">Time</th>
-              <th style="padding:0.5rem 0.75rem">User</th>
+              <th style="padding:0.5rem 0.75rem">Who</th>
               <th style="padding:0.5rem 0.75rem">Action</th>
               <th style="padding:0.5rem 0.75rem">Target</th>
               <th style="padding:0.5rem 0.75rem">Detail</th>
@@ -3218,6 +3375,7 @@ webRoutes.get("/audit", (c) => {
           </tbody>
         </table>
       </div>
+      <p class="hint">Calls made with an app key or the MCP route are listed with the app that made them. Field names are recorded, never values. Refused attempts are counted per source and ten-minute window instead of one line each. API lines are kept for ${apiAuditRetentionDays()} days.</p>
     `,
       { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
@@ -3659,6 +3817,7 @@ webRoutes.get("/account", (c) => {
   const pwSaved = c.req.query("pw_saved");
   const tokenRevoked = c.req.query("token_revoked");
   const tokens = listDevTokens(user.id);
+  const accessTokens = listUserTokens(user.id);
 
   const passwordCard = `
     <div class="card">
@@ -3730,6 +3889,7 @@ webRoutes.get("/account", (c) => {
           <tr style="text-align:left;color:var(--text-muted);font-weight:500">
             <th style="padding:0.4rem 0.6rem 0.4rem 0">Name</th>
             <th style="padding:0.4rem 0.6rem">Last used</th>
+            <th style="padding:0.4rem 0.6rem">Expires</th>
             <th style="padding:0.4rem 0.6rem">Created</th>
             <th></th>
           </tr>
@@ -3739,8 +3899,9 @@ webRoutes.get("/account", (c) => {
             .map(
               (t) => `
             <tr style="border-top:1px solid var(--border)">
-              <td style="padding:0.5rem 0.6rem 0.5rem 0">${escapeHtml(t.name)}</td>
+              <td style="padding:0.5rem 0.6rem 0.5rem 0">${escapeHtml(t.name)}${t.token_hint ? ` <span class="meta"><code>…${escapeHtml(t.token_hint)}</code></span>` : ""}</td>
               <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.last_used_at ? escapeHtml(formatRelative(t.last_used_at)) : "never"}</td>
+              <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.expires_at ? escapeHtml(t.expires_at.slice(0, 10)) : "never"}</td>
               <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${escapeHtml(formatRelative(t.created_at))}</td>
               <td style="padding:0.5rem 0 0.5rem 0.6rem;text-align:right">
                 <form method="POST" action="/account/tokens/${escapeHtml(t.id)}/delete" style="margin:0" onsubmit="return confirm('Revoke this token? Any Claude Code session using it will lose access.')">
@@ -3753,6 +3914,30 @@ webRoutes.get("/account", (c) => {
         </tbody>
       </table>`
     : `<p class="meta" style="margin-top:0.75rem">You have no developer tokens yet.</p>`;
+
+  const accessTokenRevoked = c.req.query("access_token_revoked");
+  const accessTokensCard = `
+    <div class="card" id="access-tokens">
+      <h2>Access tokens</h2>
+      <p class="meta" style="margin-top:0.5rem">
+        One token that reaches every app you may see on this Runway server, for scripts,
+        CI and coding agents. It can do what you can do here, and no more: the scope
+        you pick narrows it further. Each token expires, and you can revoke it at any time.
+        A token is shown once, when you create it.
+      </p>
+      ${accessTokenRevoked ? '<p style="color:var(--ok);margin:0.75rem 0 0">Token revoked.</p>' : ""}
+      ${c.req.query("access_token_error") === "limit" ? '<div class="error" style="margin-top:0.75rem">You have too many active tokens. Revoke one first.</div>' : ""}
+      ${renderTokenTable(
+        accessTokens.map((t) => ({ ...t, hint: t.token_hint })),
+        {
+          revokeAction: (t) => `/account/access-tokens/${t.id}/delete`,
+          empty: "You have no access tokens yet.",
+          confirmText: "Revoke this token? Anything using it will lose access straight away.",
+        }
+      )}
+      ${renderNewTokenForm({ admin: isAdmin(user) })}
+    </div>
+  `;
 
   const tokensCard = `
     <div class="card">
@@ -3793,6 +3978,7 @@ webRoutes.get("/account", (c) => {
       </div>
       ${passwordCard}
       ${twofaCard}
+      ${accessTokensCard}
       ${tokensCard}
     `,
       { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
@@ -3845,6 +4031,67 @@ webRoutes.post("/account/tokens", async (c) => {
       { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
   );
+});
+
+webRoutes.post("/account/access-tokens", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const name = String(body["name"] ?? "").trim();
+  const scopeRaw = String(body["scope"] ?? "read");
+  const days = Number(body["days"]);
+  if (!name || name.length > 60) return c.redirect("/account#access-tokens");
+  // The scope is checked against the person's role here and again on every use.
+  const scope = isScope(scopeRaw) && grantableScopes(user.role).includes(scopeRaw) ? scopeRaw : "read";
+  let created;
+  try {
+    created = createUserToken(
+      user.id,
+      name,
+      scope,
+      Number.isFinite(days) && days >= 1 ? Math.min(days, USER_TOKEN_MAX_DAYS) : USER_TOKEN_DEFAULT_DAYS
+    );
+  } catch (err) {
+    if (err instanceof TokenLimitError) return c.redirect("/account?access_token_error=limit#access-tokens");
+    throw err;
+  }
+  // The audit line names the token by id and says what it may do; never the token.
+  logAudit(user.id, user.username, "user_token_created", {
+    detail: `${created.id} ${scope} until ${created.expires_at.slice(0, 10)}`,
+  });
+  const base = publicBaseUrl(c);
+  return c.html(
+    layout(
+      "Token created",
+      `
+      <h1>Access token created</h1>
+      <div class="card">
+        <h2>${escapeHtml(created.name)}</h2>
+        <p class="meta" style="margin-top:0.5rem">
+          <strong>This is the only time the token will be shown.</strong>
+          Store it in your password manager or a secret store. It is valid until
+          ${escapeHtml(created.expires_at.slice(0, 10))} and can do: ${escapeHtml(created.scope)}.
+        </p>
+        <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:0.6rem 0.75rem;margin:0.75rem 0 0;font-family:monospace;font-size:0.85rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(created.token)}</pre>
+        <button type="button" style="margin-top:0.5rem;padding:0.3rem 0.7rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(created.token)}" onclick="copyText(this)">Copy token</button>
+        <p class="meta" style="margin-top:1rem">Check that it works (server: <code>${escapeHtml(base)}</code>): <code>GET /api/v1/me</code> with the header <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+        <div style="margin-top:1.5rem"><a href="/account#access-tokens" style="color:var(--brand)">Back to account</a></div>
+      </div>
+    `,
+      { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
+    )
+  );
+});
+
+webRoutes.post("/account/access-tokens/:id/delete", (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id");
+  const token = getUserTokenById(id);
+  // Only your own. Someone else's id gets the same answer as an unknown one.
+  if (token && token.user_id === user.id && revokeUserToken(id, user.id)) {
+    logAudit(user.id, user.username, "user_token_revoked", { detail: `${id} (by owner)` });
+    return c.redirect("/account?access_token_revoked=1#access-tokens");
+  }
+  return c.redirect("/account#access-tokens");
 });
 
 webRoutes.post("/account/tokens/:id/delete", async (c) => {

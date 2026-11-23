@@ -137,6 +137,21 @@ services:
       # (threads included) per app container, default 512.
       - RUNWAY_HARDENING=${RUNWAY_HARDENING:-}
       - RUNWAY_PIDS_LIMIT=${RUNWAY_PIDS_LIMIT:-}
+      # Rate limits per API key / MCP token (S21). Empty = built-in default.
+      # Per minute: READ 120, WRITE 60. Per 10 minutes: HEAVY (deploy, rollback,
+      # source download) 10, AUTH_FAIL (wrong keys from one address) 20.
+      # API_IP_RATE_LIMIT is a coarse per-address flood guard (default 600/min).
+      - RATE_LIMIT_READ_PER_MIN=${RATE_LIMIT_READ_PER_MIN:-}
+      - RATE_LIMIT_WRITE_PER_MIN=${RATE_LIMIT_WRITE_PER_MIN:-}
+      - RATE_LIMIT_HEAVY_PER_10MIN=${RATE_LIMIT_HEAVY_PER_10MIN:-}
+      - RATE_LIMIT_AUTH_FAIL_PER_10MIN=${RATE_LIMIT_AUTH_FAIL_PER_10MIN:-}
+      - API_IP_RATE_LIMIT=${API_IP_RATE_LIMIT:-}
+      # Events (GET /api/v1/events): how long and how many are kept, and the
+      # health watcher that raises health_unhealthy / health_recovered
+      # (HEALTH_WATCH_INTERVAL_MS=0 turns it off; default one look a minute).
+      - EVENTS_RETENTION_DAYS=${EVENTS_RETENTION_DAYS:-}
+      - EVENTS_MAX_PER_APP=${EVENTS_MAX_PER_APP:-}
+      - HEALTH_WATCH_INTERVAL_MS=${HEALTH_WATCH_INTERVAL_MS:-}
     security_opt:
       - no-new-privileges:true
     tmpfs:

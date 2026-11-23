@@ -1,27 +1,27 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { RunwayClient } from "./client.js";
+import { ConfigError, loadRunwayConfig } from "./config.js";
+import { RunwayRegistry } from "./registry.js";
 import { registerTools } from "./tools.js";
 
-const RUNWAY_URL = process.env.RUNWAY_URL;
-const RUNWAY_APP_KEY = process.env.RUNWAY_APP_KEY;
-
-if (!RUNWAY_URL || !RUNWAY_APP_KEY) {
-  console.error(
-    "Missing required environment variables: RUNWAY_URL and RUNWAY_APP_KEY"
-  );
+let registry: RunwayRegistry;
+try {
+  const config = loadRunwayConfig(process.env);
+  // stderr only: stdout belongs to the MCP protocol. Warnings never contain a credential.
+  for (const w of config.warnings) console.error(`runway-mcp: ${w}`);
+  registry = new RunwayRegistry(config);
+} catch (err) {
+  console.error(err instanceof ConfigError ? err.message : "runway-mcp: could not read its configuration.");
   process.exit(1);
 }
-
-const client = new RunwayClient(RUNWAY_URL, RUNWAY_APP_KEY);
 
 const server = new McpServer({
   name: "runway",
   version: "0.1.0",
 });
 
-registerTools(server, client);
+registerTools(server, registry);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

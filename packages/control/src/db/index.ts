@@ -1,7 +1,9 @@
+import { ensureEventsTables } from "./events-schema.js";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { ensureUniqueDomainIndexes } from "./domain-index.js";
 import { backfillOwnerUserIds } from "./owner-migration.js";
+import { ensureUserTokensTable, migrateTokenStorage } from "./token-migration.js";
 
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), "runway.db");
 
@@ -142,6 +144,29 @@ export function migrate() {
       detail TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+  `);
+
+  // S12: the audit log also records what the API and the MCP route do, and
+  // who tried and failed. Extra columns, all nullable or defaulted, so every
+  // existing row stays valid (actor_type NULL = a person using the dashboard).
+  const auditCols = db.prepare("PRAGMA table_info(audit_log)").all() as Array<{
+    name: string;
+  }>;
+  for (const [col, ddl] of [
+    ["actor_type", "TEXT"],
+    ["app_id", "TEXT"],
+    ["result", "TEXT"],
+    ["source_ip", "TEXT"],
+    ["count", "INTEGER NOT NULL DEFAULT 1"],
+  ] as const) {
+    if (!auditCols.some((c) => c.name === col)) {
+      db.exec(`ALTER TABLE audit_log ADD COLUMN ${col} ${ddl}`);
+    }
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_type, id);
+    CREATE INDEX IF NOT EXISTS idx_audit_denied ON audit_log(action, source_ip, id);
+    CREATE INDEX IF NOT EXISTS idx_audit_app ON audit_log(app_id, id);
   `);
 
   // S09: failed second-factor attempts per user. Kept in the database (not
@@ -538,6 +563,18 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_periodic_scans_app_recent
       ON app_periodic_scans(app_id, created_at DESC);
   `);
+
+  // S10/S11/S18: tokens are kept as hashes, and users can hold tokens of their
+  // own. See token-migration.ts for why this is safe to run on every start.
+  const moved = migrateTokenStorage(db);
+  if (moved.appKeys > 0 || moved.devTokens > 0) {
+    console.log(
+      `Stored ${moved.appKeys} app key(s) and ${moved.devTokens} developer token(s) as hashes. ` +
+        `Keys still work; the dashboard can no longer show an old key (rotate to get a new one).`
+    );
+  }
+  ensureUserTokensTable(db);
+  ensureEventsTables(db);
 
   // S02: until now the session cookie was set on `.{base_domain}`, so every
   // deployed app received a valid dashboard session. Those tokens are

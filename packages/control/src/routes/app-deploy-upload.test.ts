@@ -30,6 +30,7 @@ import { migrate } from "../db/index.js";
 import { createApp, updateApp } from "../db/apps.js";
 import { setSetting } from "../db/settings.js";
 import { UPLOAD_DIR } from "../deploy/upload.js";
+import { resetTokenLimits } from "../middleware/token-limit.js";
 
 let key = "";
 let unconfiguredKey = "";
@@ -43,6 +44,8 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  // These tests deploy far more often than the per-key allowance (S21).
+  resetTokenLimits();
   deployApp.mockClear();
   setSetting("max_upload_mb", "1");
 });

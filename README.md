@@ -148,7 +148,123 @@ claude mcp add runway \
   -- node $(pnpm mcp:path)
 ```
 
-Then just say *"deploy this to Runway"* in any Claude Code session.
+Then just say *"deploy this to Runway"* in any Claude Code session. This
+is the per-app way: the key (`rwy_...`) is one app, and it works exactly as
+it always has. For several apps or several Runway servers use Option D.
+
+#### Events: what happened, without polling
+
+`GET /api/v1/events?since=<cursor>` (and the MCP tools `runway_events` and
+`runway_event_detail`) tell an owner or their agent what happened to an app:
+a deploy ended, health changed, a rebuild finished, an actively exploited
+vulnerability (KEV) deadline is near, a dependency was updated or rolled back,
+an exemption is ending. An event is a type, an app id and a code from a fixed
+list; it never carries logs, environment variables, error messages or text
+from the app. The caller keeps the cursor and asks again (pull, works in every
+client); a user token (`rwu_`) sees exactly the apps that person may see. Events
+are kept 30 days / 500 per app (`EVENTS_RETENTION_DAYS`, `EVENTS_MAX_PER_APP`);
+`HEALTH_WATCH_INTERVAL_MS=0` turns off the health watcher that raises
+`health_unhealthy` / `health_recovered`. Full list of codes: `/llms.txt`.
+
+### Option D — One MCP connection for all your apps, on several Runways
+
+For power users who manage more than one app, or more than one Runway
+server (say a personal one, a club one and a company one). The local MCP
+server (the same `packages/mcp`) reads a small config file, holds one
+**user token** per server and lets the agent pick the Runway and the app on
+each call. The servers know nothing of each other: only your local MCP
+process bundles them, and each request carries only the token of the server
+it goes to.
+
+**1. Make a token on each server.** Sign in, open **Account > Access
+tokens**, give it a label, pick a scope and an expiry, and copy the token
+(`rwu_...`) once; it is shown only then.
+
+| Scope | Lets the agent |
+|---|---|
+| `read` | list apps, read status, logs, scans and events |
+| `deploy` | everything above, plus deploy, rebuild, rescan, configure, env, domain |
+| `admin` | administrator actions (only works while you are an administrator) |
+
+A token sees the apps you may see (as owner: your own apps; as administrator:
+all of them), with the same rights as the dashboard, decided on every request.
+It expires (90 days by default, one year at most) and you, or an administrator,
+can revoke it at any time on the same page. Pick the smallest scope that does
+the job.
+
+**2. Write the config** to `~/.runway/config.json` (or point `RUNWAY_CONFIG`
+at another file) and keep it private (`chmod 600`; the client warns if other
+users can read it):
+
+```json
+{
+  "runways": [
+    { "name": "home",    "url": "https://runway.example.com",  "token": "rwu_..." },
+    { "name": "club",    "url": "https://apps.example.org",    "token_env": "RUNWAY_TOKEN_CLUB" },
+    { "name": "company", "url": "https://runway.example.net",  "token_env": "RUNWAY_TOKEN_COMPANY" }
+  ]
+}
+```
+
+- `name`: what you and the agent call it (lowercase letters, digits, `-`, `_`).
+- `token` or `token_env`: the token itself, or the name of an environment
+  variable that holds it, so it need not be in the file.
+- `url` must be `https://` (plain `http://` only for `localhost`, or with
+  `"allow_insecure": true` on a network you control).
+- Optional `"app_keys": { "<app id>": "rwy_..." }` gives per-app keys for apps
+  you cannot reach with a token; the key wins for that app.
+- A field the client does not know is an error, not ignored, so a typo cannot
+  silently mean "no token".
+
+One server only? `RUNWAY_URL` plus `RUNWAY_TOKEN` in the environment works
+without a file. Without a file and without `RUNWAY_TOKEN`, the old
+`RUNWAY_URL` + `RUNWAY_APP_KEY` mode (Option C) is used, unchanged.
+
+**3. Register it.** Build once (`pnpm install && pnpm mcp:build`), then:
+
+```bash
+# Claude Code
+claude mcp add runway -s user -- node $(pnpm mcp:path)
+```
+
+```jsonc
+// Claude Desktop: claude_desktop_config.json
+// macOS: ~/Library/Application Support/Claude/claude_desktop_config.json
+// Windows: %APPDATA%\Claude\claude_desktop_config.json
+{
+  "mcpServers": {
+    "runway": {
+      "command": "node",                                  // use the full path to node if Desktop cannot find it
+      "args": ["/path/to/Runway/packages/mcp/dist/index.js"],
+      "env": { "RUNWAY_CONFIG": "/Users/you/.runway/config.json" }
+    }
+  }
+}
+```
+
+Restart the client, then ask *"list my Runways"*.
+
+**Adding another Runway later:** make a token on that server, add an entry
+to `config.json` (or a `token_env` and export the variable), restart the MCP
+connection, ask *"list my Runways"* to see it answer and when its token expires.
+
+**How it is used.** With a config the app tools take two extra arguments,
+`runway` (optional when only one server is configured, required, and never
+guessed, when there are several) and `app` (needed with a user token; ids come
+from `runway_list_apps`). New tools: `runway_list_runways` (name, address,
+whether it answers, whether the token is valid, scope, expiry; never the
+token), `runway_list_apps` (all your apps, grouped by server; one server being
+down does not hide the others), `runway_create_app`, `runway_rebuild` and
+`runway_rescan` (you may rebuild and rescan apps you own). `runway_events`
+asks every server at once and keeps one cursor per server: pass the `next`
+map it returned back as `since`.
+
+What the client guarantees: a token is only ever sent to its own server (a
+redirect is never followed, so it cannot be replayed elsewhere), never appears
+in tool output, error messages or logs, and every server answer is rebuilt field
+by field before the model sees it; text that came from an app stays fenced as
+untrusted. A server that is slow, down or rate limiting (HTTP 429) is
+reported on its own and does not stop the others.
 
 ## Features
 
@@ -284,9 +400,11 @@ button for admins.
 - CSRF protection (double-submit cookie with timing-safe comparison)
 - Optional TOTP two-factor authentication with backup codes
 - Login rate limiting (5 attempts / 15 minutes per IP), persisted in SQLite
-- API rate limiting (60 requests / minute per IP)
-- Per-app API keys, independent from dashboard sessions
+- API rate limiting per key (120 reads / 60 writes per minute, 10 deploys per 10 minutes) and per address (see below)
+- Per-app API keys, independent from dashboard sessions, stored as hashes (shown once), rotatable with an optional overlap
+- User tokens (`rwu_`): one token per person for every app they may see, with a scope (read / deploy / admin), an expiry, and revocation by the person or an administrator
 - Audit log for all admin actions
+- Events (a fixed vocabulary, pulled with a cursor): no logs, env or app text in them; text that came from an app is cut short and marked as untrusted
 - Content Security Policy headers
 - Isolated builds via BuildKit (user code never touches the Docker socket)
 - One Docker network per app: apps cannot reach each other or the control plane; optional host egress rules keep them off the cloud metadata address, the host and private networks
@@ -458,8 +576,18 @@ isolation.
   same IP within 15 minutes, further login attempts are blocked until the
   window expires. Rate limits are persisted in SQLite and survive restarts.
   Failed attempts are logged in the audit log with the source IP.
-- **API rate limiting** — 60 requests per minute per IP on all `/api/v1/*`
-  endpoints.
+- **API rate limiting** — per key, not per address, so many people behind one
+  office address do not share an allowance. Each app key (and each developer
+  token on `/mcp`) gets its own buckets: 120 reads and 60 writes per minute,
+  and 10 heavy actions (deploy, rollback, source download) per 10 minutes. A
+  refusal is `429` with `Retry-After`. Wrong keys are counted per source
+  address: 20 in 10 minutes blocks that address (even for a correct key) until
+  the window ends; a missing header does not count. On top of that sits a coarse
+  per-address flood guard (600 requests per minute). Counters live in memory of
+  the one control process, so a restart resets them. Tune with
+  `RATE_LIMIT_READ_PER_MIN`, `RATE_LIMIT_WRITE_PER_MIN`,
+  `RATE_LIMIT_HEAVY_PER_10MIN`, `RATE_LIMIT_AUTH_FAIL_PER_10MIN` and
+  `API_IP_RATE_LIMIT` in `.env`. Refusals are audited as counted rows.
 - **OAuth2 / SSO** — authorization code flow with Google and Microsoft.
   ID tokens are decoded (not signature-verified) after a direct HTTPS
   code exchange with the provider, which is safe because the token was

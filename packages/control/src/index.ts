@@ -12,13 +12,17 @@ import { listApps } from "./db/apps.js";
 import { appContainerName } from "./deploy/index.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
+import { sweepTokenLimits } from "./middleware/token-limit.js";
 import { pruneAttempts } from "./auth/twofa-limit.js";
+import { pruneApiAudit } from "./db/audit.js";
 import { refreshDb } from "./deploy/scan.js";
 import { startActivityTailer } from "./deploy/activity-tailer.js";
 import { startPeriodicScanner } from "./deploy/periodic-scanner.js";
 import { startCachePruner } from "./deploy/cache-pruner.js";
 import { startRebuildScheduler } from "./deploy/rebuild-scheduler.js";
 import { startQuarantineMonitor } from "./deploy/quarantine.js";
+import { startHealthWatch } from "./deploy/health-watch.js";
+import { pruneEvents } from "./db/events.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
 import { cleanupStaleUploads } from "./deploy/upload.js";
 import { docker } from "./deploy/docker.js";
@@ -36,9 +40,14 @@ startActivityTailer();
 setInterval(() => {
   deleteExpiredSessions();
   cleanupExpiredEntries();
+  sweepTokenLimits();
   pruneAttempts();
+  pruneApiAudit();
+  pruneEvents();
 }, 60 * 60 * 1000);
 deleteExpiredSessions();
+pruneApiAudit();
+pruneEvents();
 
 // Deploy uploads are removed by the deploy itself; this catches what a crash
 // in the middle of an upload left in the upload folder.
@@ -69,6 +78,10 @@ startRebuildScheduler();
 // KEV quarantine: minute tick evaluating running apps against the CISA
 // KEV list (term, final rebuild attempt, quarantine, automatic return).
 startQuarantineMonitor();
+
+// A change in whether a running app is healthy becomes an event (one look a
+// minute, a change believed after three). HEALTH_WATCH_INTERVAL_MS=0 turns it off.
+startHealthWatch();
 
 const dashboardDomain = process.env.DASHBOARD_DOMAIN;
 if (dashboardDomain) {

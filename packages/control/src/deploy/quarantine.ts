@@ -5,11 +5,14 @@ import {
   addNotice,
   deleteQuarantine,
   getActiveExemption,
+  getExemption,
   getQuarantine,
   saveQuarantine,
   type QuarantineRow,
 } from "../db/quarantine.js";
 import { getQuarantineTermDays } from "../db/settings.js";
+import { emitEvent } from "../db/events.js";
+import { exemptionPhase, kevCountdownThreshold, kevEventCode } from "../util/events.js";
 import { notifyAdminWebhook } from "../util/webhook.js";
 import { stopContainerByName } from "./docker.js";
 import { writeMaintenanceRoute } from "./gateway.js";
@@ -153,6 +156,17 @@ async function announce(
   extra: Record<string, unknown> = {}
 ): Promise<void> {
   addNotice(app.id, kind, message);
+  const evCode = kevEventCode(kind);
+  if (evCode) {
+    emitEvent({
+      appId: app.id,
+      code: evCode,
+      facts: {
+        cves: Array.isArray(extra.cves) ? (extra.cves as string[]) : undefined,
+        deadline: typeof extra.deadline === "string" ? extra.deadline : undefined,
+      },
+    });
+  }
   logAudit(SYSTEM_USER, SYSTEM_USER, `quarantine_${kind}`, {
     detail: `${app.id}: ${message}`.slice(0, 500),
   });
@@ -182,6 +196,51 @@ function fmtDays(ms: number): string {
   if (days >= 1) return `${Math.round(days * 10) / 10} day(s)`;
   const mins = Math.max(1, Math.round(ms / 60_000));
   return `${mins} minute(s)`;
+}
+
+/**
+ * Tell the owner how close the end of the fix period is: once at 7, 3 and 1 day
+ * left (the tightest threshold crossed), never twice for the same deadline.
+ */
+export function emitCountdown(
+  appId: string,
+  row: Pick<QuarantineRow, "kev_first_seen">,
+  termMs: number,
+  now: number
+): void {
+  const deadline = deadlineOf(row, termMs);
+  if (!deadline) return;
+  const days = kevCountdownThreshold(Date.parse(deadline), now, termMs);
+  if (days === null) return;
+  emitEvent(
+    {
+      appId,
+      code: `kev_deadline_${days}d` as "kev_deadline_7d" | "kev_deadline_3d" | "kev_deadline_1d",
+      facts: { deadline, cves: Object.keys(row.kev_first_seen) },
+      dedupeKey: `kev_deadline_${days}d:${deadline}`,
+      dedupeDays: 400,
+    },
+    now
+  );
+}
+
+/** An exemption that is about to end, or has: said once per end date. */
+export function emitExemptionEvents(app: App, now: number): void {
+  const e = getExemption(app.id);
+  if (!e) return;
+  const until = Date.parse(e.until);
+  const phase = exemptionPhase(until, now);
+  if (!phase) return;
+  emitEvent(
+    {
+      appId: app.id,
+      code: phase === "expired" ? "exemption_expired" : "exemption_expiring",
+      facts: { until: e.until },
+      dedupeKey: `exemption_${phase}:${e.until}`,
+      dedupeDays: 400,
+    },
+    now
+  );
 }
 
 /**
@@ -301,7 +360,10 @@ export async function evaluateAppQuarantine(
   }
 
   if (finalRow === null) deleteQuarantine(app.id);
-  else saveQuarantine(finalRow); // also keeps the first-seen map current
+  else {
+    saveQuarantine(finalRow); // also keeps the first-seen map current
+    if (finalRow.state === "grace") emitCountdown(app.id, finalRow, termMs, now);
+  }
   return taken;
 }
 
@@ -311,6 +373,8 @@ export async function quarantineTick(log: Logger = console): Promise<void> {
   if (tickRunning) return;
   tickRunning = true;
   try {
+    // Exemption end dates are plain dates in our own database: no KEV feed needed.
+    for (const app of listApps()) emitExemptionEvents(app, Date.now());
     const kev = await getKevList();
     // No KEV data at all: neither quarantine nor resolve on a guess.
     if (kev.fetchedAt === null) return;

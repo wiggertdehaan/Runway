@@ -20,6 +20,8 @@ things that would waste time to re-derive.
   - `src/tools.ts` — zod-typed tool definitions
   - `src/tar.ts` — tars a project dir respecting dockerignore/gitignore
   - `src/client.ts` — HTTP client against the control API
+  - `src/config.ts`, `src/registry.ts`, `src/multi.ts` — several Runway
+    servers (see "One MCP connection, several Runways")
 - `docker-compose.yml` — Traefik + control, nothing else by default
 - `install.sh` — bootstrap for a fresh Linux server
 
@@ -392,6 +394,101 @@ Do not add a new place that calls `verifyAndConsumeTotp` for a signed-in or
 pre-auth user without going through `verifySecondFactor`. The per-IP limit on
 the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 
+### What the API does is audited by one middleware (S12)
+- `middleware/api-audit.ts` sits right after `apiAuth` on `/api/v1/*` and writes
+  one `audit_log` line for every POST/PUT/PATCH/DELETE (also when the request is
+  refused or the handler throws) and for two sensitive reads (`GET /app/env`,
+  `GET /app/source`). Do not log from the individual routes: a route added
+  later is covered by construction. A test walks the route table and fails if
+  a GET route is in neither `AUDITED_READS` nor `UNAUDITED_READS`, so a new
+  route forces the question whether reading it is sensitive.
+- A line carries `actor_type` (`api-key`, `mcp`, or NULL for a person using the
+  dashboard), `app_id`, `result` (ok / rejected / denied / error),
+  `source_ip` and `count`. The actor is `api-key:<app id>`: an app key is the
+  only identity the API has. When user tokens arrive they get their own
+  `actor_type` and their user id.
+- The log says WHAT changed, never the values: `util/audit-detail.ts`
+  (`describeBody`) records field names, nested key names (the env var NAMES),
+  booleans and a short allow-list of scalars (`SAFE_SCALAR_FIELDS`); values of
+  every other field are never read. `finalizeDetail` masks token-shaped strings
+  (`rwy_`, `rwd_`, `rwu_`, `Bearer`), strips control characters and caps the
+  length. Adding a field to `SAFE_SCALAR_FIELDS` is a decision that it can never
+  hold a credential.
+- Refused requests (`api_auth_denied`, `api_rate_limited`, `mcp_auth_denied`)
+  go through `logDeniedAudit`: one row per source, action and reason per ten
+  minutes with a `count`, at most 100 sources per window, the rest in one shared
+  row (`source_ip = '*'`). The presented key is never stored, not even a prefix.
+- `pruneApiAudit` (hourly) keeps API lines 90 days (`AUDIT_API_RETENTION_DAYS`)
+  and at most 100000 (`AUDIT_API_MAX_ROWS`). Lines about people using the
+  dashboard are never pruned.
+- The MCP client sends `X-Runway-Client: runway-mcp`; it is shown in the log as
+  a hint and decides nothing.
+
+### Tokens are hashes, user tokens carry a scope (S10, S11, S18)
+- Three kinds, by prefix (`util/token-hash.ts`): `rwy_` app key (one app, all
+  of it), `rwd_` developer token (skills MCP, read-only), `rwu_` user token (a
+  person, every app they may see, on `/api/v1` and `/mcp`). A secret is shown
+  once and only its SHA-256 is stored (`apps.api_key_hash`,
+  `dev_tokens.token_hash`, `user_tokens.token_hash`). The old plaintext
+  columns hold the placeholder `hashed:<id>` (NOT NULL UNIQUE). `createApp`
+  and `rotateAppKey` return the plaintext once, on the returned object; every
+  later read (`getApp`) has the placeholder in `api_key`. Never add the key to
+  a log, an audit detail, a response or a page. `migrateTokenStorage` is
+  data-driven and idempotent; `getAppByKey` also adopts a row that still has a
+  plaintext key and no hash.
+- The dashboard cannot show an old key. `util/key-reveal.ts` holds a NEW key in
+  memory for 10 minutes for the one person who made it (the home page
+  re-renders every 5 s, so a single read is not enough); never persist it.
+- Rotation (`rotateAppKey`, `POST /apps/:id/key/rotate`, `POST
+  /api/v1/app/rotate-key`): the old key can keep working for 0 to 7 days
+  (`prev_key_hash`, `prev_key_expires_at`); rotating again ends the earlier
+  overlap, so there is at most one extra key.
+- `/api/v1/*` order is `apiAuth` (who) → `apiTokenLimit` (counts every call,
+  refusals too) → `apiAuthorize` (scope; for a user token the app named in
+  `X-Runway-App`/`?app=` must pass `appVisibleTo`, an unknown and a foreign app
+  both 404) → `apiAudit`. Tests pin the order. App keys are refused on the
+  routes in `USER_TOKEN_ONLY_ROUTES`. A route not named in `ADMIN_ROUTES` and
+  not a plain read needs `deploy`, so a new route is never a free read.
+- Scopes are a ladder `read < deploy < admin` (`util/token-scopes.ts`). `admin`
+  also needs the person to be an administrator NOW (role is read on every
+  request). Rights are the dashboard's own functions (`appVisibleTo`,
+  `mayRebuild`, `mayRescan`), evaluated per request. A token cannot make
+  tokens: that is dashboard-only (session + CSRF).
+- User tokens expire (90 days default, 1 year at most), at most 20 active per
+  person, die with the person (FK cascade), revoke keeps the row (`revoked_at`,
+  `revoked_by`). The administrator sees and revokes all on `/users`.
+
+### Rate limits are per key, plus a cap on wrong keys per source (S21)
+- `middleware/token-limit.ts` + `util/token-limit.ts` (pure). `apiTokenLimit`
+  sits right after `apiAuth` and before `apiAudit` on `/api/v1/*`; `/mcp`
+  calls `enforceTokenLimit` after it has found the token. The counter key is
+  `<actor>|<bucket>` with actor `api-key:<app id>` or `mcp-token:<token id>`
+  (never the secret). Buckets: `read` 120/min, `write` 60/min, `heavy` 10 per
+  10 min (`HEAVY_ROUTES`: deploy, rollback, source download). Anything that is
+  not a GET/HEAD is `write` by default, so a new route is never a free read;
+  put an expensive new route in `HEAVY_ROUTES` (a test fails on a stale entry).
+  User tokens use the same functions under the actor `user-token:<token id>`.
+- Wrong keys: `guessBlocked` runs BEFORE the key is looked up and refuses a
+  source (429, even for a correct key) that has presented 20 unknown keys in
+  10 minutes; `recordWrongKey` counts only a key that does not exist, not a
+  missing header (a monitor without credentials must not lock itself out).
+  API and `/mcp` share the counter. The source address comes from
+  `getClientIp` (X-Forwarded-For only from a Docker-bridge peer).
+- In memory, one control process: a restart resets the counters, and several
+  control processes would each have their own. `FixedWindowCounter` is capped
+  at 20000 keys (expired first, then oldest) and swept hourly. The older
+  per-address limiter in `rate-limit.ts` (SQLite) stays as a flood guard,
+  600/min by default, because one office address is many people.
+- 429 answers carry `Retry-After` and say only how long to wait. Refusals are
+  one counted audit row (`api_token_rate_limited`, `auth_guess_blocked`) via
+  `logDeniedAudit`; they never reach `apiAudit`. The MCP client reports a 429
+  as "wait N seconds" (`packages/mcp/src/errors.ts`), never retries by itself
+  and masks the key in every error message.
+- Env: `RATE_LIMIT_READ_PER_MIN`, `RATE_LIMIT_WRITE_PER_MIN`,
+  `RATE_LIMIT_HEAVY_PER_10MIN`, `RATE_LIMIT_AUTH_FAIL_PER_10MIN`,
+  `API_IP_RATE_LIMIT`; compose passes them through. They are read on every
+  request, capped at 100000, and a typo falls back to the default.
+
 ### Uploads are streamed to disk and checked before use (S06)
 - `POST /api/v1/app/deploy` streams the body to `UPLOAD_DIR` (default
   `<db dir>/uploads`, on the data volume: `/tmp` is a tmpfs, i.e. RAM) with a
@@ -422,6 +519,78 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 - The MCP client (`packages/mcp/src/tar.ts`) leaves such symlinks out (and
   says so) and stops at `RUNWAY_MAX_UPLOAD_MB` (default 100), mirroring the
   server, which would otherwise refuse the whole upload.
+
+### Events are a fixed vocabulary, pulled with a cursor
+- `app_events` (`db/events-schema.ts`, `db/events.ts`) is one table for every app;
+  `util/events.ts` (pure) holds everything that decides what an event IS. An
+  event is a code from `EVENT_CODES` (type, severity and a one-line summary come
+  from that table), an app id and a few validated `facts` (CVE ids, deadlines,
+  counts, ids). It never carries logs, env values, error messages or free text.
+  To add an event: add the code to `EVENT_CODES`, write it with `emitEvent` at
+  the place that already knows the outcome. `emitEvent` never throws (an event
+  must not break a deploy) and has a windowed `dedupeKey`.
+- Text that an app contributed (a package name, a base image) may only travel as
+  `untrusted` and is served as `untrusted_text`, cut to 200 characters, stripped
+  of control/bidi/zero-width characters, with a note that it is data. It is
+  cleaned on the way in and again on the way out. The list never has it; only
+  `GET /events/:id` does. Do not add a free-text field to `EventView`.
+- `GET /api/v1/events?since=` returns events oldest first for exactly the apps
+  the caller may see (an app key: its own; a user token: `appsVisibleTo`, an
+  administrator all; `?app=` narrows, anything else 404). The cursor is `c1_` +
+  the base-36 row id: monotone, opaque to clients. A cursor below the floor
+  (`event_meta.floor`, the highest pruned id) or above anything issued answers
+  `cursor_expired: true` with the oldest events that remain. Residual leak: ids
+  are global, so gaps between the events a caller sees are other apps' events.
+- Where events are written: `recordDeploy` (deploy outcomes; a rebuild's own
+  deploys pass `silentEvent` because the rebuild reports one `rebuild_*` event),
+  the failure branch of `POST /app/deploy`, `executeRun` in `deploy/rebuild.ts`
+  (rebuild result plus dependency/base-image events, via
+  `eventsForRebuildResult`), `announce`/`emitCountdown`/`emitExemptionEvents` in
+  `deploy/quarantine.ts` (KEV; 7/3/1-day countdown once per deadline; exemption
+  ending once per end date) and `deploy/health-watch.ts` (health transitions:
+  one look a minute, a change believed after 3, at most one event per 10
+  minutes per app, in-memory baseline so a restart emits nothing).
+- Retention: `pruneEvents` hourly, 30 days (`EVENTS_RETENTION_DAYS`) and 500 per
+  app (`EVENTS_MAX_PER_APP`). Reads count as `read` for the rate limit and are
+  not audited (`UNAUDITED_READS`).
+- The MCP client (`packages/mcp/src/events.ts`) rebuilds every answer field by
+  field and fences `untrusted_text`; it does not pass server output through. A
+  client that talks to several servers must keep one cursor per server.
+
+### One MCP connection, several Runways (packages/mcp)
+- `config.ts` decides the mode. **legacy**: no file and no `RUNWAY_TOKEN`, so
+  `RUNWAY_URL` + `RUNWAY_APP_KEY`, one app key, the tools exactly as they always
+  were (no `runway`/`app` arguments, error text unchanged). **config**:
+  `~/.runway/config.json` (or `RUNWAY_CONFIG`), or `RUNWAY_URL` +
+  `RUNWAY_TOKEN`; every app tool then also takes `runway` and `app`.
+  `registerTools` reads `registry.mode` and changes the schemas, so do not add
+  the routing fields unconditionally.
+- `registry.ts` is the only place that picks server, app and credential
+  (`clientFor`). One server: `runway` optional. Several: required and never
+  guessed. A user token acts on an app via `X-Runway-App` (`clientFor` refuses a
+  call with no app); an account call (events, the app list, create app) sends
+  the app only as `?app=`, never as the header. An app key in `app_keys` wins for
+  its app and is sent without the header. Nothing federates: a client carries
+  one base URL and the one credential that belongs to it.
+- `RunwayClient.send` is the one place a request leaves the process: `redirect:
+  "manual"` and a 3xx is an error (never replay Authorization at another host), a
+  time limit on every call, network failures reported by reason code only, and
+  `readJson` never quotes the body (the parser's message does). Keep new calls
+  going through it.
+- Credentials never reach the model: `tools.ts` masks every secret the registry
+  holds in all output (`ok`) and in errors (`fail`, with token shapes too), and a
+  config error names the field, never a value (a file that is not JSON is
+  reported without quoting it, because the parser quotes the text).
+  `tools.test.ts` sweeps every tool against hostile server behaviour and fails if
+  a tool is added without a row in its argument table.
+- `multi.ts` rebuilds every answer from several servers field by field. The
+  `runway` field of an event, an app or a result is written from the local config
+  name, never from what a server sent. Events keep one cursor per server
+  (`since`/`next` are maps `{runwayName: cursor}`); a failing server keeps the
+  cursor it was given and does not block the others. `list_runways`/`list_apps`
+  probe with a short timeout and four servers at a time.
+- Not built on purpose: rotating an app key from the MCP (the new key would be
+  shown to the model).
 
 ## Migrations
 
