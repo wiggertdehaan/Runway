@@ -6,6 +6,7 @@ import type { Context } from "hono";
 import { HTMX_INTEGRITY, HTMX_PATH } from "./assets.js";
 import { APP_CSS } from "../ui/styles.js";
 import { CLIENT_JS, PREPAINT_JS } from "../ui/client.js";
+import { appStatus, countStates, summaryParts, type AppStatus } from "../ui/status.js";
 
 const APP_VERSION = (() => {
   try {
@@ -146,7 +147,6 @@ import { clampQuarantineTermDays, getQuarantineTermDays } from "../db/settings.j
 import { getLatestPeriodicScan, listPeriodicScanAppIds } from "../db/periodic-scans.js";
 import {
   renderKevStatus,
-  renderRiskBadge,
   renderSecurityAttention,
   type AtRiskApp,
 } from "./security-view.js";
@@ -713,6 +713,9 @@ async function renderAppsLive(
   );
   const now = Date.now();
   const atRisk = collectAtRisk(apps);
+  const statuses = apps.map((app, i) =>
+    statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now)
+  );
   const appCards = apps
     .map((app, i) =>
       renderAppCard(
@@ -723,27 +726,18 @@ async function renderAppsLive(
           lastRequestAt: app.last_request_at,
           buckets: buckets.get(app.id) ?? [],
         },
-        renderRiskBadge(atRisk.get(app.id), now)
+        statuses[i]
       )
     )
     .join("");
 
-  const running = apps.filter((a) => a.status === "running").length;
-  const failing = apps.filter((a) =>
-    ["failed", "exited"].includes(a.status)
-  ).length;
-  const parts: string[] = [];
-  if (apps.length > 0) {
-    parts.push(`${apps.length} app${apps.length !== 1 ? "s" : ""}`);
-    if (running)
-      parts.push(
-        `<span style="color:var(--status-success)">${running} running</span>`
-      );
-    if (failing)
-      parts.push(
-        `<span style="color:var(--status-error)">${failing} failing</span>`
-      );
-  }
+  const parts = summaryParts(countStates(statuses)).map((p) =>
+    p.state === "failed" || p.state === "offline"
+      ? `<span style="color:var(--status-error)">${escapeHtml(p.text)}</span>`
+      : p.state === "live"
+        ? `<span style="color:var(--status-success)">${escapeHtml(p.text)}</span>`
+        : escapeHtml(p.text)
+  );
 
   // The search input is rendered (and preserved) whenever there are
   // any apps, not only past the old >=4 threshold, so its value
@@ -1282,44 +1276,38 @@ function renderScanSection(
   `;
 }
 
-function renderScanBadge(app: ReturnType<typeof listApps>[number]): string {
-  const latest = getLatestDeployWithScan(app.id);
-  if (!latest || !latest.scan_summary) return "";
-  let summary: { status?: string; counts?: Record<string, number> };
-  try {
-    summary = JSON.parse(latest.scan_summary);
-  } catch {
-    return "";
-  }
-  const status = summary.status ?? "";
-  const c = summary.counts ?? {};
-  const crit = c.critical ?? 0;
-  const high = c.high ?? 0;
-  let label: string;
-  let color: string;
-  const med = c.medium ?? 0;
-  const low = (c.low ?? 0) + (c.unknown ?? 0);
-  const other = med + low;
-  const otherSuffix = other > 0 ? ` <span style="opacity:0.6">(+${other} other)</span>` : "";
-  if (status === "passed") {
-    label = "&#10003; secure";
-    color = "var(--okbg);color:var(--ok)";
-  } else if (status === "blocked") {
-    label = `&#10007; blocked: ${crit} crit, ${high} high`;
-    color = "var(--errbg);color:var(--err)";
-  } else if (status === "warned") {
-    const serious = crit + high;
-    label = serious > 0
-      ? `&#9888; ${serious} issue${serious !== 1 ? "s" : ""}${otherSuffix}`
-      : `&#9888; ${other} low`;
-    color = serious > 0
-      ? "var(--warnbg);color:var(--warn)"
-      : "var(--line);color:var(--mu)";
-  } else {
-    label = "scan skipped";
-    color = "var(--line);color:var(--mu)";
-  }
-  return `<a href="/apps/${encodeURIComponent(app.id)}#scan" class="badge" style="background:${color};text-decoration:none;font-size:0.7rem">${label}</a>`;
+/**
+ * The app's one status, from everything the dashboard already knows:
+ * the database row, Docker's live container state, the KEV term and the
+ * latest deploy's scan summary.
+ */
+function statusOf(
+  app: ReturnType<typeof listApps>[number],
+  stats: AppStats | null,
+  kev: AtRiskApp | undefined,
+  now: number
+): AppStatus {
+  return appStatus({
+    dbStatus: app.status,
+    containerState: stats?.containerState ?? null,
+    kev,
+    scanSummary: getLatestDeployWithScan(app.id)?.scan_summary ?? null,
+    now,
+  });
+}
+
+/** The status word with a coloured dot; the reason (if any) is the tooltip. */
+function renderStatusChip(s: AppStatus): string {
+  const title = s.reason ? ` title="${escapeHtml(s.reason)}"` : "";
+  return `<span class="st st-${s.state}"${title}><span class="dot" aria-hidden="true"></span>${escapeHtml(s.label)}</span>`;
+}
+
+/** The single security chip, linking to where the details live. Empty when there is nothing to say. */
+function renderSecurityChip(appId: string, s: AppStatus): string {
+  const c = s.security;
+  if (!c) return "";
+  const title = c.detail ? ` title="${escapeHtml(c.detail)}"` : "";
+  return `<a href="/apps/${encodeURIComponent(appId)}#${c.target}" class="tag tag-${c.tone}"${title}>${escapeHtml(c.label)}</a>`;
 }
 
 function activityToneColor(tone: ActivityTone): string {
@@ -1387,7 +1375,7 @@ function renderAppCard(
   dashboardDomain: string,
   stats: AppStats | null = null,
   activity: { lastRequestAt: string | null; buckets: number[] } | null = null,
-  riskBadge = ""
+  status: AppStatus | null = null
 ): string {
   const configured = !!(app.name && app.runtime);
   const title = configured
@@ -1427,18 +1415,12 @@ function renderAppCard(
           </div>
         </div>`;
 
-  // Status badge: use live container state when available, otherwise
-  // fall back to the DB status + hx-get so the first render without
-  // prefetched stats still catches up.
-  const badgeState =
-    app.status === "quarantined"
-      ? "quarantined"
-      : stats
-        ? stats.containerState ?? app.status
-        : app.status;
-  const badgeHtml = stats
-    ? `<span class="badge badge-${escapeHtml(badgeState)}">${escapeHtml(badgeState)}</span>`
-    : `<span class="badge badge-${escapeHtml(app.status)}" hx-get="/apps/${encodeURIComponent(app.id)}/badge" hx-trigger="load" hx-swap="outerHTML">${escapeHtml(app.status)}</span>`;
+  // One status word + at most one security chip, on their own line
+  // under the name so a long name is never cut off by badges.
+  const st = status ?? statusOf(app, stats, undefined, Date.now());
+  const statusLine = configured
+    ? `<div class="app-status">${renderStatusChip(st)}${renderSecurityChip(app.id, st)}</div>`
+    : "";
 
   const initials = app.created_by
     ? app.created_by.slice(0, 2).toUpperCase()
@@ -1476,17 +1458,15 @@ function renderAppCard(
       : "";
 
   return `
-    <div class="card app-card status-${escapeHtml(badgeState)}" data-name="${escapeHtml(app.name ?? app.id)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${escapeHtml(badgeState)}"${!configured ? ' style="border-color:var(--status-info-bg)"' : ""}>
+    <div class="card app-card status-${configured ? st.state : "new"}" data-name="${escapeHtml(app.name ?? app.id)}" data-domain="${escapeHtml(domain ?? "")}" data-status="${configured ? st.state : "new"}"${!configured ? ' style="border-color:var(--status-info-bg)"' : ""}>
       <div class="flex between" style="margin-bottom:0.25rem">
         <div style="display:flex;align-items:center;gap:0.5rem;min-width:0">
           ${avatar}
           <h2 style="font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</h2>
-          ${badgeHtml}
-          ${riskBadge}
-          ${configured ? renderScanBadge(app) : ""}
         </div>
         ${overflowMenu}
       </div>
+      ${statusLine}
       ${domainLink}
       ${statsBlock}
       ${activityBlock}
@@ -1507,17 +1487,6 @@ webRoutes.get("/apps/:id/stats", async (c) => {
       <div><div class="stat-label">Uptime</div><div class="stat-value">${escapeHtml(formatRelative(stats.startedAt))}</div></div>
     </div>
   `);
-});
-
-webRoutes.get("/apps/:id/badge", async (c) => {
-  const app = getApp(c.req.param("id"));
-  if (!app) return c.text("");
-  const stats = await getAppStats(app);
-  const state =
-    app.status === "quarantined" ? "quarantined" : (stats.containerState ?? app.status);
-  return c.html(
-    `<span class="badge badge-${escapeHtml(state)}">${escapeHtml(state)}</span>`
-  );
 });
 
 webRoutes.post("/apps/:id/delete", async (c) => {
