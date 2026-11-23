@@ -47,9 +47,10 @@ export function deleteSetting(key: SettingKey): void {
 
 /**
  * Default and ceiling for the deploy upload limit, in megabytes. The whole
- * tarball is buffered in memory during a deploy (`c.req.arrayBuffer()`), so
- * the ceiling guards against an admin setting a value that risks OOM on the
- * control container. Stored in the settings table as a plain integer.
+ * tarball is still held in memory once it has been received and checked
+ * (the upload itself is streamed to disk under this limit), so the ceiling
+ * guards against an admin setting a value that risks OOM on the control
+ * container. Stored in the settings table as a plain integer.
  */
 export const DEFAULT_MAX_UPLOAD_MB = 100;
 export const MAX_UPLOAD_MB_CEILING = 2048;

@@ -8,12 +8,11 @@
  * (`runway-build`), so a RUN step can no longer reach the control
  * plane or other apps over Docker DNS. It CAN still hit the cloud
  * metadata endpoint on the host network namespace (169.254.169.254
- * and friends). Fully blocking that requires host iptables or custom
- * CNI config for buildkit — we document that as optional hardening.
- * Until then, scanning the uploaded tar for the well-known metadata
- * targets raises the bar significantly for minimal false-positive risk:
- * the patterns below effectively never appear in legitimate build
- * contexts.
+ * and friends). The real control is at network level: scripts/egress-rules.sh
+ * refuses traffic from app and build networks to the metadata range, the host
+ * and private ranges. This scan is only a warning layer on top of that: it
+ * finds the literal strings, and a decimal or hex address, a DNS name or an
+ * address built at run time gets past it (S15). Do not rely on it alone.
  */
 
 const BLOCKED_PATTERNS: { needle: Buffer; label: string }[] = [

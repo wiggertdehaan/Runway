@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { extractTarSafe, tarLimits } from "./safe-tar.js";
 import { execFileSync } from "node:child_process";
 
 const execFileAsync = promisify(execFile);
@@ -200,10 +201,8 @@ export async function scanSource(tarBuffer: Buffer): Promise<Finding[]> {
   const srcDir = join(workDir, "src");
   try {
     await writeFile(tarPath, tarBuffer);
-    execFileSync("sh", [
-      "-c",
-      `mkdir -p ${srcDir} && tar xf ${tarPath} -C ${srcDir}`,
-    ]);
+    // S06: in-process, entry-checked unpack instead of `sh -c "tar xf"`.
+    await extractTarSafe(tarPath, srcDir, tarLimits(tarBuffer.length));
     const out = await runTrivy([
       "fs",
       "--scanners", "secret,misconfig",

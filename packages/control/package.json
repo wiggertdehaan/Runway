@@ -1,6 +1,6 @@
 {
   "name": "@runway/control",
-  "version": "0.38.0",
+  "version": "0.40.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -20,6 +20,7 @@
     "js-yaml": "^4.2.0",
     "nanoid": "^5.1.11",
     "qrcode": "^1.5.4",
+    "tar": "^7.5.20",
     "zod": "^4.4.3"
   },
   "devDependencies": {

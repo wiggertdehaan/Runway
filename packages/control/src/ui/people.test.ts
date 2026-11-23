@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appsLabel, canChangeRole, peopleError, peopleSummary, renderPersonCard, roleTag, twoFaTag, type PersonRow } from "./people.js";
+import { appsLabel, canChangeRole, lockTag, peopleError, peopleSummary, renderPersonCard, roleTag, twoFaTag, type PersonRow } from "./people.js";
 
 const row = (o: Partial<PersonRow> = {}): PersonRow => ({
   id: "u1",
@@ -82,5 +82,24 @@ describe("summary and errors", () => {
     expect(peopleError("last_admin")).toContain("zero admins");
     expect(peopleError("needs_2fa")).toContain("your own account");
     expect(peopleError("anything-else")).toContain("did not work");
+  });
+});
+
+describe("lockTag (S09)", () => {
+  const now = 1_000_000_000_000;
+  it("is empty when there is no lock or it has run out", () => {
+    expect(lockTag(null, now)).toBe("");
+    expect(lockTag(undefined, now)).toBe("");
+    expect(lockTag(now - 1, now)).toBe("");
+  });
+  it("shows the minutes left, in amber", () => {
+    const html = lockTag(now + 90_000, now);
+    expect(html).toContain("tag-warn");
+    expect(html).toContain("2FA locked, 2 min");
+  });
+  it("adds an Unlock button to the card only while locked", () => {
+    const ctx = { currentUserId: "admin", adminCount: 1 };
+    expect(renderPersonCard(row(), ctx)).not.toContain("2fa/unlock");
+    expect(renderPersonCard(row({ twoFaLockedUntil: Date.now() + 120_000 }), ctx)).toContain("/users/u1/2fa/unlock");
   });
 });

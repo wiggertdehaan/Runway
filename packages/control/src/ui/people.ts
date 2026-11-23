@@ -26,6 +26,8 @@ export interface PersonRow {
   username: string;
   role: "admin" | "member";
   totpEnabled: boolean;
+  /** When the second-factor lock ends (ms since epoch), or null when not locked. */
+  twoFaLockedUntil?: number | null;
   createdAt: string;
   /** Names of the apps this person created. Admins see all apps anyway. */
   appNames: string[];
@@ -63,9 +65,21 @@ export function canChangeRole(row: Pick<PersonRow, "id" | "role">, ctx: PeopleCo
   return row.id !== ctx.currentUserId && !isLastAdmin;
 }
 
+/** Amber "locked" tag: too many wrong 2FA codes. Only shown while it lasts. */
+export function lockTag(lockedUntil: number | null | undefined, now = Date.now()): string {
+  if (!lockedUntil || lockedUntil <= now) return "";
+  const minutes = Math.max(1, Math.ceil((lockedUntil - now) / 60000));
+  return `<span class="tag tag-warn" title="Too many wrong two-factor codes. It lifts by itself.">2FA locked, ${minutes} min</span>`;
+}
+
 function actions(row: PersonRow, ctx: PeopleContext): string {
   if (row.id === ctx.currentUserId) return '<span class="meta">This is you</span>';
   const id = encodeURIComponent(row.id);
+  const unlockForm = lockTag(row.twoFaLockedUntil)
+    ? `<form method="POST" action="/users/${id}/2fa/unlock" class="inline-form">
+         <button type="submit" class="ghost">Unlock 2FA</button>
+       </form>`
+    : "";
   const roleForm = canChangeRole(row, ctx)
     ? `<form method="POST" action="/users/${id}/role" class="inline-form">
          <input type="hidden" name="role" value="${row.role === "admin" ? "member" : "admin"}" />
@@ -86,7 +100,7 @@ function actions(row: PersonRow, ctx: PeopleContext): string {
   const deleteForm = `<form method="POST" action="/users/${id}/delete" class="inline-form" onsubmit="return confirm('Delete ${escapeHtml(row.username).replace(/'/g, "&#39;")}? Their sign-in stops working. Their apps stay, with no owner: only admins can manage them.')">
        <button class="danger" type="submit">Delete</button>
      </form>`;
-  return `<div class="person-actions">${roleForm}${resetForm}${deleteForm}</div>`;
+  return `<div class="person-actions">${unlockForm}${roleForm}${resetForm}${deleteForm}</div>`;
 }
 
 export function renderPersonCard(row: PersonRow, ctx: PeopleContext): string {
@@ -97,6 +111,7 @@ export function renderPersonCard(row: PersonRow, ctx: PeopleContext): string {
           <h2>${escapeHtml(row.username)}</h2>
           ${roleTag(row.role)}
           ${twoFaTag(row.totpEnabled)}
+          ${lockTag(row.twoFaLockedUntil)}
         </div>
         <p class="meta">${escapeHtml(appsLabel(row.role, row.appNames))} &middot; added ${escapeHtml(row.createdAt)}</p>
       </div>
@@ -118,6 +133,8 @@ export function peopleError(code: string | undefined): string {
       ? "Refused: that would leave zero admins. Make another user an admin first."
       : code === "needs_2fa"
         ? "Turn on 2FA on your own account before resetting it for others."
-        : "That 2FA code did not work. Use the current code from your own authenticator app.";
+        : code === "2fa_locked"
+          ? "Too many wrong 2FA codes on your account. Try again in a few minutes."
+          : "That 2FA code did not work. Use the current code from your own authenticator app.";
   return `<div class="error">${escapeHtml(msg)}</div>`;
 }

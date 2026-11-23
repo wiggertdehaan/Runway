@@ -10,6 +10,7 @@ import { getEnvVars } from "../db/env.js";
 import { getVolumes } from "../db/volumes.js";
 import {
   buildImageFromTar,
+  docker,
   getContainerLogs,
   getContainerStatus,
   removeContainerByName,
@@ -18,6 +19,7 @@ import {
   stopContainerByName,
 } from "./docker.js";
 import { appBasicAuth, deleteAppRoute, writeAppRoute } from "./gateway.js";
+import { removeAppNetwork, networkNameForContainer, type NetworkDocker } from "./networks.js";
 import {
   buildScanResult,
   effectiveThreshold,
@@ -325,6 +327,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
 
   const previousTag = app.image_tag;
   const run = await runContainer({
+    appId: app.id,
     containerName,
     imageTag,
     port: app.port,
@@ -332,6 +335,8 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     volumes: buildVolumeBinds(app.id),
     cpuLimit: app.cpu_limit,
     memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
     healthCheckPath: app.health_check_path,
   });
 
@@ -348,6 +353,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
       } else if (previousTag) {
         try {
           const back = await runContainer({
+            appId: app.id,
             containerName,
             imageTag: previousTag,
             port: app.port,
@@ -355,6 +361,8 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
             volumes: buildVolumeBinds(app.id),
             cpuLimit: app.cpu_limit,
             memoryLimit: app.memory_limit,
+            hardening: app.hardening_profile,
+            readonlyRootfs: app.readonly_rootfs === 1,
             healthCheckPath: app.health_check_path,
           });
           updateApp(app.id, { status: "running", container_id: back.containerId });
@@ -493,6 +501,7 @@ export async function rollbackApp(
   updateApp(app.id, { status: "starting" });
 
   const run = await runContainer({
+    appId: app.id,
     containerName,
     imageTag: prev.image_tag,
     port: app.port,
@@ -500,6 +509,8 @@ export async function rollbackApp(
     volumes: buildVolumeBinds(app.id),
     cpuLimit: app.cpu_limit,
     memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
     healthCheckPath: app.health_check_path,
   });
 
@@ -550,6 +561,7 @@ export async function restoreApp(app: App): Promise<void> {
   const containerName = appContainerName(app.id);
   updateApp(app.id, { status: "starting" });
   const run = await runContainer({
+    appId: app.id,
     containerName,
     imageTag: app.image_tag,
     port: app.port,
@@ -557,6 +569,8 @@ export async function restoreApp(app: App): Promise<void> {
     volumes: buildVolumeBinds(app.id),
     cpuLimit: app.cpu_limit,
     memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
     healthCheckPath: app.health_check_path,
   });
   if (app.domain) {
@@ -574,7 +588,11 @@ export async function restoreApp(app: App): Promise<void> {
 }
 
 export async function destroyApp(app: App): Promise<void> {
-  await removeContainerByName(appContainerName(app.id));
+  const containerName = appContainerName(app.id);
+  await removeContainerByName(containerName);
+  // The network goes with the app (after the container: it must be empty).
+  // A failure here leaves an empty network that the reconcile sweep removes.
+  await removeAppNetwork(docker as unknown as NetworkDocker, networkNameForContainer(containerName)).catch(() => {});
   await deleteAppRoute(app.id);
   deleteAllSources(app.id);
 }

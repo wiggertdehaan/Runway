@@ -1,3 +1,4 @@
+import { resolveHardening } from "../deploy/hardening.js";
 import { Hono } from "hono";
 import { apiAuth } from "../middleware/auth.js";
 import {
@@ -23,7 +24,9 @@ import {
   hasSourceForDeploy,
   type SourceRef,
 } from "../deploy/source.js";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
+import { receiveUpload, UploadTooLargeError } from "../deploy/upload.js";
+import { inspectTarFile, tarLimits, UnsafeTarError } from "../deploy/safe-tar.js";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, type Threshold } from "../deploy/scan.js";
 import { getDeploy, getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
@@ -92,6 +95,8 @@ function toConfigResponse(app: App) {
     port: app.port,
     cpu_limit: app.cpu_limit,
     memory_limit: app.memory_limit,
+    hardening: resolveHardening(app.hardening_profile).mode,
+    read_only_rootfs: app.readonly_rootfs === 1,
     status: app.status,
     health_check_path: app.health_check_path,
     scan_threshold: app.scan_threshold,
@@ -258,9 +263,10 @@ apiRoutes.post("/app/preflight", (c) => {
 
 /**
  * Deploy accepts a tar stream (no gzip) of the project root as the
- * raw request body. Content-Type must be application/x-tar. The body
- * is forwarded straight to the Docker build API, so whatever layout
- * the caller uses is whatever `docker build` sees.
+ * raw request body. Content-Type must be application/x-tar. The body is
+ * streamed to disk under the upload limit and every entry is checked
+ * (deploy/safe-tar.ts) before the build sees it; whatever layout the
+ * caller uses inside those limits is what `docker build` gets.
  */
 apiRoutes.post("/app/deploy", async (c) => {
   const app = c.get("app");
@@ -289,18 +295,39 @@ apiRoutes.post("/app/deploy", async (c) => {
     );
   }
 
-  const arrayBuffer = await c.req.arrayBuffer();
-  if (arrayBuffer.byteLength > maxUploadBytes) {
-    return c.json(
-      { error: `Upload exceeds limit of ${maxUploadBytes} bytes` },
-      413
-    );
+  // S06: stream to a file with a hard cap (works without Content-Length),
+  // check every tar entry before anything is read into memory or unpacked.
+  let upload;
+  try {
+    upload = await receiveUpload(c.req.raw.body, maxUploadBytes);
+  } catch (err) {
+    if (err instanceof UploadTooLargeError) {
+      return c.json({ error: `Upload exceeds limit of ${maxUploadBytes} bytes` }, 413);
+    }
+    return c.json({ error: "Upload was interrupted" }, 400);
   }
-  if (arrayBuffer.byteLength === 0) {
+  if (upload.bytes === 0) {
+    if (upload.path) await rm(upload.path, { force: true });
     return c.json({ error: "Empty upload" }, 400);
   }
 
-  const tarBuffer = Buffer.from(arrayBuffer);
+  let tarBuffer: Buffer;
+  try {
+    await inspectTarFile(upload.path, tarLimits(maxUploadBytes));
+    // Bounded by the upload limit (checked above); the rest of the deploy
+    // pipeline still works on a Buffer.
+    tarBuffer = await readFile(upload.path);
+  } catch (err) {
+    if (err instanceof UnsafeTarError) {
+      return c.json(
+        { status: "rejected", error: err.message, code: err.code },
+        400
+      );
+    }
+    throw err;
+  } finally {
+    await rm(upload.path, { force: true }).catch(() => {});
+  }
 
   try {
     const result = await deployApp({ app, tar: tarBuffer });

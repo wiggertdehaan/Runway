@@ -12,6 +12,7 @@ import { listApps } from "./db/apps.js";
 import { appContainerName } from "./deploy/index.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
+import { pruneAttempts } from "./auth/twofa-limit.js";
 import { refreshDb } from "./deploy/scan.js";
 import { startActivityTailer } from "./deploy/activity-tailer.js";
 import { startPeriodicScanner } from "./deploy/periodic-scanner.js";
@@ -19,6 +20,9 @@ import { startCachePruner } from "./deploy/cache-pruner.js";
 import { startRebuildScheduler } from "./deploy/rebuild-scheduler.js";
 import { startQuarantineMonitor } from "./deploy/quarantine.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
+import { cleanupStaleUploads } from "./deploy/upload.js";
+import { docker } from "./deploy/docker.js";
+import { startGatewayNetworkReconciler, type NetworkDocker } from "./deploy/networks.js";
 
 migrate();
 loadBuiltinSkills();
@@ -32,8 +36,15 @@ startActivityTailer();
 setInterval(() => {
   deleteExpiredSessions();
   cleanupExpiredEntries();
+  pruneAttempts();
 }, 60 * 60 * 1000);
 deleteExpiredSessions();
+
+// Deploy uploads are removed by the deploy itself; this catches what a crash
+// in the middle of an upload left in the upload folder.
+void cleanupStaleUploads().then((n) => {
+  if (n > 0) console.log(`Removed ${n} stale upload file(s)`);
+});
 
 // Daily Trivy vulnerability DB refresh (every 24h, first run 60s after startup)
 setTimeout(() => {
@@ -94,6 +105,15 @@ try {
 } catch (err) {
   console.error("SSO route repair failed:", err);
 }
+
+// Each app has its own network; the gateway is attached to them at runtime, so
+// recreating the gateway container (docker compose up) detaches it from all of
+// them. Reattach at startup and every minute, and sweep networks of deleted apps.
+startGatewayNetworkReconciler({
+  docker: docker as unknown as NetworkDocker,
+  appIds: () => new Set(listApps().map((a) => a.id)),
+  log: (m) => console.log(m),
+});
 
 const port = parseInt(process.env.PORT || "3000", 10);
 

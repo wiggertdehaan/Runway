@@ -144,6 +144,27 @@ export function migrate() {
     );
   `);
 
+  // S09: failed second-factor attempts per user. Kept in the database (not
+  // in memory) so a restart does not hand an attacker a fresh set of guesses,
+  // and keyed on the user (not the IP) so a password-holder cannot reset it
+  // by signing in again. See auth/twofa-limit.ts for the schedule.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS twofa_attempts (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      failures INTEGER NOT NULL DEFAULT 0,
+      last_failure_at INTEGER NOT NULL DEFAULT 0,
+      locked_until INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  // S09: failed attempts against one pre-auth session. After a handful the
+  // session is destroyed, so the attacker must enter the password again.
+  const preauthCols = db.prepare("PRAGMA table_info(preauth_sessions)").all() as Array<{
+    name: string;
+  }>;
+  if (!preauthCols.some((c) => c.name === "failures")) {
+    db.exec(`ALTER TABLE preauth_sessions ADD COLUMN failures INTEGER NOT NULL DEFAULT 0`);
+  }
+
   // Upgrade legacy users tables so existing installations pick up
   // the totp columns. ADD COLUMN is supported by SQLite.
   const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{
@@ -443,6 +464,15 @@ export function migrate() {
   // apps that existed before): a healthcheck only proves the app starts.
   if (!appCols.some((c) => c.name === "auto_update_deps_major")) {
     db.exec(`ALTER TABLE apps ADD COLUMN auto_update_deps_major INTEGER NOT NULL DEFAULT 0`);
+  }
+  // Container hardening (S08, see deploy/hardening.ts): an administrator's
+  // per-app profile (NULL = the instance default) and an opt-in read-only
+  // root filesystem. Both take effect when the container is next created.
+  if (!appCols.some((c) => c.name === "hardening_profile")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN hardening_profile TEXT`);
+  }
+  if (!appCols.some((c) => c.name === "readonly_rootfs")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN readonly_rootfs INTEGER NOT NULL DEFAULT 0`);
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS dep_update_attempts (

@@ -91,31 +91,43 @@ without knowing why.
   root-on-host, so running node as root inside the container does
   not widen the blast radius.
 
-### Three Docker networks, not one
+### Docker networks: one per app, plus internal and build
 - `runway-internal` — control + gateway only.
-- `runway-apps` — gateway + every deployed app container. Traefik
-  straddles both networks so it can keep serving the dashboard and
-  still route edge traffic to apps.
-- `runway-build` — buildkit only. Isolates `RUN` steps from the
-  control plane and other apps.
-- An earlier topology put control, gateway, buildkit, and all apps
-  on a single `runway-internal` network. That allowed a deployed
-  container (or a malicious `RUN` step) to reach
-  `http://control:3000/` and probe other app containers by name,
-  bypassing Traefik entirely. Do not collapse the networks back
-  into one.
-- Existing app containers created before the split keep running on
-  `runway-internal` until they are redeployed; a fresh deploy
-  recreates the container on `runway-apps`. After upgrading the
-  platform, redeploy each app once to complete the migration.
-- Cloud metadata (`169.254.169.254` and friends) is still reachable
-  from build sandboxes via the host network namespace — blocking
-  it fully needs host iptables or custom CNI for buildkit. As a
-  pragmatic defense, `packages/control/src/deploy/preflight.ts`
-  scans the uploaded tar and rejects build contexts that reference
-  well-known metadata hostnames/IPs. The optional host-level
-  hardening is a single `iptables -I DOCKER-USER -d 169.254.169.254
-  -j DROP` rule on the host.
+- `runway-net-<id>` — one per app (S04), created by `deploy/networks.ts` in
+  `runContainer`. It holds the app and the gateway, nothing else. Traefik
+  straddles all of them (attached at runtime through the Docker API), so an app
+  cannot reach another app by container name and skip its SSO/basic auth.
+  Subnets come from our own pool (`RUNWAY_APP_NET_POOL`, default
+  `10.250.0.0/16`, `/28` slices): Docker's default pools give a /16 per network
+  and run out after ~30 networks. The bridge interface is named `rwa-<11 hex>`
+  so the host firewall can match `-i rwa+` once and also cover networks created
+  later. Keep that prefix and the 15-character limit.
+- Recreating the gateway container (`docker compose up`) drops every network
+  that was attached at runtime. `startGatewayNetworkReconciler` reattaches the
+  gateway at startup and every minute and removes the network of a deleted app
+  once only the gateway is on it. Do not remove it: without it every route
+  answers 502 after a gateway recreate until someone redeploys.
+- `runContainer` fails the deploy when the network cannot be made or the
+  gateway cannot be attached. It must not fall back to the shared network (that
+  silently undoes the isolation). `RUNWAY_APP_NETWORK_MODE=shared` is the
+  deliberate, explicit way back.
+- `runway-apps` — the shared network every app used before 0.39. Apps that have
+  not been redeployed since the upgrade are still on it (they can reach each
+  other until they move; control logs how many). It stays in the compose file
+  until none is left.
+- `runway-build` — buildkit only. Isolates `RUN` steps from the control plane
+  and other apps.
+- An earlier topology put control, gateway, buildkit, and all apps on a single
+  `runway-internal` network, which let a deployed container (or a malicious
+  `RUN` step) reach `http://control:3000/`. Do not collapse the networks.
+- What apps and build steps may reach *outside* Docker is a host firewall
+  matter, not something the compose file can do: `scripts/egress-rules.sh`
+  (opt-in, `plan`/`apply`/`status`/`remove`/`persist`) refuses traffic from the
+  app and build bridges to link-local (cloud metadata), RFC1918 and
+  100.64.0.0/10, and anything they send to the host itself, while leaving the
+  internet alone. It only ever matches those interfaces, so SSH and the rest of
+  the host are unaffected. The tar scan in `deploy/preflight.ts` is a warning
+  layer on top; a decimal/hex address or a DNS name gets past it.
 
 ### App IDs are lowercase
 - Docker image names must be lowercase. The original nanoid
@@ -340,6 +352,76 @@ without knowing why.
 - The one-time fill from the old name (`db/owner-migration.ts`) runs only in
   the transaction that adds the column. Do not make it re-run: it would
   hand an ownerless app to whoever has since taken that username.
+
+### App containers are hardened in one place (S08)
+- `deploy/hardening.ts` is the only code that sets capabilities, PID limit,
+  swap, log rotation and read-only rootfs for an app container. `runContainer`
+  merges its output into the HostConfig and then runs `assertSafeHostConfig`,
+  which refuses Privileged, host namespaces, devices, `Mounts`, host-path
+  binds (the Docker socket is one), CapAdd outside the standard list and
+  `unconfined` security options. Do not add HostConfig fields to
+  `runContainer` by hand.
+- Profiles: `standard` (CapDrop ALL + CHOWN, DAC_OVERRIDE, FOWNER, SETGID,
+  SETUID, NET_BIND_SERVICE; no-new-privileges; PidsLimit 512; MemorySwap =
+  Memory; json-file 10m x 3), `strict` (same, no CapAdd), `relaxed` (Docker
+  defaults, log rotation only). `apps.hardening_profile` NULL = instance
+  default; `apps.readonly_rootfs` is an opt-in (tmpfs on /tmp).
+- `RUNWAY_HARDENING=relaxed` on the control container is an emergency brake
+  that beats a per-app `strict`; `standard`/`strict` there set the instance
+  default; a typo is ignored (never turns hardening off). The compose file
+  passes `RUNWAY_HARDENING` and `RUNWAY_PIDS_LIMIT` through.
+- A running container keeps what it started with: a changed profile (or a
+  new release of Runway) reaches an app at its next deploy, rebuild or
+  rollback. The PID limit counts threads, so JVM/Node apps with big pools
+  need headroom: raise `RUNWAY_PIDS_LIMIT` before relaxing a profile.
+- Out of scope here: control as non-root and BuildKit privileged (S07, S16).
+
+### The second factor has a per-user limit (S09)
+
+`auth/twofa-limit.ts`. Every 2FA guess (authenticator code or backup code)
+is charged to the USER in the `twofa_attempts` table BEFORE the code is
+looked at, by `verifySecondFactor()` in `routes/web.ts`. The sign-in and
+every signed-in action that asks for a code (turn 2FA off, new backup codes,
+an admin resetting someone else's 2FA) use that one function and share one
+counter. The 5th wrong code locks for 1 minute, the 6th for 5, the 7th to 9th
+for 15, and from the 10th an hour (plus an `2fa_bruteforce_suspected` audit
+line). A correct password does NOT reset it; a correct code, an admin
+unlock (Users page) or 24 hours without a failure does. While a lock runs the
+code is not looked at at all, so a correct code is refused like a wrong one.
+Do not add a new place that calls `verifyAndConsumeTotp` for a signed-in or
+pre-auth user without going through `verifySecondFactor`. The per-IP limit on
+the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
+
+### Uploads are streamed to disk and checked before use (S06)
+- `POST /api/v1/app/deploy` streams the body to `UPLOAD_DIR` (default
+  `<db dir>/uploads`, on the data volume: `/tmp` is a tmpfs, i.e. RAM) with a
+  hard byte cap (`deploy/upload.ts`), so a body without `Content-Length` is
+  cut off at the limit instead of being read in full. The file is then
+  checked entry by entry (`deploy/safe-tar.ts`, `inspectTarFile`) and only
+  after that read into a Buffer for the rest of the pipeline (bounded by the
+  upload limit, ceiling 2048 MB: moving the pipeline to file paths is the
+  follow-up that removes the Buffer).
+- Refused with 400 `{status:"rejected", code}`: gzip/zstd (the contract is a
+  plain tar), absolute paths, `..`, symlinks that are absolute or leave the
+  project (`..` after a real segment is refused too: if that segment is a
+  link the real path differs), hard links outside, device nodes/fifos, too
+  many entries (`RUNWAY_TAR_MAX_ENTRIES`, default 100000), long paths
+  (`RUNWAY_TAR_MAX_PATH`), deep nesting (`RUNWAY_TAR_MAX_DEPTH`), more file
+  bytes than the upload limit. A header that claims a huge size is refused
+  from the header, before any data is read.
+- Unpacking (`extractTarSafe`, used by `buildImageFromTar` and `scanSource`)
+  is in-process with the `tar` library, async, no shell, and forces ownership
+  to nobody (65534). It runs the same check first and again as a filter. Do
+  not go back to `sh -c "tar xf"`. Control is still root (S07, not done):
+  that is why nothing is unpacked outside these two paths, and the dep-update
+  code keeps using `tar -xO` on single members.
+- Stored sources and patched rebuild tars go through the same check when they
+  are built or scanned, so a source stored before this change that holds an
+  absolute or outward-pointing symlink now fails its rebuild with a clear
+  message instead of being unpacked.
+- The MCP client (`packages/mcp/src/tar.ts`) leaves such symlinks out (and
+  says so) and stops at `RUNWAY_MAX_UPLOAD_MB` (default 100), mirroring the
+  server, which would otherwise refuse the whole upload.
 
 ## Migrations
 

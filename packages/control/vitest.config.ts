@@ -12,6 +12,11 @@ export default defineConfig({
     // its WAL pragma ("database is locked"), so tests get a private
     // in-memory database each.
     // Route tests that save an app write its Traefik file; keep that out of /gateway-config.
-    env: { DB_PATH: ":memory:", GATEWAY_CONFIG_DIR: join(tmpdir(), "runway-test-gateway") },
+    env: {
+      DB_PATH: ":memory:",
+      GATEWAY_CONFIG_DIR: join(tmpdir(), "runway-test-gateway"),
+      // Deploy uploads are streamed to disk; keep them out of ./uploads.
+      UPLOAD_DIR: join(tmpdir(), "runway-test-uploads"),
+    },
   },
 });

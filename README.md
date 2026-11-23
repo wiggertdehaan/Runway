@@ -289,6 +289,8 @@ button for admins.
 - Audit log for all admin actions
 - Content Security Policy headers
 - Isolated builds via BuildKit (user code never touches the Docker socket)
+- One Docker network per app: apps cannot reach each other or the control plane; optional host egress rules keep them off the cloud metadata address, the host and private networks
+- Hardened app containers: reduced Linux capabilities, no new privileges, a process limit, no swap, rotated logs, and an opt-in read-only root filesystem per app (`standard` / `strict` / `relaxed` profile; `RUNWAY_HARDENING=relaxed` is the emergency brake, takes effect at an app's next deploy or rebuild)
 - Traefik has zero Docker socket access
 - Per-deploy Trivy scan (image CVEs, hardcoded secrets, Dockerfile misconfigs) with a configurable blocking threshold
 - Two-role access model (admin / member) with per-user ownership of apps
@@ -474,6 +476,24 @@ isolation.
   Dockerfiles execute inside BuildKit's containerd sandbox with zero
   access to the Docker socket. The control container still mounts the
   socket for container lifecycle (run/stop/logs).
+- **Apps are isolated from each other.** Every app runs on its own Docker
+  network (`runway-net-<id>`); only Traefik is attached to several of them,
+  so one app cannot reach another by container name and skip its SSO or basic
+  auth. Control and BuildKit are on networks of their own. What the apps may
+  reach *outside* Docker (the cloud metadata address `169.254.169.254`, the
+  host itself, private and Tailscale ranges) is limited by a host firewall
+  step that is not part of the default install:
+
+  ```bash
+  sudo /opt/runway/scripts/egress-rules.sh plan     # shows what it would do, changes nothing
+  sudo /opt/runway/scripts/egress-rules.sh apply    # installs the rules
+  sudo /opt/runway/scripts/egress-rules.sh status
+  sudo /opt/runway/scripts/egress-rules.sh remove   # rollback
+  ```
+
+  Apps deployed before the upgrade stay on the shared `runway-apps` network
+  until their next deploy or rebuild. Set `RUNWAY_APP_NETWORK_MODE=shared` on
+  the control container to go back to the old single network.
 - The **REST API** (`/api/v1/*`) uses Bearer-token auth with per-app keys,
   independent from the session cookie used by the web UI.
 - The **deploy endpoint** accepts up to 100 MB of `application/x-tar` per

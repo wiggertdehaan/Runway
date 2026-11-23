@@ -419,6 +419,12 @@ Notes:
 - The body must be a plain POSIX \`tar\` stream (not gzip).
 - Maximum upload size defaults to 100 MB (an admin can change this
   under Settings). If you exceed it, tighten the ignore files.
+- The tar is checked before anything is built. It is refused with
+  \`400\` (\`{"status":"rejected","code":...,"error":...}\`) when it holds
+  absolute paths or \`..\`, symlinks that are absolute or point outside the
+  project, hard links outside the project, device nodes or fifos, more than
+  100,000 entries, or more than the upload limit of file data. Symlinks
+  inside the project are fine.
 - The request may take tens of seconds: the server builds the image
   and starts the container before returning.
 
@@ -573,6 +579,36 @@ USER app
 
 This only matters for empty volumes; once data exists in the volume,
 ownership is preserved across redeploys.
+
+### Container limits and hardening
+
+Every app container starts with a reduced set of privileges. Know this
+before you write the Dockerfile, so the app does not fail on first start:
+
+- **Linux capabilities** are dropped, and only the few an ordinary image
+  needs are added back (CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID,
+  NET_BIND_SERVICE). Raw sockets (\`ping\`), \`mknod\`, \`chroot\` and file
+  capabilities do not work. Typical sign: "Operation not permitted" in the
+  logs at startup.
+- **No new privileges**: a setuid binary inside the container cannot raise
+  privileges. A process that already runs as root can still switch to a
+  service user, as the official nginx image does.
+- **At most 512 processes** (threads count). A fork bomb stops there. Typical
+  sign of a too tight limit: "Resource temporarily unavailable" or
+  "pthread_create failed".
+- **No swap**: the memory limit is a hard limit. An app that goes over it is
+  killed and restarted instead of slowing down the server.
+- **Logs are rotated** (10 MB, 3 files per container). Write logs to stdout
+  or stderr; a log file inside the container is lost on every deploy anyway.
+- The root filesystem is writable, as before. An administrator can make it
+  read-only per app; then only \`/tmp\` and the app's volumes are writable.
+
+The templates above already run as a non-root user on a port above 1024 (or
+nginx on 80 for static sites), which is the pattern that works best. If an
+app cannot run under these rules, ask the administrator to set the app's
+hardening profile (dashboard, app, Config tab); the new setting applies at
+the next deploy or rebuild. \`GET /api/v1/app\` shows the profile that is in
+effect (\`hardening\`) and whether the root filesystem is read-only.
 
 ## Custom domain
 

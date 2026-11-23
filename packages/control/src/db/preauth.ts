@@ -47,3 +47,18 @@ export function deleteExpiredPreauth(): void {
     `DELETE FROM preauth_sessions WHERE expires_at <= datetime('now')`
   ).run();
 }
+
+/**
+ * S09: count a failed second-factor attempt against this pre-auth session.
+ * Returns the new count, or 0 when the session no longer exists. The caller
+ * destroys the session once the count reaches the limit, so an attacker who
+ * knows the password has to enter it again for every new batch of guesses.
+ */
+export function recordPreauthFailure(token: string): number {
+  const row = db
+    .prepare(
+      `UPDATE preauth_sessions SET failures = failures + 1 WHERE token = ? RETURNING failures`
+    )
+    .get(token) as { failures: number } | undefined;
+  return row?.failures ?? 0;
+}
