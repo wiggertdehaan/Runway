@@ -162,7 +162,7 @@ an exemption is ending. An event is a type, an app id and a code from a fixed
 list; it never carries logs, environment variables, error messages or text
 from the app. The caller keeps the cursor and asks again (pull, works in every
 client); a user token (`rwu_`) sees exactly the apps that person may see. Events
-are kept 30 days / 500 per app (`EVENTS_RETENTION_DAYS`, `EVENTS_MAX_PER_APP`);
+are kept 60 days / 500 per app (`EVENTS_RETENTION_DAYS`, `EVENTS_MAX_PER_APP`);
 `HEALTH_WATCH_INTERVAL_MS=0` turns off the health watcher that raises
 `health_unhealthy` / `health_recovered`. Full list of codes: `/llms.txt`.
 

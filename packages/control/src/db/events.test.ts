@@ -9,6 +9,7 @@ import { ensureEventsTables } from "./events-schema.js";
 import {
   emitEvent,
   eventFloorId,
+  eventRetentionDays,
   eventHeadId,
   getEventRow,
   listEvents,
@@ -171,10 +172,26 @@ describe("the cursor", () => {
 });
 
 describe("retention and expired cursors", () => {
+  it("keeps 60 days by default, so a 30-day period can be compared with the one before it", () => {
+    expect(eventRetentionDays()).toBe(60);
+    process.env.EVENTS_RETENTION_DAYS = "7";
+    expect(eventRetentionDays()).toBe(7);
+    process.env.EVENTS_RETENTION_DAYS = "nonsense";
+    expect(eventRetentionDays()).toBe(60);
+  });
+
+  it("keeps an event of 59 days ago and drops one of 61", () => {
+    const now = Date.UTC(2026, 10, 23);
+    emitEvent({ appId: a1, code: "deploy_succeeded" }, now - 61 * DAY);
+    const kept = emitEvent({ appId: a1, code: "deploy_succeeded" }, now - 59 * DAY)!;
+    expect(pruneEvents(now)).toBe(1);
+    expect(getEventRow(kept)).toBeDefined();
+  });
+
   it("drops events past the window and flags a cursor from before the floor", () => {
     const now = Date.UTC(2026, 10, 23);
-    const old1 = emitEvent({ appId: a1, code: "deploy_succeeded" }, now - 40 * DAY)!;
-    const old2 = emitEvent({ appId: a1, code: "deploy_succeeded" }, now - 35 * DAY)!;
+    const old1 = emitEvent({ appId: a1, code: "deploy_succeeded" }, now - 70 * DAY)!;
+    const old2 = emitEvent({ appId: a1, code: "deploy_succeeded" }, now - 65 * DAY)!;
     const fresh = emitEvent({ appId: a1, code: "health_unhealthy" }, now - 1 * DAY)!;
     expect(pruneEvents(now)).toBe(2);
     expect(eventFloorId()).toBe(old2);

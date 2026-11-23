@@ -210,7 +210,7 @@ import {
 } from "./security-view.js";
 import { rescanApp } from "../deploy/periodic-scanner.js";
 import { activeRescan, endRescan, tryBeginRescan } from "../deploy/rescan-guard.js";
-import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
+import { THRESHOLDS, isValidThreshold, effectiveThreshold, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
 import { getAppAllowedEmails, addAppAllowedEmail, removeAppAllowedEmail } from "../db/app-emails.js";
 import { appContainerName, destroyApp, rollbackApp } from "../deploy/index.js";
@@ -221,7 +221,10 @@ import {
   SOURCE_RETENTION,
 } from "../deploy/source.js";
 import { readFile } from "node:fs/promises";
-import { docker } from "../deploy/docker.js";
+import { runHealthChecks, cachedHealth } from "../overview/health.js";
+import { buildOverview, parsePeriod, parseTime as parseOverviewTime, type OverviewApp } from "../overview/build.js";
+import { gatherDbInputs } from "../overview/gather.js";
+import { renderOverview } from "../ui/overview.js";
 import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
 import { validateCustomDomain } from "../util/domain.js";
@@ -335,6 +338,7 @@ function layout(
            <div class="side-body" id="side-body">
              ${palBtn.side}
              <nav class="side-nav" aria-label="Main">
+               ${link("/overview", "Overview", '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z"/>')}
                ${link("/", "Apps", '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>')}
                ${securityLink}
                ${adminLinks}
@@ -756,6 +760,7 @@ function getCookieValue(c: Context, name: string): string | undefined {
 webRoutes.use("/", requireSession);
 webRoutes.use("/partials/*", requireSession);
 webRoutes.use("/security", requireSession);
+webRoutes.use("/overview", requireSession);
 webRoutes.use("/apps", requireSession);
 webRoutes.use("/apps/*", requireSession);
 webRoutes.use("/apps/:id", requireAppAccess);
@@ -967,6 +972,45 @@ async function renderAppsLive(
 
   return `${renderSecurityAttention([...atRisk.values()], now, admin)}${header}${kevStatus}${body}`;
 }
+
+webRoutes.get("/overview", async (c) => {
+  const user = c.get("user");
+  const admin = isAdmin(user);
+  const now = Date.now();
+  const period = parsePeriod(c.req.query("period"));
+  // The one place rights are decided: the apps this viewer may see. Everything
+  // the overview shows is built from these and from nothing else.
+  const apps = appsVisibleTo(user.id, admin);
+  const atRisk = collectAtRisk(apps);
+  const allStats = await getAppStatsBulk(apps);
+  const overviewApps: OverviewApp[] = apps.map((app, i) => {
+    const st = statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now);
+    return {
+      id: app.id,
+      name: app.name,
+      createdAt: parseOverviewTime(app.created_at) ?? now,
+      configured: !!(app.name && app.runtime),
+      state: st.state,
+      reason: st.reason,
+      ownerless: app.owner_user_id === null,
+    };
+  });
+  const dbInputs = gatherDbInputs({ appIds: apps.map((a) => a.id), viewer: { id: user.id, admin }, now });
+  const health = admin ? await cachedHealth().catch(() => null) : null;
+  const view = buildOverview(
+    { viewer: { admin }, apps: overviewApps, kev: [...atRisk.values()], health, ...dbInputs },
+    now,
+    period
+  );
+  return c.html(
+    layout("Overview", renderOverview(view, { admin }), {
+      username: user.username,
+      userId: user.id,
+      csrf: csrfField(c),
+      isAdmin: admin,
+    })
+  );
+});
 
 webRoutes.get("/security", async (c) => {
   const user = c.get("user");
@@ -3804,73 +3848,7 @@ webRoutes.post("/skills/:id/delete", async (c) => {
 
 webRoutes.get("/health", async (c) => {
   const user = c.get("user");
-  const baseDomain = getSetting("base_domain");
-
-  const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
-
-  // Docker socket
-  try {
-    await docker.ping();
-    checks.push({ name: "Docker", ok: true, detail: "Socket reachable" });
-  } catch {
-    checks.push({ name: "Docker", ok: false, detail: "Cannot reach Docker socket" });
-  }
-
-  // BuildKit
-  try {
-    const bk = docker.getContainer("runway-buildkit");
-    const info = await bk.inspect();
-    const running = info.State.Status === "running";
-    checks.push({
-      name: "BuildKit",
-      ok: running,
-      detail: running ? "Running" : `Status: ${info.State.Status}`,
-    });
-  } catch {
-    checks.push({ name: "BuildKit", ok: false, detail: "Container not found" });
-  }
-
-  // DNS
-  if (baseDomain) {
-    const dns = await checkWildcardDns(baseDomain);
-    checks.push({ name: "Wildcard DNS", ok: dns.ok, detail: dns.message });
-  } else {
-    checks.push({ name: "Wildcard DNS", ok: false, detail: "No base domain configured" });
-  }
-
-  // Traefik
-  try {
-    const gw = docker.getContainer("runway-gateway");
-    const info = await gw.inspect();
-    const running = info.State.Status === "running";
-    checks.push({
-      name: "Traefik",
-      ok: running,
-      detail: running ? "Running" : `Status: ${info.State.Status}`,
-    });
-  } catch {
-    checks.push({ name: "Traefik", ok: false, detail: "Container not found" });
-  }
-
-  // Security scanner (Trivy). Three checks: binary present, cache volume
-  // writable, vulnerability DB present and fresh. Each one can fail
-  // independently, so they're separate rows.
-  const scanner = await getScannerHealth();
-  checks.push({
-    name: "Scanner binary",
-    ok: scanner.binary.ok,
-    detail: scanner.binary.detail,
-  });
-  checks.push({
-    name: "Scanner cache",
-    ok: scanner.cache.ok,
-    detail: scanner.cache.detail,
-  });
-  checks.push({
-    name: "Vulnerability DB",
-    ok: scanner.db.ok,
-    detail: scanner.db.detail,
-  });
+  const checks = await runHealthChecks();
 
   const allOk = checks.every((ch) => ch.ok);
   const failCount = checks.filter((ch) => !ch.ok).length;

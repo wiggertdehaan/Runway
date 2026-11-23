@@ -413,6 +413,36 @@ Do not add a new place that calls `verifyAndConsumeTotp` for a signed-in or
 pre-auth user without going through `verifySecondFactor`. The per-IP limit on
 the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 
+### The overview page is one pure function over what the viewer may see
+- `GET /overview` (`routes/web.ts`, session required: it MUST have its
+  `webRoutes.use("/overview", requireSession)` line, or the handler crashes on a
+  missing user) assembles an `OverviewInput` and calls `buildOverview`
+  (`overview/build.ts`, pure: no database, no Docker, no clock) to get the four
+  figures, the inbox (Needs you now / This week / For your information) and the
+  statistics for a period (24h, 7d, 30d; unknown input = 7d). `ui/overview.ts`
+  renders it. Not the start page yet.
+- Rights are decided once, by `appsVisibleTo`, before the builder runs, and
+  enforced again inside it: events, hit series, KEV rows and exemptions of an app
+  that is not in `input.apps` are dropped. Tokens are the one input not tied to an
+  app: an administrator is told about everybody's, an owner only about their own.
+  An owner never gets server information (no Health figure, no audit link).
+- Sources, no new table: app status (`ui/status.ts`), `collectAtRisk` (KEV),
+  `app_events` (`listEventCodes`; deploys, rebuilds, KEV findings, dependency news
+  all come from events, so rebuild-driven deploys are not counted twice), hourly
+  hit buckets (`getBucketsBulk`, 60 days), user and developer tokens, quarantine
+  exemptions, the rebuild schedule (`nextScheduledRebuild`, DST-safe).
+  `overview/gather.ts` reads the database; the route reads Docker state.
+- Retention was raised so a 30-day period can be compared with the 30 days before
+  it: hit buckets 60 days (`RETENTION_HOURS` in `deploy/activity-tailer.ts`), events
+  60 days by default (`EVENTS_RETENTION_DAYS`; still capped at 500 per app).
+  "New KEV findings" is `kev_grace_started` + `kev_added`: findings that are not
+  KEV are not recorded as events yet, so they are not counted.
+- The Health figure (administrators only) uses the same checks as `/health`
+  (`overview/health.ts`, `runHealthChecks`), cached 30 seconds for the overview.
+  A failing component never turns the headline into "Everything is fine".
+- The weekly run only rebuilds apps with issues, so the page says "Next rebuild
+  of apps with issues", never "all apps".
+
 ### The Rebuild page has two buttons, one selection rule
 - `selectRebuildCandidates` (`deploy/rebuild.ts`, pure over a findings provider) is
   the ONE place that decides which apps "have issues": a deployed image and a
@@ -595,7 +625,7 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
   ending once per end date) and `deploy/health-watch.ts` (health transitions:
   one look a minute, a change believed after 3, at most one event per 10
   minutes per app, in-memory baseline so a restart emits nothing).
-- Retention: `pruneEvents` hourly, 30 days (`EVENTS_RETENTION_DAYS`) and 500 per
+- Retention: `pruneEvents` hourly, 60 days (`EVENTS_RETENTION_DAYS`) and 500 per
   app (`EVENTS_MAX_PER_APP`). Reads count as `read` for the rate limit and are
   not audited (`UNAUDITED_READS`).
 - The MCP client (`packages/mcp/src/events.ts`) rebuilds every answer field by

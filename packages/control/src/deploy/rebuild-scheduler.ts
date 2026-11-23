@@ -103,6 +103,80 @@ export function isRebuildDue(
   return lastRunDate !== now.date;
 }
 
+/** Offset (ms) of `tz` from UTC at the instant `utcMs`. */
+function tzOffsetMs(utcMs: number, tz: string): number {
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const p: Record<string, string> = {};
+  for (const part of fmt.formatToParts(new Date(utcMs))) p[part.type] = part.value;
+  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return asUtc - Math.floor(utcMs / 1000) * 1000;
+}
+
+/** Pure: the UTC instant at which `tz` shows `date` (YYYY-MM-DD) at `minutes` past midnight. */
+export function zonedToUtc(date: string, minutes: number, tz: string = SCHEDULE_TZ): number {
+  const [y, m, d] = date.split("-").map(Number);
+  const guess = Date.UTC(y!, m! - 1, d!, 0, minutes);
+  const first = guess - tzOffsetMs(guess, tz);
+  return guess - tzOffsetMs(first, tz);
+}
+
+export type NextScheduled =
+  | { kind: "off" }
+  | { kind: "due" }
+  | { kind: "at"; at: number };
+
+/**
+ * Pure: when the weekly run fires next. "due" = it would launch at the next
+ * tick (right day, time passed, not launched today yet), "off" = switched off.
+ * Counts calendar days in the schedule's own timezone, so a DST change
+ * cannot skip or repeat a weekday.
+ */
+export function nextScheduledRebuild(
+  schedule: Schedule,
+  now: Date,
+  lastRunDate: string | undefined,
+  tz: string = SCHEDULE_TZ
+): NextScheduled {
+  if (!schedule.enabled) return { kind: "off" };
+  const parts = localParts(now, tz);
+  const at = parseTime(schedule.time) ?? parseTime(DEFAULT_TIME)!;
+  if (isRebuildDue(schedule, parts, lastRunDate)) return { kind: "due" };
+  const [y, m, d] = parts.date.split("-").map(Number);
+  for (let i = 0; i <= 8; i++) {
+    const day = new Date(Date.UTC(y!, m! - 1, d! + i));
+    if (day.getUTCDay() !== schedule.day) continue;
+    const date = day.toISOString().slice(0, 10);
+    const utc = zonedToUtc(date, at, tz);
+    if (utc > now.getTime()) return { kind: "at", at: utc };
+  }
+  return { kind: "off" };
+}
+
+/** "Sun 29 Nov 05:00" in the schedule's timezone. */
+export function formatScheduled(ms: number, tz: string = SCHEDULE_TZ): string {
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: tz,
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const p: Record<string, string> = {};
+  for (const part of fmt.formatToParts(new Date(ms))) p[part.type] = part.value;
+  return `${p.weekday} ${p.day} ${p.month} ${p.hour}:${p.minute}`;
+}
+
 export function startRebuildScheduler(log: Logger = console): () => void {
   const closed = closeOrphanedRebuildRuns();
   if (closed > 0) log.warn(`[rebuild] closed ${closed} run(s) interrupted by a restart`);

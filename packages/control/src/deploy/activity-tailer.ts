@@ -24,9 +24,11 @@ import { getSetting, setSetting } from "../db/settings.js";
 
 const POLL_INTERVAL_MS = 30 * 1000;
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
-// Retain a bit more than the 7-day sparkline window so an in-flight
-// read never deletes a hour we're still about to render.
-const RETENTION_HOURS = 7 * 24 + 6;
+// Retain 60 days (plus a few hours so an in-flight read never deletes an
+// hour we're still about to render): the overview compares a 30-day period
+// with the 30 days before it. At ~one row per app per active hour that is
+// at most 1440 rows per app.
+export const RETENTION_HOURS = 60 * 24 + 6;
 // Cap a single read so a runaway log file doesn't lock the event loop.
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 

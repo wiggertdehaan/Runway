@@ -266,7 +266,7 @@ describe("the cursor over HTTP", () => {
 
   it("says so when the cursor is older than what is kept, with the events that remain", async () => {
     const now = Date.now();
-    emitEvent({ appId: apps.alice1.id, code: "deploy_succeeded" }, now - 60 * 86_400_000);
+    emitEvent({ appId: apps.alice1.id, code: "deploy_succeeded" }, now - 90 * 86_400_000);
     emitEvent({ appId: apps.alice1.id, code: "health_unhealthy" }, now);
     pruneEvents(now);
     const b = await json(await get("/events?since=c1_0", apps.alice1.key));

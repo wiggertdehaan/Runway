@@ -423,4 +423,53 @@ button.ghost:hover{background:var(--bg2);opacity:1}
 .cp code{flex:1 1 16rem;min-width:0;overflow-wrap:anywhere;background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:0.5rem 0.65rem;font-size:0.8rem}
 `;
 
-export const APP_CSS = [themeCss(), ALIASES, BASE, SHELL, COMPONENTS].join("\n");
+const OVERVIEW = String.raw`
+.ov-top{display:flex;align-items:flex-end;justify-content:space-between;gap:0.75rem 1rem;flex-wrap:wrap;margin-bottom:1rem}
+.ov-top h1{margin:0}
+.ov-head{border:1px solid var(--line);border-radius:var(--r3);background:var(--bg);padding:1rem 1.25rem;margin-bottom:1rem;border-left:3px solid var(--line2)}
+.ov-head.calm{border-left-color:var(--ok)}
+.ov-head.attn-now{border-left-color:var(--err)}
+.ov-head.attn-week{border-left-color:var(--warn)}
+.ov-head h2{margin:0 0 0.15rem;font-size:1.25rem}
+.ov-head p{margin:0.15rem 0 0}
+.ov-head a{color:var(--tx);text-decoration:underline;text-underline-offset:2px}
+.ov-figs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0.5rem;margin:0 0 1.25rem}
+.ov-fig{display:block;border:1px solid var(--line);border-radius:var(--r3);background:var(--bg);padding:0.55rem 0.85rem;text-decoration:none;color:var(--tx);min-width:0}
+.ov-fig:hover{background:var(--bg2)}
+.ov-fig .ov-l{display:block;color:var(--mu);font-size:0.75rem}
+.ov-fig .ov-v{display:block;font-size:1.35rem;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ov-fig .ov-s{display:block;color:var(--mu);font-size:0.75rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-fig.t-err{border-left:3px solid var(--err)}.ov-fig.t-err .ov-v{color:var(--err)}
+.ov-fig.t-warn{border-left:3px solid var(--warn)}.ov-fig.t-warn .ov-v{color:var(--warn)}
+.ov-fig.t-ok{border-left:3px solid var(--ok)}
+.ov-h{margin:1.5rem 0 0.5rem;font-size:0.95rem;color:var(--mu);font-weight:600;display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap}
+.ov-h .ov-n{font-variant-numeric:tabular-nums;font-weight:500}
+.ov-list{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:var(--r3);background:var(--bg)}
+.ov-item{display:flex;align-items:center;justify-content:space-between;gap:0.5rem 1rem;flex-wrap:wrap;padding:0.7rem 1rem;border-top:1px solid var(--line);border-left:3px solid transparent}
+.ov-item:first-child{border-top:0}
+.ov-item.t-err{border-left-color:var(--err)}
+.ov-item.t-warn{border-left-color:var(--warn)}
+.ov-item.t-info{border-left-color:var(--line2)}
+.ov-main{min-width:0;flex:1 1 16rem}
+.ov-main strong{font-weight:600;overflow-wrap:anywhere}
+.ov-main p{margin:0.15rem 0 0}
+.ov-more{margin:0.4rem 0 0}
+.ov-per{display:flex;gap:0.25rem;flex-wrap:wrap}
+.ov-per a{display:inline-flex;align-items:center;min-height:32px;padding:0 0.8rem;border:1px solid var(--line);border-radius:999px;color:var(--tx);text-decoration:none;font-size:0.85rem;background:var(--bg)}
+.ov-per a[aria-current=true]{background:var(--inv);color:var(--invtx);border-color:var(--inv)}
+.ov-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:0.5rem}
+.ov-stat{border:1px solid var(--line);border-radius:var(--r3);background:var(--bg);padding:0.65rem 0.85rem;min-width:0}
+.ov-stat .ov-l{display:block;color:var(--mu);font-size:0.75rem}
+.ov-stat .ov-v{display:block;font-size:1.35rem;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums}
+.ov-stat .ov-d{display:block;color:var(--mu);font-size:0.75rem}
+.ov-stat .ov-d.bad,.ov-stat .ov-sub.bad{color:var(--err)}
+.ov-stat .ov-sub{display:block;font-size:0.75rem;color:var(--mu)}
+.ov-spark{display:block;margin-top:0.35rem;color:var(--mu);max-width:100%}
+.ov-top3{margin:0.4rem 0 0;padding:0;list-style:none;font-size:0.75rem;color:var(--mu)}
+.ov-top3 li{display:flex;justify-content:space-between;gap:0.5rem}
+.ov-top3 a{color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-foot{margin-top:1.25rem}
+@media (max-width:699px){.ov-figs{grid-template-columns:repeat(2,minmax(0,1fr))}.ov-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.ov-stat[data-stat=hits]{grid-column:1/-1}.ov-item{padding:0.7rem 0.85rem}.ov-item .btn-link{width:100%;justify-content:center}}
+`;
+
+export const APP_CSS = [themeCss(), ALIASES, BASE, SHELL, COMPONENTS, OVERVIEW].join("\n");
