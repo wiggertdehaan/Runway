@@ -21,7 +21,7 @@
     "nanoid": "^5.1.11",
     "qrcode": "^1.5.4",
     "tar": "^7.5.20",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/dockerode": "^4.0.1",
