@@ -10,6 +10,14 @@
 const MAX_WAIT_SECONDS = 3600;
 const MAX_BODY_CHARS = 1000;
 
+/** The caller asked for something that cannot be routed (which server? which app?). The text is safe to show. */
+export class RunwayUsageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunwayUsageError";
+  }
+}
+
 export class RunwayApiError extends Error {
   constructor(
     message: string,
@@ -41,13 +49,18 @@ export function parseRetryAfter(
   return Math.min(Math.max(seconds, 1), MAX_WAIT_SECONDS);
 }
 
-/** Mask the secrets we hold, and anything shaped like a Runway token. */
-export function redactSecrets(text: string, secrets: readonly string[] = []): string {
+/** Mask exactly the secrets we hold, wherever they appear. */
+export function maskSecrets(text: string, secrets: readonly string[] = []): string {
   let out = text;
   for (const s of secrets) {
     if (s && s.length >= 6) out = out.split(s).join("[redacted]");
   }
-  return out
+  return out;
+}
+
+/** Mask the secrets we hold, and anything shaped like a Runway token. */
+export function redactSecrets(text: string, secrets: readonly string[] = []): string {
+  return maskSecrets(text, secrets)
     .replace(/\b(rw[ydu]_)[A-Za-z0-9_-]{6,}/g, "$1[redacted]")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{6,}/gi, "$1[redacted]");
 }

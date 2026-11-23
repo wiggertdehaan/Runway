@@ -2,7 +2,7 @@
  * HTTP client for communicating with the Runway Control API.
  */
 
-import { apiErrorFromResponse } from "./errors.js";
+import { apiErrorFromResponse, redactSecrets, RunwayApiError } from "./errors.js";
 import { cleanEventDetail, cleanEventsPage, type EventDetailOut, type EventsPage } from "./events.js";
 
 export type Runtime = "node" | "python" | "go" | "static";
@@ -47,33 +47,109 @@ export interface BasicAuthResponse {
   basic_auth: { enabled: boolean; username: string | null };
 }
 
+/** Default time a call may take. Uploads, downloads and scans get their own, longer ones. */
+export const DEFAULT_TIMEOUT_MS = 30_000;
+const DEPLOY_TIMEOUT_MS = 10 * 60_000;
+const PULL_TIMEOUT_MS = 5 * 60_000;
+const RESCAN_TIMEOUT_MS = 5 * 60_000;
+
+export interface ClientOptions {
+  /**
+   * The app a user token (`rwu_...`) acts on, sent as `X-Runway-App`. Leave it
+   * out for a per-app key (that key already is one app) and for calls that are
+   * about the person, not an app (`/me`, `/apps`, `/events`).
+   */
+  app?: string;
+  /** Per call limit in ms; a slow server must not hang the agent. */
+  timeoutMs?: number;
+}
+
 export class RunwayClient {
   private baseUrl: string;
   private apiKey: string;
+  private opts: ClientOptions;
 
-  constructor(baseUrl: string, apiKey: string) {
+  /** `apiKey` is a per-app key or a user token; the server tells them apart by prefix. */
+  constructor(baseUrl: string, apiKey: string, opts: ClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.apiKey = apiKey;
+    this.opts = opts;
+  }
+
+  private authHeaders(): Record<string, string> {
+    const h: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+      "X-Runway-Client": CLIENT_ID,
+    };
+    if (this.opts.app) h["X-Runway-App"] = this.opts.app;
+    return h;
+  }
+
+  /**
+   * The one place a request leaves this process. Three rules live here:
+   * the credential is only ever sent to this client's own base URL, because a
+   * redirect is never followed (a 3xx is an error, so the Authorization header
+   * cannot be replayed at another host); a slow or dead server ends in a
+   * timeout, not a hang; and a network failure is reported without the URL
+   * query, the cause chain or anything else that could hold a secret.
+   */
+  private async send(url: string, init: RequestInit, timeoutMs = this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS): Promise<Response> {
+    let res: Response;
+    try {
+      res = await fetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      const e = err as { name?: string; cause?: { code?: string }; code?: string };
+      if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+        throw new RunwayApiError(`The Runway server did not answer within ${Math.round(timeoutMs / 1000)} seconds.`, 0);
+      }
+      const code = e?.cause?.code ?? e?.code;
+      const reason = typeof code === "string" && /^[A-Z0-9_]{3,40}$/.test(code) ? code : "network error";
+      throw new RunwayApiError(`Could not reach the Runway server (${reason}).`, 0);
+    }
+    if (res.status >= 300 && res.status < 400) {
+      throw new RunwayApiError(
+        `The Runway server answered with a redirect (HTTP ${res.status}). Redirects are not followed, so the token is never sent to another address: ` +
+          "use the final https:// address of the server in your configuration.",
+        res.status
+      );
+    }
+    return res;
   }
 
   private async request<T = unknown>(
     path: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    timeoutMs?: number
   ): Promise<T> {
     const url = `${this.baseUrl}/api/v1${path}`;
-    const res = await fetch(url, {
-      ...options,
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "X-Runway-Client": CLIENT_ID,
-        "Content-Type": "application/json",
-        ...options.headers,
+    const res = await this.send(
+      url,
+      {
+        ...options,
+        headers: {
+          ...this.authHeaders(),
+          "Content-Type": "application/json",
+          ...options.headers,
+        },
       },
-    });
+      timeoutMs
+    );
 
     if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
 
-    return (await res.json()) as T;
+    return (await this.readJson(res)) as T;
+  }
+
+  /**
+   * `res.json()` quotes the start of the body in its error, and a server can put anything in a body (our own
+   * token, if it was given one). A body that is not JSON is reported as that, without a word of it.
+   */
+  private async readJson(res: Response): Promise<unknown> {
+    try {
+      return await res.json();
+    } catch {
+      throw new RunwayApiError("The Runway server answered with something that is not JSON. Is the address the Runway server itself?", res.status);
+    }
   }
 
   async getConfig(): Promise<AppConfig> {
@@ -93,10 +169,7 @@ export class RunwayClient {
 
   async deploy(tarBuffer?: Buffer): Promise<unknown> {
     const url = `${this.baseUrl}/api/v1/app/deploy`;
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
-      "X-Runway-Client": CLIENT_ID,
-    };
+    const headers: Record<string, string> = { ...this.authHeaders() };
 
     let body: BodyInit | undefined;
     if (tarBuffer) {
@@ -107,9 +180,9 @@ export class RunwayClient {
       headers["Content-Type"] = "application/json";
     }
 
-    const res = await fetch(url, { method: "POST", headers, body });
+    const res = await this.send(url, { method: "POST", headers, body }, DEPLOY_TIMEOUT_MS);
     if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
-    return res.json();
+    return this.readJson(res);
   }
 
   async getStatus() {
@@ -245,10 +318,7 @@ export class RunwayClient {
       deployId !== undefined
         ? `${this.baseUrl}/api/v1/app/source?deploy=${deployId}`
         : `${this.baseUrl}/api/v1/app/source`;
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${this.apiKey}`, "X-Runway-Client": CLIENT_ID },
-    });
+    const res = await this.send(url, { method: "GET", headers: this.authHeaders() }, PULL_TIMEOUT_MS);
     if (res.status === 404) return null;
     if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
     const arrayBuffer = await res.arrayBuffer();
@@ -260,22 +330,55 @@ export class RunwayClient {
    * is rebuilt field by field (see events.ts): nothing the server sends goes to
    * the model as it came. The cursor is the caller's to keep.
    */
-  async getEvents(since?: string, limit?: number): Promise<EventsPage> {
+  async getEvents(since?: string, limit?: number, app?: string): Promise<EventsPage> {
     const q = new URLSearchParams();
     if (since) q.set("since", since);
     if (limit !== undefined) q.set("limit", String(limit));
+    if (app) q.set("app", app);
     const qs = q.toString();
     return cleanEventsPage(await this.request(`/events${qs ? `?${qs}` : ""}`));
   }
 
   /** One event's known fields; null when it does not exist or is not yours. */
   async getEventDetail(id: string): Promise<EventDetailOut | null> {
-    const res = await fetch(`${this.baseUrl}/api/v1/events/${encodeURIComponent(id)}`, {
-      headers: { Authorization: `Bearer ${this.apiKey}`, "X-Runway-Client": CLIENT_ID },
+    const res = await this.send(`${this.baseUrl}/api/v1/events/${encodeURIComponent(id)}`, {
+      headers: this.authHeaders(),
     });
     if (res.status === 404) return null;
     if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
-    return cleanEventDetail(await res.json());
+    return cleanEventDetail(await this.readJson(res));
+  }
+
+  // ── user-token calls: about the person, or acting on the app named in `app` ──
+
+  /** Who this token is and how long it lasts. Needs a user token. */
+  async getMe(): Promise<unknown> {
+    return this.request("/me");
+  }
+
+  /** Every app this person may see on this server. Needs a user token. */
+  async listApps(): Promise<unknown> {
+    return this.request("/apps");
+  }
+
+  /** A new, empty app owned by this person. Needs a user token with the deploy scope. */
+  async createApp(): Promise<unknown> {
+    return this.request("/apps", { method: "POST" });
+  }
+
+  /** Start a rebuild of the app. Needs a user token with the deploy scope. */
+  async rebuild(): Promise<unknown> {
+    return this.request("/app/rebuild", { method: "POST" });
+  }
+
+  /** Scan the running image again and wait for the answer. Needs a user token with the deploy scope. */
+  async rescan(): Promise<unknown> {
+    return this.request("/app/rescan", { method: "POST" }, RESCAN_TIMEOUT_MS);
+  }
+
+  /** Strip this client's credential from a piece of text. */
+  scrub(text: string): string {
+    return redactSecrets(text, [this.apiKey]);
   }
 
   async listDeploys(limit = 20): Promise<{

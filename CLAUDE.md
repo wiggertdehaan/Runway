@@ -20,6 +20,8 @@ things that would waste time to re-derive.
   - `src/tools.ts` — zod-typed tool definitions
   - `src/tar.ts` — tars a project dir respecting dockerignore/gitignore
   - `src/client.ts` — HTTP client against the control API
+  - `src/config.ts`, `src/registry.ts`, `src/multi.ts` — several Runway
+    servers (see "One MCP connection, several Runways")
 - `docker-compose.yml` — Traefik + control, nothing else by default
 - `install.sh` — bootstrap for a fresh Linux server
 
@@ -554,6 +556,41 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 - The MCP client (`packages/mcp/src/events.ts`) rebuilds every answer field by
   field and fences `untrusted_text`; it does not pass server output through. A
   client that talks to several servers must keep one cursor per server.
+
+### One MCP connection, several Runways (packages/mcp)
+- `config.ts` decides the mode. **legacy**: no file and no `RUNWAY_TOKEN`, so
+  `RUNWAY_URL` + `RUNWAY_APP_KEY`, one app key, the tools exactly as they always
+  were (no `runway`/`app` arguments, error text unchanged). **config**:
+  `~/.runway/config.json` (or `RUNWAY_CONFIG`), or `RUNWAY_URL` +
+  `RUNWAY_TOKEN`; every app tool then also takes `runway` and `app`.
+  `registerTools` reads `registry.mode` and changes the schemas, so do not add
+  the routing fields unconditionally.
+- `registry.ts` is the only place that picks server, app and credential
+  (`clientFor`). One server: `runway` optional. Several: required and never
+  guessed. A user token acts on an app via `X-Runway-App` (`clientFor` refuses a
+  call with no app); an account call (events, the app list, create app) sends
+  the app only as `?app=`, never as the header. An app key in `app_keys` wins for
+  its app and is sent without the header. Nothing federates: a client carries
+  one base URL and the one credential that belongs to it.
+- `RunwayClient.send` is the one place a request leaves the process: `redirect:
+  "manual"` and a 3xx is an error (never replay Authorization at another host), a
+  time limit on every call, network failures reported by reason code only, and
+  `readJson` never quotes the body (the parser's message does). Keep new calls
+  going through it.
+- Credentials never reach the model: `tools.ts` masks every secret the registry
+  holds in all output (`ok`) and in errors (`fail`, with token shapes too), and a
+  config error names the field, never a value (a file that is not JSON is
+  reported without quoting it, because the parser quotes the text).
+  `tools.test.ts` sweeps every tool against hostile server behaviour and fails if
+  a tool is added without a row in its argument table.
+- `multi.ts` rebuilds every answer from several servers field by field. The
+  `runway` field of an event, an app or a result is written from the local config
+  name, never from what a server sent. Events keep one cursor per server
+  (`since`/`next` are maps `{runwayName: cursor}`); a failing server keeps the
+  cursor it was given and does not block the others. `list_runways`/`list_apps`
+  probe with a short timeout and four servers at a time.
+- Not built on purpose: rotating an app key from the MCP (the new key would be
+  shown to the model).
 
 ## Migrations
 
