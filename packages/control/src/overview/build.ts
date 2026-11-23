@@ -16,6 +16,7 @@
  * tokens and an owner only their own.
  */
 import { fmtCountdown, offlineAt, URGENT_MS, type AtRiskApp } from "../routes/security-view.js";
+import { agoText, type View } from "../host/readings.js";
 import type { AppState } from "../ui/status.js";
 
 // ── Periods ──────────────────────────────────────────────────────
@@ -98,6 +99,55 @@ export interface HealthSummary {
   failed: string[];
 }
 
+/** One host figure the page may show: the reading, whether it is the host's, and when it was taken. */
+export interface HostSeries {
+  /** Mean over the current period; null when nothing was measured in it. */
+  avg: number | null;
+  /** Mean over the period before it; null when there is no history that far back. */
+  prevAvg: number | null;
+  /** One value per sparkline bucket, null where nothing was measured. */
+  series: Array<number | null>;
+  /** Epoch ms of the newest sample; null when there is none. */
+  measuredAt: number | null;
+}
+
+export interface HostDisk {
+  totalBytes: number;
+  usedBytes: number;
+  freeBytes: number;
+  /** Used share, 0 to 100, the way `df` prints it. */
+  pct: number;
+  measuredAt: number;
+}
+
+export interface HostData {
+  totalBytes: number;
+  /** The same total at the start of the period; null when there was no sample that old. */
+  startBytes: number | null;
+  series: Array<number | null>;
+  parts: { images: number; volumes: number; containers: number; buildcache: number };
+  /** A caveat about the build-cache part ("build cache not included"). */
+  note: string | null;
+  measuredAt: number;
+}
+
+/**
+ * What the host collector measured, already cut to the period. Administrators
+ * only: `buildOverview` ignores it for anybody else.
+ */
+export interface HostInput {
+  /** CPU and memory come from /proc; one verdict for both. */
+  procView: { view: View; reason: string | null };
+  diskView: { view: View; reason: string | null };
+  disk: HostDisk | null;
+  cpu: HostSeries;
+  mem: HostSeries;
+  memTotalBytes: number | null;
+  data: HostData | null;
+  /** Why a reading is missing ("No data yet" with the reason as its tooltip). */
+  errors: { disk?: string; cpu?: string; mem?: string; data?: string };
+}
+
 export interface OverviewInput {
   viewer: { admin: boolean };
   /** Only the apps the viewer may see. */
@@ -116,6 +166,8 @@ export interface OverviewInput {
   nextRebuild: NextRebuild;
   /** Administrator only; null when not asked or not available. */
   health: HealthSummary | null;
+  /** Administrator only: host disk, CPU, memory and data. Absent or null shows nothing. */
+  host?: HostInput | null;
 }
 
 // ── Output ───────────────────────────────────────────────────────
@@ -123,12 +175,16 @@ export interface OverviewInput {
 export type Tone = "ok" | "warn" | "err" | "neutral";
 
 export interface Figure {
-  key: "live" | "down" | "kev" | "health" | "expiring";
+  key: "live" | "down" | "kev" | "health" | "disk" | "expiring";
   label: string;
   value: string;
   sub: string | null;
   tone: Tone;
   href: string;
+  /** Not the host's number (a container view) or not measured: shown in grey. */
+  grey?: boolean;
+  /** Tooltip, e.g. why there is no data. */
+  title?: string;
 }
 
 export type Urgency = "now" | "week" | "info";
@@ -159,9 +215,20 @@ export interface Delta {
 }
 
 export interface Stat {
-  key: "apps" | "deploys" | "rebuilds" | "kev" | "hits";
+  key: "apps" | "deploys" | "rebuilds" | "kev" | "hits" | "cpu" | "mem" | "data";
   label: string;
   value: number;
+  /** The value as shown ("23%", "41.2 GB"); the number itself when absent. */
+  display?: string;
+  /** The whole "difference" line, when the usual "N vs the previous period" does not fit. */
+  deltaLine?: string;
+  /** Small grey line: "Container view, not the host", "measured 12 min ago", "No data yet". */
+  note?: string | null;
+  grey?: boolean;
+  /** Tooltip. */
+  title?: string;
+  /** Server statistics: only an administrator gets them. */
+  server?: boolean;
   /** Second line, e.g. "2 failed". */
   sub: string | null;
   subBad: boolean;
@@ -264,6 +331,193 @@ export function makeDelta(current: number, previous: number, badWhenUp: boolean,
 }
 
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+// ── Host figures ─────────────────────────────────────────────────
+
+/** Disk fullness at which the inbox speaks: "This week" from the first, "Needs you now" from the second. */
+export const DISK_WARN_PCT = 80;
+export const DISK_CRIT_PCT = 90;
+
+/** How old a reading may be before the page says when it was taken. */
+const STALE_FAST_MS = 12 * 60_000; // CPU, memory: one sample a minute
+const STALE_DISK_MS = 17 * 60_000; // every 5 minutes
+const STALE_DATA_MS = 35 * 60_000; // every 15 minutes
+
+/** Bytes as the host tools print them in SI units: 1.5 GB, 820 MB. */
+export function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "?";
+  if (n >= 1e12) return `${(n / 1e12).toFixed(1)} TB`;
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n >= 1e6) return `${Math.round(n / 1e6)} MB`;
+  return `${Math.round(n / 1e3)} kB`;
+}
+
+/** A series with gaps for a sparkline: a gap repeats the last value (0 before the first). */
+export function fillSeries(values: Array<number | null>): number[] {
+  const out: number[] = [];
+  let last = 0;
+  const firstReal = values.find((v) => v !== null);
+  if (typeof firstReal === "number") last = firstReal; // a leading gap starts flat at the first value
+  for (const v of values) {
+    if (v !== null) last = v;
+    out.push(last);
+  }
+  return out;
+}
+
+function staleNote(now: number, measuredAt: number | null, maxAge: number): string | null {
+  return measuredAt !== null && now - measuredAt > maxAge ? `measured ${agoText(now - measuredAt)}` : null;
+}
+
+const noDelta: Delta = { text: "", fromZero: false, dir: "flat", bad: false };
+
+/** "+3 pts vs the previous 7 days", or why there is no comparison. */
+export function ptsLine(cur: number, prev: number | null, previousLabel: string): string {
+  if (prev === null) return "no earlier data";
+  const diff = Math.round(cur) - Math.round(prev);
+  if (diff === 0) return `no change vs ${previousLabel}`;
+  return `${diff > 0 ? "+" : "-"}${Math.abs(diff)} pts vs ${previousLabel}`;
+}
+
+function diskFigure(host: HostInput, now: number): Figure {
+  const d = host.disk;
+  if (!d) {
+    return {
+      key: "disk",
+      label: "Disk",
+      value: "?",
+      sub: "No data yet",
+      tone: "neutral",
+      href: "#server",
+      grey: true,
+      title: host.errors.disk ?? "The first reading comes within a few minutes of a start.",
+    };
+  }
+  const pct = Math.round(d.pct);
+  if (host.diskView.view === "container") {
+    return {
+      key: "disk",
+      label: "Disk",
+      value: `${pct}%`,
+      sub: "Container view, not the host",
+      tone: "neutral",
+      href: "#server",
+      grey: true,
+      title: host.diskView.reason ?? undefined,
+    };
+  }
+  const stale = staleNote(now, d.measuredAt, STALE_DISK_MS);
+  return {
+    key: "disk",
+    label: "Disk",
+    value: `${pct}%`,
+    sub: `${fmtBytes(d.freeBytes)} free${stale ? `, ${stale}` : ""}`,
+    tone: d.pct >= DISK_CRIT_PCT ? "err" : d.pct >= DISK_WARN_PCT ? "warn" : "neutral",
+    href: "#server",
+  };
+}
+
+function missingStat(key: Stat["key"], label: string, reason: string | undefined): Stat {
+  return {
+    key,
+    label,
+    value: 0,
+    display: "\u2014",
+    sub: null,
+    subBad: false,
+    note: "No data yet",
+    grey: true,
+    title: reason ?? "The first reading comes within a few minutes of a start.",
+    delta: noDelta,
+    series: [],
+    server: true,
+  };
+}
+
+/** CPU, memory and Docker data: administrators only (the caller checks). */
+function serverStats(host: HostInput, spec: PeriodSpec, now: number): Stat[] {
+  const out: Stat[] = [];
+  const procGrey = host.procView.view === "container";
+  const containerNote = "Container view, not the host";
+
+  // CPU, a share of the host.
+  if (host.cpu.avg === null) {
+    out.push(missingStat("cpu", "CPU", host.errors.cpu));
+  } else {
+    out.push({
+      key: "cpu",
+      label: "CPU",
+      value: Math.round(host.cpu.avg),
+      display: `${Math.round(host.cpu.avg)}%`,
+      sub: null,
+      subBad: false,
+      note: procGrey ? containerNote : staleNote(now, host.cpu.measuredAt, STALE_FAST_MS),
+      grey: procGrey,
+      title: procGrey ? (host.procView.reason ?? undefined) : "Average over the period",
+      delta: noDelta,
+      deltaLine: ptsLine(host.cpu.avg, host.cpu.prevAvg, spec.previous),
+      series: fillSeries(host.cpu.series),
+      server: true,
+    });
+  }
+
+  // Memory, used share of the host (MemTotal - MemAvailable).
+  const total = host.memTotalBytes;
+  if (host.mem.avg === null) {
+    out.push(missingStat("mem", "Memory", host.errors.mem));
+  } else {
+    const toPct = (b: number) => (total ? (b / total) * 100 : b);
+    const pct = toPct(host.mem.avg);
+    out.push({
+      key: "mem",
+      label: "Memory",
+      value: Math.round(pct),
+      display: total ? `${Math.round(pct)}%` : fmtBytes(host.mem.avg),
+      sub: total ? `${fmtBytes(host.mem.avg)} of ${fmtBytes(total)}` : null,
+      subBad: false,
+      note: procGrey ? containerNote : staleNote(now, host.mem.measuredAt, STALE_FAST_MS),
+      grey: procGrey,
+      title: procGrey ? (host.procView.reason ?? undefined) : "Used memory, average over the period",
+      delta: noDelta,
+      deltaLine: total
+        ? ptsLine(pct, host.mem.prevAvg === null ? null : toPct(host.mem.prevAvg), spec.previous)
+        : "no comparison",
+      series: fillSeries(host.mem.series),
+      server: true,
+    });
+  }
+
+  // Docker data: images + volumes + containers + build cache, in decimal GB like `docker system df`.
+  const data = host.data;
+  if (!data) {
+    out.push(missingStat("data", "Data", host.errors.data));
+  } else {
+    const diff = data.startBytes === null ? null : data.totalBytes - data.startBytes;
+    const small = diff !== null && Math.abs(diff) < Math.max(1e7, data.totalBytes * 0.005);
+    const deltaLine =
+      diff === null
+        ? "no earlier data"
+        : small
+          ? `no change in the last ${spec.label}`
+          : `${diff > 0 ? "+" : "-"}${fmtBytes(Math.abs(diff))} in the last ${spec.label}`;
+    const p = data.parts;
+    out.push({
+      key: "data",
+      label: "Data",
+      value: Math.round(data.totalBytes / 1e9),
+      display: fmtBytes(data.totalBytes),
+      sub: data.note,
+      subBad: false,
+      note: staleNote(now, data.measuredAt, STALE_DATA_MS),
+      title: `Images ${fmtBytes(p.images)}, volumes ${fmtBytes(p.volumes)}, containers ${fmtBytes(p.containers)}, build cache ${fmtBytes(p.buildcache)}`,
+      delta: noDelta,
+      deltaLine,
+      series: fillSeries(data.series),
+      server: true,
+    });
+  }
+  return out;
+}
 
 // ── Event phrases ────────────────────────────────────────────────
 
@@ -537,6 +791,40 @@ export function buildOverview(input: OverviewInput, now: number, period: Period 
     }
   }
 
+  // The server's disk: "This week" from 80%, "Needs you now" from 90%. A reading
+  // that is only the container's own view is not trusted either way: one quiet line.
+  const host = admin ? (input.host ?? null) : null;
+  if (host && host.disk) {
+    const d = host.disk;
+    if (host.diskView.view === "container") {
+      add({
+        key: "disk-view",
+        urgency: "info",
+        tone: "info",
+        title: "Disk reading is not the host's",
+        detail:
+          "Runway can only see its own data volume here, so the server's disk is not shown. Check the host itself with: df -h /",
+        href: "/health",
+        action: "See health",
+        appId: null,
+        rank: 21,
+      });
+    } else if (d.pct >= DISK_WARN_PCT) {
+      const critical = d.pct >= DISK_CRIT_PCT;
+      add({
+        key: "disk-full",
+        urgency: critical ? "now" : "week",
+        tone: critical ? "err" : "warn",
+        title: `Server disk is ${Math.round(d.pct)}% full`,
+        detail: `${fmtBytes(d.freeBytes)} free of ${fmtBytes(d.totalBytes)}. Builds and deploys fail when it is full. Pruning the build cache is the quickest way to free space.`,
+        href: "/settings",
+        action: "Free space",
+        appId: null,
+        rank: critical ? 0.2 : 7,
+      });
+    }
+  }
+
   const sorted = (urgency: Urgency) =>
     items
       .filter((i) => i.urgency === urgency)
@@ -600,6 +888,7 @@ export function buildOverview(input: OverviewInput, now: number, period: Period 
           }
         : { key: "health", label: "Health", value: "?", sub: "not checked", tone: "neutral", href: "/health" }
     );
+    if (host) figures.push(diskFigure(host, now));
   } else {
     const tokenSoon = input.tokens.filter((t) => t.expiresAt !== null && t.expiresAt > now && t.expiresAt - now <= 7 * DAY).length;
     const exemptSoon = exemptions.filter((x) => x.until - now <= 7 * DAY).length;
@@ -690,6 +979,8 @@ export function buildOverview(input: OverviewInput, now: number, period: Period 
       series: hitsSeries,
     },
   ];
+
+  if (host) stats.push(...serverStats(host, spec, now));
 
   const topApps: TopApp[] = apps
     .map((a) => ({

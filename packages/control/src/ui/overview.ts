@@ -41,7 +41,9 @@ export function nextRebuildLine(next: NextRebuild): string {
 
 function renderFigure(f: Figure): string {
   const sub = f.sub ? `<span class="ov-s">${esc(f.sub)}</span>` : "";
-  return `<a class="ov-fig t-${f.tone}" href="${esc(f.href)}"><span class="ov-l">${esc(f.label)}</span><span class="ov-v">${esc(f.value)}</span>${sub}</a>`;
+  const grey = f.grey ? " ov-grey" : "";
+  const title = f.title ? ` title="${esc(f.title)}"` : "";
+  return `<a class="ov-fig t-${f.tone}${grey}" href="${esc(f.href)}"${title}><span class="ov-l">${esc(f.label)}</span><span class="ov-v">${esc(f.value)}</span>${sub}</a>`;
 }
 
 function renderItem(i: InboxItem): string {
@@ -59,23 +61,31 @@ function renderGroup(title: string, items: InboxItem[], more: number): string {
   return `<h2 class="ov-h">${esc(title)} <span class="ov-n">${items.length + more}</span></h2><ul class="ov-list">${rows}</ul>${rest}`;
 }
 
-function renderStat(s: Stat, top: OverviewView["topApps"], periodLabel: string): string {
+function renderStat(s: Stat, top: OverviewView["topApps"], periodLabel: string, firstServer: boolean): string {
   const d = s.delta;
-  const delta = `<span class="ov-d${d.bad ? " bad" : ""}">${
-    d.fromZero ? `${esc(d.text)}, none in the previous ${esc(periodLabel)}` : `${esc(d.text)} vs the previous ${esc(periodLabel)}`
-  }</span>`;
+  const deltaText = s.deltaLine
+    ? esc(s.deltaLine)
+    : d.fromZero
+      ? `${esc(d.text)}, none in the previous ${esc(periodLabel)}`
+      : `${esc(d.text)} vs the previous ${esc(periodLabel)}`;
+  const delta = s.grey && s.series.length === 0 ? "" : `<span class="ov-d${d.bad ? " bad" : ""}">${deltaText}</span>`;
   const sub = s.sub ? `<span class="ov-sub${s.subBad ? " bad" : ""}">${esc(s.sub)}</span>` : "";
+  const note = s.note ? `<span class="ov-note">${esc(s.note)}</span>` : "";
   const topList =
     s.key === "hits" && top.length > 0
       ? `<ul class="ov-top3">${top
           .map((t) => `<li><a href="/apps/${encodeURIComponent(t.id)}">${esc(t.name)}</a><span>${esc(fmtNumber(t.hits))}</span></li>`)
           .join("")}</ul>`
       : "";
-  return `<div class="ov-stat" data-stat="${esc(s.key)}">
+  const spark = s.series.length > 0 ? sparkline(s.series, `${s.label}, last ${periodLabel}`) : "";
+  const attrs = `class="ov-stat${s.grey ? " ov-grey" : ""}" data-stat="${esc(s.key)}"${firstServer ? ' id="server"' : ""}${
+    s.title ? ` title="${esc(s.title)}"` : ""
+  }`;
+  return `<div ${attrs}>
     <span class="ov-l">${esc(s.label)}</span>
-    <span class="ov-v">${esc(fmtNumber(s.value))}</span>
-    ${sub}${delta}
-    ${sparkline(s.series, `${s.label}, last ${periodLabel}`)}
+    <span class="ov-v">${esc(s.display ?? fmtNumber(s.value))}</span>
+    ${sub}${note}${delta}
+    ${spark}
     ${topList}
   </div>`;
 }
@@ -112,7 +122,9 @@ export function renderOverview(view: OverviewView, opts: { admin: boolean }): st
   const label = view.period.label;
   const stats = `<h2 class="ov-h">Last ${esc(label)}</h2>
     <div class="ov-top" style="margin:0 0 0.5rem">${periodSwitch(view.period.key)}</div>
-    <div class="ov-stats">${view.stats.map((s) => renderStat(s, view.topApps, label)).join("")}</div>`;
+    <div class="ov-stats">${view.stats
+      .map((s, i) => renderStat(s, view.topApps, label, !!s.server && !view.stats.slice(0, i).some((x) => x.server)))
+      .join("")}</div>`;
 
   return `<div class="ov-top"><h1>Overview</h1></div>
     ${head}

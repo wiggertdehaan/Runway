@@ -166,6 +166,20 @@ are kept 60 days / 500 per app (`EVENTS_RETENTION_DAYS`, `EVENTS_MAX_PER_APP`);
 `HEALTH_WATCH_INTERVAL_MS=0` turns off the health watcher that raises
 `health_unhealthy` / `health_recovered`. Full list of codes: `/llms.txt`.
 
+### The overview page and the server figures
+
+`/overview` (in the sidebar) says in five seconds whether all is well and, if
+not, what to do now. Administrators also see the server's disk, CPU, memory and
+Docker data usage. Runway reads them from inside its own container, without an
+extra mount or privilege: `/proc` for CPU and memory, `statfs` on the data
+volume for the disk, `docker system df` and `buildctl du` over the Docker
+socket it already uses for data. They are kept 60 days. When a reading looks
+like the container's own view instead of the host's (a memory limit equal to
+MemTotal, a tiny or memory-backed data volume), the page shows it grey as
+"Container view, not the host" and writes one line to the audit log
+(`host_metrics_container_view`) instead of showing a false number.
+`HOST_METRICS_INTERVAL_MS=0` turns the measuring off.
+
 ### Option D — One MCP connection for all your apps, on several Runways
 
 For power users who manage more than one app, or more than one Runway

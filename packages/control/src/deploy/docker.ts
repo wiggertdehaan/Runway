@@ -168,6 +168,63 @@ export async function pruneBuildCache(
   });
 }
 
+/** Reject when `p` takes longer than `ms`. The work behind it is not cancelled; its result is ignored. */
+export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
+/**
+ * `GET /system/df` over the existing Docker socket: sizes of images, containers,
+ * volumes and Docker's build cache. It walks every image and volume, so it can
+ * take seconds on a busy host: the caller sets the time limit.
+ */
+export async function dockerDiskUsage(timeoutMs: number): Promise<unknown> {
+  return withTimeout(docker.df(), timeoutMs, "docker system df");
+}
+
+/**
+ * `buildctl du` inside the BuildKit container (the same `docker exec` route as
+ * the build and the prune, no new right): returns its output for
+ * `parseBuildctlDu`. Read-only.
+ */
+export async function buildCacheDu(timeoutMs: number): Promise<string> {
+  const run = async (): Promise<string> => {
+    const container = docker.getContainer(BUILDKIT_CONTAINER);
+    const exec = await container.exec({ Cmd: ["buildctl", "du"], AttachStdout: true, AttachStderr: true });
+    return new Promise<string>((resolve, reject) => {
+      exec.start({ hijack: true }, (err: any, stream: any) => {
+        if (err) return reject(new Error(`buildctl du failed: ${err.message}`));
+        const chunks: Buffer[] = [];
+        stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+        stream.on("end", async () => {
+          const log = stripDockerLogHeaders(Buffer.concat(chunks));
+          try {
+            const info = await exec.inspect();
+            if (info.ExitCode !== 0) return reject(new Error(`buildctl du exit ${info.ExitCode}: ${log.slice(-200)}`));
+            resolve(log);
+          } catch (e) {
+            reject(e as Error);
+          }
+        });
+        stream.on("error", (e: Error) => reject(e));
+      });
+    });
+  };
+  return withTimeout(run(), timeoutMs, "buildctl du");
+}
+
 async function runBuildctlViaExec(
   imageTag: string,
   contextDir: string,

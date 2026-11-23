@@ -22,6 +22,8 @@ import { startCachePruner } from "./deploy/cache-pruner.js";
 import { startRebuildScheduler } from "./deploy/rebuild-scheduler.js";
 import { startQuarantineMonitor } from "./deploy/quarantine.js";
 import { startHealthWatch } from "./deploy/health-watch.js";
+import { startHostMetrics } from "./host/collector.js";
+import { pruneHostMetrics } from "./host/store.js";
 import { pruneEvents } from "./db/events.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
 import { setupTokenAnnouncement } from "./auth/setup-token.js";
@@ -49,10 +51,12 @@ setInterval(() => {
   pruneAttempts();
   pruneApiAudit();
   pruneEvents();
+  pruneHostMetrics();
 }, 60 * 60 * 1000);
 deleteExpiredSessions();
 pruneApiAudit();
 pruneEvents();
+pruneHostMetrics();
 
 // Deploy uploads are removed by the deploy itself; this catches what a crash
 // in the middle of an upload left in the upload folder.
@@ -87,6 +91,11 @@ startQuarantineMonitor();
 // A change in whether a running app is healthy becomes an event (one look a
 // minute, a change believed after three). HEALTH_WATCH_INTERVAL_MS=0 turns it off.
 startHealthWatch();
+
+// Host disk, CPU, memory and Docker data usage for the overview page: read from
+// inside this container (no extra mount or privilege), kept 60 days.
+// HOST_METRICS_INTERVAL_MS=0 turns it off.
+startHostMetrics();
 
 const dashboardDomain = process.env.DASHBOARD_DOMAIN;
 if (dashboardDomain) {
