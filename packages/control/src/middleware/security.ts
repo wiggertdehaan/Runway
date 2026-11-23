@@ -25,7 +25,8 @@ export async function securityHeaders(c: Context, next: Next) {
     c.req.header("cookie")?.includes("runway_session=") ?? false;
   // Versioned static assets (/assets/*) are public and immutable, so they
   // keep their own Cache-Control instead of being forced to no-store.
-  if (hasSessionCookie && !c.req.path.startsWith("/assets/")) {
+  // The favicon is public and the same for everyone, so it may be cached too.
+  if (hasSessionCookie && !c.req.path.startsWith("/assets/") && c.req.path !== "/favicon.svg") {
     c.header("Cache-Control", "no-store");
   }
 

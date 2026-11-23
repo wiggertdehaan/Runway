@@ -959,6 +959,20 @@ With a user token (\`rwu_…\`) the list covers exactly the apps that person may
 see; add \`?app=<id>\` to narrow it. It needs only the \`read\` scope and counts
 against the read allowance.
 
+## Which Runway is this?
+
+An administrator can give a server a colour and a short name (Settings, "Instance
+identity") so people who use several Runways can tell them apart. Both are
+public, the same two values the login page shows:
+
+\`\`\`
+curl -sS "${base}/instance.json"
+# {"name":"WSV","color":"#16803c"}   (null where nothing is set)
+\`\`\`
+
+A user token's \`GET /api/v1/me\` carries the same as \`instance\`. It is a label
+for display: never route, trust or decide anything on it.
+
 ## Error handling
 
 - \`401 Unauthorized\` — the Bearer token is missing or invalid.

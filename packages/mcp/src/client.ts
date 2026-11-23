@@ -349,6 +349,18 @@ export class RunwayClient {
     return cleanEventDetail(await this.readJson(res));
   }
 
+  /**
+   * Which Runway this is: `{name, color}` from the public `/instance.json`.
+   * Display only. No credential is sent (the call needs none), the same
+   * no-redirect and time-limit rules apply as for every other call, and the
+   * body is never quoted in an error.
+   */
+  async getInstance(): Promise<unknown> {
+    const res = await this.send(`${this.baseUrl}/instance.json`, { headers: { "X-Runway-Client": CLIENT_ID } });
+    if (!res.ok) throw new RunwayApiError("This server does not publish /instance.json (an older Runway?).", res.status);
+    return this.readJson(res);
+  }
+
   // ── user-token calls: about the person, or acting on the app named in `app` ──
 
   /** Who this token is and how long it lasts. Needs a user token. */

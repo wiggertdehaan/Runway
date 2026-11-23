@@ -49,6 +49,14 @@ document.addEventListener('click', function(e) {
   appChip = b.getAttribute('data-chip') || 'all';
   filterApps();
 });
+// Typing in the custom colour field selects the "Custom" choice next to it.
+document.addEventListener('input', function(e) {
+  var t = e && e.target;
+  if (t && t.hasAttribute && t.hasAttribute('data-pick-custom')) {
+    var r = document.getElementById('inst-custom');
+    if (r) r.checked = true;
+  }
+});
 document.addEventListener('click', function(e) {
   document.querySelectorAll('.overflow-menu[open]').forEach(function(m) {
     if (!m.contains(e.target)) m.removeAttribute('open');

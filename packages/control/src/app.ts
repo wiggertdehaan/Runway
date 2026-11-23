@@ -6,6 +6,7 @@ import { keepInternalRoutesOffTheDashboardHost } from "./middleware/internal-rou
 import { expireLegacySessionCookie } from "./middleware/cookies.js";
 import { apiRateLimit } from "./middleware/rate-limit.js";
 import { assetRoutes } from "./routes/assets.js";
+import { instanceRoutes } from "./routes/instance.js";
 import { apiRoutes } from "./routes/api.js";
 import { llmsRoutes } from "./routes/llms.js";
 import { mcpRoutes } from "./routes/mcp.js";
@@ -43,6 +44,10 @@ app.route("/", llmsRoutes);
 
 // Self-hosted static assets (htmx). Public, before the session-guarded web routes.
 app.route("/", assetRoutes);
+
+// Public, display-only: the favicon and {name, color} of this instance (the
+// login page shows the same two things). Before the session-guarded web routes.
+app.route("/", instanceRoutes);
 
 // OAuth and forward-auth routes (before web so /auth/* matches first)
 app.route("/", oauthRoutes);

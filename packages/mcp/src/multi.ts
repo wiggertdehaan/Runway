@@ -14,6 +14,7 @@
  * with its own error text.
  */
 
+import { RunwayClient } from "./client.js";
 import { RunwayApiError, RunwayUsageError } from "./errors.js";
 import { cleanText, type EventItem, type EventsPage } from "./events.js";
 import type { RunwayRegistry } from "./registry.js";
@@ -72,6 +73,36 @@ function obj(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
+// ── instance identity (display only) ───────────────────────────────────────
+
+export interface InstanceOut {
+  name: string | null;
+  color: string | null;
+}
+
+const INSTANCE_NAME_MAX = 24;
+// The same character set the server enforces when an administrator saves a name.
+const INSTANCE_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} ._&+'()-]*$/u;
+const INSTANCE_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * What a server says about itself, rebuilt: a colour only as #rrggbb, a name
+ * only if it is short and made of ordinary characters. Anything else is
+ * dropped, so a server cannot hand the model a sentence through this field.
+ * It is shown, never used: the local config name stays the key, and nothing
+ * may be decided on it.
+ */
+export function cleanInstance(raw: unknown): InstanceOut | null {
+  const r = obj(raw);
+  const color = typeof r.color === "string" && INSTANCE_COLOR_RE.test(r.color) ? r.color.toLowerCase() : null;
+  let name: string | null = null;
+  if (typeof r.name === "string") {
+    const c = cleanText(r.name, INSTANCE_NAME_MAX + 1);
+    if (c.text && !c.truncated && Array.from(c.text).length <= INSTANCE_NAME_MAX && INSTANCE_NAME_RE.test(c.text)) name = c.text;
+  }
+  return color || name ? { name, color } : null;
+}
+
 // ── GET /me ────────────────────────────────────────────────────────────────
 
 export interface MeOut {
@@ -79,6 +110,7 @@ export interface MeOut {
   role: string;
   scope: string;
   expires_at: string | null;
+  instance: InstanceOut | null;
 }
 
 export function cleanMe(raw: unknown): MeOut | null {
@@ -89,7 +121,7 @@ export function cleanMe(raw: unknown): MeOut | null {
   const role = word(user.role);
   const scope = word(token.scope);
   if (!username || !role || !scope) return null;
-  return { username, role, scope, expires_at: isoOrNull(token.expires_at) };
+  return { username, role, scope, expires_at: isoOrNull(token.expires_at), instance: cleanInstance(top.instance) };
 }
 
 // ── list_runways ───────────────────────────────────────────────────────────
@@ -108,6 +140,8 @@ export interface RunwayStatus {
   expires_soon?: boolean;
   app?: { id: string; name: string | null };
   apps_with_keys?: number;
+  /** Which Runway this is, as the server describes itself. Display only. */
+  instance?: InstanceOut;
   error?: string;
 }
 
@@ -144,6 +178,7 @@ async function probe(registry: RunwayRegistry, server: ServerConfig, now: number
         return status;
       }
       status.credential = "valid";
+      if (me.instance) status.instance = me.instance;
       status.user = me.username;
       status.role = me.role;
       status.scope = me.scope;
@@ -184,8 +219,25 @@ function applyProbeFailure(status: RunwayStatus, err: unknown, server: ServerCon
   status.error = failureText(err, server);
 }
 
+/** The public identity of a server, best effort: no credential is sent and a failure just means "unknown". */
+async function publicInstance(server: ServerConfig): Promise<InstanceOut | null> {
+  try {
+    return cleanInstance(await new RunwayClient(server.url, "", LOOK).getInstance());
+  } catch {
+    return null;
+  }
+}
+
 export async function listRunways(registry: RunwayRegistry, now = Date.now()): Promise<{ runways: RunwayStatus[]; warnings: string[] }> {
-  const runways = await mapLimit(registry.servers, SERVER_CONCURRENCY, (s) => probe(registry, s, now));
+  const runways = await mapLimit(registry.servers, SERVER_CONCURRENCY, async (s) => {
+    const status = await probe(registry, s, now);
+    // A user token already told us (in /me). Otherwise ask the public endpoint, unless the server did not answer at all.
+    if (!status.instance && status.reachable !== false) {
+      const instance = await publicInstance(s);
+      if (instance) status.instance = instance;
+    }
+    return status;
+  });
   return { runways, warnings: [...registry.warnings] };
 }
 

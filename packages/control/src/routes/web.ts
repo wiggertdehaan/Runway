@@ -225,6 +225,14 @@ import { runHealthChecks, cachedHealth } from "../overview/health.js";
 import { buildOverview, parsePeriod, parseTime as parseOverviewTime, type OverviewApp } from "../overview/build.js";
 import { gatherDbInputs, gatherHostInput } from "../overview/gather.js";
 import { renderOverview } from "../ui/overview.js";
+import {
+  checkName,
+  faviconVersion,
+  getInstanceIdentity,
+  normalizeHex,
+  pageTitle,
+} from "../instance/identity.js";
+import { identityErrorFromQuery, renderInstanceCard, renderMark } from "../ui/instance-card.js";
 import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
 import { checkWildcardDns } from "../util/dns-check.js";
 import { validateCustomDomain } from "../util/domain.js";
@@ -326,12 +334,15 @@ function layout(
        <span class="theme-ic-dark">${icon('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>')}</span>
        <span class="lb">Theme</span>
      </button>`;
-  const mark = `<span class="mark"><svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12 21 4l-5 16-4-6.5z"/><path d="m12 13.5 9-9.5"/></svg></span>`;
+  const inst = getInstanceIdentity();
+  const mark = renderMark(inst.color);
+  const instName = inst.name ? `<small class="inst-name">${escapeHtml(inst.name)}</small>` : "";
+  const brandTitle = escapeHtml(inst.name ? `Runway ${inst.name}` : "Runway");
   const shell = username
     ? `<div class="shell">
-         <aside class="side" aria-label="Sidebar">
+         <aside class="side" aria-label="Sidebar"${inst.color ? ` data-inst style="--inst:${escapeHtml(inst.color)}"` : ""}>
            <div class="side-head">
-             <a class="brand" href="/">${mark}<span class="lb">Runway</span></a>
+             <a class="brand" href="/" title="${brandTitle}">${mark}<span class="lb">Runway${instName}</span></a>
              ${palBtn.top}
              <button type="button" class="menu-btn" id="menubtn" aria-label="Menu" aria-expanded="false" aria-controls="side-body">${icon('<path d="M4 7h16M4 12h16M4 17h16"/>')}</button>
            </div>
@@ -360,14 +371,20 @@ function layout(
     : `<div class="bare-top">${themeBtn("side-btn")}</div>
        <main class="page" id="main">${body}</main>`;
 
+  // No colour: the standard icon inline. With a colour: the public /favicon.svg,
+  // versioned by the colour so a browser fetches it again after a change.
+  const faviconLink = inst.color
+    ? `<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=${faviconVersion(inst.color)}" />`
+    : `<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0a'/%3E%3Cpath d='M7 16 25 8l-5 17-4-7z' fill='none' stroke='%23fff' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E" />`;
+
   return html`<!doctype html>
     <html lang="en">
       <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <meta name="color-scheme" content="light dark" />
-        <title>${title} - Runway</title>
-        <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0a'/%3E%3Cpath d='M7 16 25 8l-5 17-4-7z' fill='none' stroke='%23fff' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E" />
+        <title>${pageTitle(title, inst.name)}</title>
+        ${raw(faviconLink)}
         <script>${raw(PREPAINT_JS)}</script>
         <script src="${HTMX_PATH}" integrity="${HTMX_INTEGRITY}"></script>
         <style>${raw(APP_CSS + PALETTE_CSS)}</style>
@@ -383,11 +400,19 @@ function layout(
 }
 
 function authLayout(title: string, body: string, csrf?: string) {
+  // Before signing in you should already see which server this is: the colour
+  // and name are the same two values /instance.json gives to anyone.
+  const inst = getInstanceIdentity();
+  const heading = inst.color
+    ? `<h1 class="has-mark">${renderMark(inst.color, { large: true })}<span>Runway</span></h1>`
+    : "<h1>&#9992; Runway</h1>";
+  const namePill = inst.name ? `<p class="inst-pill">${escapeHtml(inst.name)}</p>` : "";
   return layout(
     title,
     `<div class="auth-card">
       <div class="auth-brand">
-        <h1>&#9992; Runway</h1>
+        ${heading}
+        ${namePill}
         <p>Deploy AI apps to your own server</p>
       </div>
       ${body}
@@ -2790,6 +2815,7 @@ webRoutes.get("/settings", (c) => {
       <div class="settings-layout">
         <nav class="settings-nav">
           <a href="#domain">Base domain</a>
+          <a href="#identity">Instance identity</a>
           <a href="#notifications">Notifications</a>
           <a href="#scan-floor">Scan floor</a>
           <a href="#upload-limit">Upload limit</a>
@@ -2809,6 +2835,8 @@ webRoutes.get("/settings", (c) => {
               </div>
             </form>
           </div>
+
+          ${renderInstanceCard(getInstanceIdentity(), identityErrorFromQuery(error))}
 
           <div class="card" id="notifications">
             <h2>Notifications</h2>
@@ -2958,6 +2986,52 @@ webRoutes.post("/settings", async (c) => {
     return c.redirect(`/settings?saved=1&dns_warning=${encodeURIComponent(dns.message)}`);
   }
   return c.redirect("/settings?saved=1");
+});
+
+/**
+ * Colour and name of this instance (display only). Admin-only through the
+ * `/settings/*` guard, CSRF through the global check. The colour is a swatch,
+ * a custom hex value or nothing; the name is cleaned and must pass the
+ * character set. Nothing is stored unless everything is valid.
+ */
+webRoutes.post("/settings/instance-identity", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.parseBody();
+  const field = (k: string): string => {
+    const v = body[k];
+    return typeof v === "string" ? v : "";
+  };
+  const before = getInstanceIdentity();
+
+  let color: string | null = null;
+  let name: string | null = null;
+  if (field("action") !== "reset") {
+    const choice = field("color_choice") || "none";
+    if (choice === "custom") {
+      color = normalizeHex(field("color_custom"));
+      if (!color) return c.redirect("/settings?error=instance_color#identity");
+    } else if (choice !== "none") {
+      color = normalizeHex(choice);
+      if (!color) return c.redirect("/settings?error=instance_color#identity");
+    }
+    const checked = checkName(field("instance_name"));
+    if (!checked.ok) {
+      return c.redirect(`/settings?error=${checked.reason === "too_long" ? "instance_name_long" : "instance_name_chars"}#identity`);
+    }
+    name = checked.name || null;
+  }
+
+  if (color) setSetting("instance_color", color);
+  else deleteSetting("instance_color");
+  if (name) setSetting("instance_name", name);
+  else deleteSetting("instance_name");
+
+  if (color !== before.color || name !== before.name) {
+    logAudit(user.id, user.username, "instance_identity_changed", {
+      detail: `color ${before.color ?? "standard"} -> ${color ?? "standard"}; name "${before.name ?? ""}" -> "${name ?? ""}"`,
+    });
+  }
+  return c.redirect("/settings?saved=1#identity");
 });
 
 webRoutes.post("/settings/scan-floor", async (c) => {
