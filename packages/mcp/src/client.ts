@@ -32,6 +32,13 @@ export interface AppConfig {
   configured: boolean;
 }
 
+/**
+ * Sent on every call so the server's audit log can tell a call made through
+ * this MCP server from a plain curl. A label for people reading the log,
+ * not a credential: anyone can send any header.
+ */
+export const CLIENT_ID = "runway-mcp";
+
 export interface BasicAuthResponse {
   app_id: string;
   basic_auth: { enabled: boolean; username: string | null };
@@ -55,6 +62,7 @@ export class RunwayClient {
       ...options,
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
+        "X-Runway-Client": CLIENT_ID,
         "Content-Type": "application/json",
         ...options.headers,
       },
@@ -87,6 +95,7 @@ export class RunwayClient {
     const url = `${this.baseUrl}/api/v1/app/deploy`;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
+      "X-Runway-Client": CLIENT_ID,
     };
 
     let body: BodyInit | undefined;
@@ -241,7 +250,7 @@ export class RunwayClient {
         : `${this.baseUrl}/api/v1/app/source`;
     const res = await fetch(url, {
       method: "GET",
-      headers: { Authorization: `Bearer ${this.apiKey}` },
+      headers: { Authorization: `Bearer ${this.apiKey}`, "X-Runway-Client": CLIENT_ID },
     });
     if (res.status === 404) return null;
     if (!res.ok) {

@@ -1,6 +1,7 @@
 import type { Context, Next } from "hono";
 import { db } from "../db/index.js";
 import { isIP } from "node:net";
+import { logDeniedAudit } from "../db/audit.js";
 
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
@@ -152,6 +153,12 @@ export async function apiRateLimit(c: Context, next: Next) {
   const entry = getEntry(key, API_WINDOW_MS);
 
   if (entry && entry.count >= API_MAX_REQUESTS) {
+    // S12: one counted row per source and window, not one line per refusal.
+    try {
+      logDeniedAudit({ actorType: "api-key", action: "api_rate_limited", ip });
+    } catch (err) {
+      console.error("audit write failed:", (err as Error).message);
+    }
     return c.json({ error: "Rate limit exceeded. Try again later." }, 429);
   }
 

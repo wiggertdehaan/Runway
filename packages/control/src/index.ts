@@ -13,6 +13,7 @@ import { appContainerName } from "./deploy/index.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
 import { pruneAttempts } from "./auth/twofa-limit.js";
+import { pruneApiAudit } from "./db/audit.js";
 import { refreshDb } from "./deploy/scan.js";
 import { startActivityTailer } from "./deploy/activity-tailer.js";
 import { startPeriodicScanner } from "./deploy/periodic-scanner.js";
@@ -37,8 +38,10 @@ setInterval(() => {
   deleteExpiredSessions();
   cleanupExpiredEntries();
   pruneAttempts();
+  pruneApiAudit();
 }, 60 * 60 * 1000);
 deleteExpiredSessions();
+pruneApiAudit();
 
 // Deploy uploads are removed by the deploy itself; this catches what a crash
 // in the middle of an upload left in the upload folder.

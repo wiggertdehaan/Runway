@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { getDevTokenByToken, touchDevToken } from "../db/dev-tokens.js";
+import { logDeniedAudit } from "../db/audit.js";
+import { getClientIp } from "../middleware/rate-limit.js";
 import {
   getSkill,
   getSkillFile,
@@ -90,14 +92,30 @@ function buildServer(): McpServer {
   return server;
 }
 
+/** S12: a refused /mcp request, as one counted row per source and window. */
+function mcpDenied(c: Parameters<typeof getClientIp>[0], reason: string) {
+  try {
+    logDeniedAudit({
+      actorType: "mcp",
+      action: "mcp_auth_denied",
+      ip: getClientIp(c),
+      reason,
+    });
+  } catch (err) {
+    console.error("audit write failed:", (err as Error).message);
+  }
+}
+
 mcpRoutes.all("/mcp", async (c) => {
   const header = c.req.header("Authorization");
   if (!header?.startsWith("Bearer ")) {
+    mcpDenied(c, "missing_header");
     return c.json({ error: "Missing or invalid Authorization header" }, 401);
   }
   const presented = header.slice(7);
   const tokenRow = getDevTokenByToken(presented);
   if (!tokenRow) {
+    mcpDenied(c, "unknown_token");
     return c.json({ error: "Invalid developer token" }, 401);
   }
   touchDevToken(tokenRow.id);

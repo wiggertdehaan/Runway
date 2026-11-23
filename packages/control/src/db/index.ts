@@ -144,6 +144,29 @@ export function migrate() {
     );
   `);
 
+  // S12: the audit log also records what the API and the MCP route do, and
+  // who tried and failed. Extra columns, all nullable or defaulted, so every
+  // existing row stays valid (actor_type NULL = a person using the dashboard).
+  const auditCols = db.prepare("PRAGMA table_info(audit_log)").all() as Array<{
+    name: string;
+  }>;
+  for (const [col, ddl] of [
+    ["actor_type", "TEXT"],
+    ["app_id", "TEXT"],
+    ["result", "TEXT"],
+    ["source_ip", "TEXT"],
+    ["count", "INTEGER NOT NULL DEFAULT 1"],
+  ] as const) {
+    if (!auditCols.some((c) => c.name === col)) {
+      db.exec(`ALTER TABLE audit_log ADD COLUMN ${col} ${ddl}`);
+    }
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_type, id);
+    CREATE INDEX IF NOT EXISTS idx_audit_denied ON audit_log(action, source_ip, id);
+    CREATE INDEX IF NOT EXISTS idx_audit_app ON audit_log(app_id, id);
+  `);
+
   // S09: failed second-factor attempts per user. Kept in the database (not
   // in memory) so a restart does not hand an attacker a fresh set of guesses,
   // and keyed on the user (not the IP) so a password-holder cannot reset it

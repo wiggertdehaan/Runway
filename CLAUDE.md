@@ -392,6 +392,36 @@ Do not add a new place that calls `verifyAndConsumeTotp` for a signed-in or
 pre-auth user without going through `verifySecondFactor`. The per-IP limit on
 the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 
+### What the API does is audited by one middleware (S12)
+- `middleware/api-audit.ts` sits right after `apiAuth` on `/api/v1/*` and writes
+  one `audit_log` line for every POST/PUT/PATCH/DELETE (also when the request is
+  refused or the handler throws) and for two sensitive reads (`GET /app/env`,
+  `GET /app/source`). Do not log from the individual routes: a route added
+  later is covered by construction. A test walks the route table and fails if
+  a GET route is in neither `AUDITED_READS` nor `UNAUDITED_READS`, so a new
+  route forces the question whether reading it is sensitive.
+- A line carries `actor_type` (`api-key`, `mcp`, or NULL for a person using the
+  dashboard), `app_id`, `result` (ok / rejected / denied / error),
+  `source_ip` and `count`. The actor is `api-key:<app id>`: an app key is the
+  only identity the API has. When user tokens arrive they get their own
+  `actor_type` and their user id.
+- The log says WHAT changed, never the values: `util/audit-detail.ts`
+  (`describeBody`) records field names, nested key names (the env var NAMES),
+  booleans and a short allow-list of scalars (`SAFE_SCALAR_FIELDS`); values of
+  every other field are never read. `finalizeDetail` masks token-shaped strings
+  (`rwy_`, `rwd_`, `rwu_`, `Bearer`), strips control characters and caps the
+  length. Adding a field to `SAFE_SCALAR_FIELDS` is a decision that it can never
+  hold a credential.
+- Refused requests (`api_auth_denied`, `api_rate_limited`, `mcp_auth_denied`)
+  go through `logDeniedAudit`: one row per source, action and reason per ten
+  minutes with a `count`, at most 100 sources per window, the rest in one shared
+  row (`source_ip = '*'`). The presented key is never stored, not even a prefix.
+- `pruneApiAudit` (hourly) keeps API lines 90 days (`AUDIT_API_RETENTION_DAYS`)
+  and at most 100000 (`AUDIT_API_MAX_ROWS`). Lines about people using the
+  dashboard are never pruned.
+- The MCP client sends `X-Runway-Client: runway-mcp`; it is shown in the log as
+  a hint and decides nothing.
+
 ### Uploads are streamed to disk and checked before use (S06)
 - `POST /api/v1/app/deploy` streams the body to `UPLOAD_DIR` (default
   `<db dir>/uploads`, on the data volume: `/tmp` is a tmpfs, i.e. RAM) with a

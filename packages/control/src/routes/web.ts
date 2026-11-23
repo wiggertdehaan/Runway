@@ -166,7 +166,8 @@ import {
   readSessionToken,
   setSessionCookie,
 } from "../middleware/cookies.js";
-import { logAudit, getRecentAuditEntries } from "../db/audit.js";
+import { logAudit, getRecentAuditEntries, apiAuditRetentionDays } from "../db/audit.js";
+import { parseAuditFilter, renderAuditFilters, renderAuditRows } from "../ui/audit.js";
 import { updateApp } from "../db/apps.js";
 import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
 import { describeBaseImage, lineOf, parseImageRef } from "../deploy/base-images.js";
@@ -3178,36 +3179,22 @@ webRoutes.post("/settings/webhook", async (c) => {
 
 webRoutes.get("/audit", (c) => {
   const user = c.get("user");
-  const entries = getRecentAuditEntries(50);
-
-  const rows = entries
-    .map((e) => {
-      const target =
-        e.target_username
-          ? `${escapeHtml(e.target_username)}`
-          : '<span class="meta">—</span>';
-      return `
-        <tr>
-          <td class="meta">${escapeHtml(e.created_at)}</td>
-          <td>${escapeHtml(e.username)}</td>
-          <td><code>${escapeHtml(e.action)}</code></td>
-          <td>${target}</td>
-          <td class="meta">${e.detail ? escapeHtml(e.detail) : "—"}</td>
-        </tr>`;
-    })
-    .join("");
+  const filter = parseAuditFilter(c.req.query("type"));
+  const entries = getRecentAuditEntries(100, filter);
+  const rows = renderAuditRows(entries);
 
   return c.html(
     layout(
       "Audit log",
       `
       <h1>Audit log</h1>
+      ${renderAuditFilters(filter)}
       <div class="card" style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
           <thead>
             <tr style="text-align:left;border-bottom:1px solid var(--line)">
               <th style="padding:0.5rem 0.75rem">Time</th>
-              <th style="padding:0.5rem 0.75rem">User</th>
+              <th style="padding:0.5rem 0.75rem">Who</th>
               <th style="padding:0.5rem 0.75rem">Action</th>
               <th style="padding:0.5rem 0.75rem">Target</th>
               <th style="padding:0.5rem 0.75rem">Detail</th>
@@ -3218,6 +3205,7 @@ webRoutes.get("/audit", (c) => {
           </tbody>
         </table>
       </div>
+      <p class="hint">Calls made with an app key or the MCP route are listed with the app that made them. Field names are recorded, never values. Refused attempts are counted per source and ten-minute window instead of one line each. API lines are kept for ${apiAuditRetentionDays()} days.</p>
     `,
       { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )

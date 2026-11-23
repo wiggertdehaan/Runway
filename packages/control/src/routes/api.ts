@@ -1,6 +1,7 @@
 import { resolveHardening } from "../deploy/hardening.js";
 import { Hono } from "hono";
 import { apiAuth } from "../middleware/auth.js";
+import { apiAudit } from "../middleware/api-audit.js";
 import {
   defaultPortForRuntime,
   isConfigured,
@@ -75,6 +76,9 @@ type Env = { Variables: { app: App } };
 export const apiRoutes = new Hono<Env>();
 
 apiRoutes.use("/*", apiAuth);
+// S12: every call that changes something (and the two sensitive reads) is
+// audited here, once, for all routes. Keep it directly after apiAuth.
+apiRoutes.use("/*", apiAudit);
 
 function toConfigResponse(app: App) {
   const relevantSkillIds = getAppSkillIds(app.id);
