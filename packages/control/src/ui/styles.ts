@@ -284,6 +284,35 @@ button.ghost:hover{background:var(--bg2);opacity:1}
 .app-header{display:flex;align-items:center;gap:0.75rem;margin-bottom:0.25rem;flex-wrap:wrap}
 .app-header h2{margin:0}
 .app-domain{color:var(--tx);text-decoration:underline;text-underline-offset:2px;font-size:0.8rem;display:block;margin-bottom:0.25rem;word-break:break-all}
+.maint{margin:1rem 0;border:1px solid var(--line);border-radius:var(--r3)}
+.maint-h{display:flex;justify-content:space-between;align-items:flex-start;gap:0.75rem;padding:0.9rem 1rem;border-bottom:1px solid var(--line)}
+.maint-h h3{font-size:0.95rem;margin:0 0 0.15rem}
+.maint-h .meta{margin:0;font-size:var(--fs-s)}
+.swr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 16px;align-items:center;padding:0.85rem 1rem;border-bottom:1px solid var(--line)}
+.swr:last-of-type{border-bottom:0}
+.swr b{display:block;font-weight:600;cursor:pointer}
+.swr small{display:block;color:var(--mu);font-size:var(--fs-s);max-width:62ch;margin-top:2px}
+.swr .swn{color:var(--warn);font-weight:600}
+.swr.locked b{cursor:default}
+.swc{display:flex;align-items:center;justify-content:flex-end;min-width:64px}
+.swf{display:flex;align-items:center;gap:10px;margin:0}
+.sws{font-size:var(--fs-s);font-weight:600;min-width:24px;text-align:right;color:var(--mu)}
+.sw{position:relative;display:inline-block;width:40px;height:24px;flex:none}
+.sw input{position:absolute;inset:0;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
+.sw input:disabled{cursor:not-allowed}
+.trk{position:absolute;inset:0;border-radius:999px;border:1.5px solid var(--ctl);background:var(--bg);transition:background .12s,border-color .12s}
+.trk::after{content:"";position:absolute;top:3px;left:3px;width:15px;height:15px;border-radius:50%;background:var(--ctl);transition:left .12s,background .12s}
+.sw input:checked+.trk{background:var(--inv);border-color:var(--inv)}
+.sw input:checked+.trk::after{left:18px;background:var(--invtx)}
+.sw input:focus-visible+.trk{outline:2px solid var(--ring);outline-offset:2px}
+.sw input:disabled+.trk{opacity:.55}
+/* The card lives inside .tabs, whose label rules (tab buttons) must not reach it. */
+.tabs .swr label,.tabs label.sw{padding:0;border:0;color:var(--tx);font-size:inherit;font-weight:inherit;text-align:left;flex:none;transition:none}
+.tabs .swr label:hover{color:var(--tx)}
+.swb{font-size:0.8rem;padding:0.3rem 0.7rem}
+.swfoot{padding:0.7rem 1rem;border-top:1px solid var(--line);margin:0;font-size:var(--fs-s)}
+@media(max-width:600px){.maint-h{flex-direction:column}.swr{padding:0.85rem}}
+@media(prefers-reduced-motion:reduce){.trk,.trk::after{transition:none}}
 .section-title{font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;margin-top:1.25rem;color:var(--mu)}
 `;
 

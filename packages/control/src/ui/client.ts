@@ -83,6 +83,14 @@ document.addEventListener('change', function(e) {
 });
 addEventListener('hashchange', applyTabHash);
 applyTabHash();
+// A maintenance switch posts its own form the moment it is flipped.
+document.addEventListener('change', function(e) {
+  var t = e && e.target;
+  if (t && t.hasAttribute && t.hasAttribute('data-autosubmit') && t.form) {
+    t.disabled = true;
+    t.form.requestSubmit ? t.form.requestSubmit() : t.form.submit();
+  }
+});
 function featureToggle(checkbox) {
   var body = checkbox.closest('.card').querySelector('.feature-body');
   if (body) { body.classList.toggle('disabled', !checkbox.checked); }
