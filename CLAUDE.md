@@ -91,31 +91,43 @@ without knowing why.
   root-on-host, so running node as root inside the container does
   not widen the blast radius.
 
-### Three Docker networks, not one
+### Docker networks: one per app, plus internal and build
 - `runway-internal` — control + gateway only.
-- `runway-apps` — gateway + every deployed app container. Traefik
-  straddles both networks so it can keep serving the dashboard and
-  still route edge traffic to apps.
-- `runway-build` — buildkit only. Isolates `RUN` steps from the
-  control plane and other apps.
-- An earlier topology put control, gateway, buildkit, and all apps
-  on a single `runway-internal` network. That allowed a deployed
-  container (or a malicious `RUN` step) to reach
-  `http://control:3000/` and probe other app containers by name,
-  bypassing Traefik entirely. Do not collapse the networks back
-  into one.
-- Existing app containers created before the split keep running on
-  `runway-internal` until they are redeployed; a fresh deploy
-  recreates the container on `runway-apps`. After upgrading the
-  platform, redeploy each app once to complete the migration.
-- Cloud metadata (`169.254.169.254` and friends) is still reachable
-  from build sandboxes via the host network namespace — blocking
-  it fully needs host iptables or custom CNI for buildkit. As a
-  pragmatic defense, `packages/control/src/deploy/preflight.ts`
-  scans the uploaded tar and rejects build contexts that reference
-  well-known metadata hostnames/IPs. The optional host-level
-  hardening is a single `iptables -I DOCKER-USER -d 169.254.169.254
-  -j DROP` rule on the host.
+- `runway-net-<id>` — one per app (S04), created by `deploy/networks.ts` in
+  `runContainer`. It holds the app and the gateway, nothing else. Traefik
+  straddles all of them (attached at runtime through the Docker API), so an app
+  cannot reach another app by container name and skip its SSO/basic auth.
+  Subnets come from our own pool (`RUNWAY_APP_NET_POOL`, default
+  `10.250.0.0/16`, `/28` slices): Docker's default pools give a /16 per network
+  and run out after ~30 networks. The bridge interface is named `rwa-<11 hex>`
+  so the host firewall can match `-i rwa+` once and also cover networks created
+  later. Keep that prefix and the 15-character limit.
+- Recreating the gateway container (`docker compose up`) drops every network
+  that was attached at runtime. `startGatewayNetworkReconciler` reattaches the
+  gateway at startup and every minute and removes the network of a deleted app
+  once only the gateway is on it. Do not remove it: without it every route
+  answers 502 after a gateway recreate until someone redeploys.
+- `runContainer` fails the deploy when the network cannot be made or the
+  gateway cannot be attached. It must not fall back to the shared network (that
+  silently undoes the isolation). `RUNWAY_APP_NETWORK_MODE=shared` is the
+  deliberate, explicit way back.
+- `runway-apps` — the shared network every app used before 0.39. Apps that have
+  not been redeployed since the upgrade are still on it (they can reach each
+  other until they move; control logs how many). It stays in the compose file
+  until none is left.
+- `runway-build` — buildkit only. Isolates `RUN` steps from the control plane
+  and other apps.
+- An earlier topology put control, gateway, buildkit, and all apps on a single
+  `runway-internal` network, which let a deployed container (or a malicious
+  `RUN` step) reach `http://control:3000/`. Do not collapse the networks.
+- What apps and build steps may reach *outside* Docker is a host firewall
+  matter, not something the compose file can do: `scripts/egress-rules.sh`
+  (opt-in, `plan`/`apply`/`status`/`remove`/`persist`) refuses traffic from the
+  app and build bridges to link-local (cloud metadata), RFC1918 and
+  100.64.0.0/10, and anything they send to the host itself, while leaving the
+  internet alone. It only ever matches those interfaces, so SSH and the rest of
+  the host are unaffected. The tar scan in `deploy/preflight.ts` is a warning
+  layer on top; a decimal/hex address or a DNS name gets past it.
 
 ### App IDs are lowercase
 - Docker image names must be lowercase. The original nanoid

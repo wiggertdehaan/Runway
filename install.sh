@@ -18,6 +18,8 @@ set -euo pipefail
 #   ACME_EMAIL         Email address for Let's Encrypt account / expiry notices.
 #
 # Optional:
+#   RUNWAY_EGRESS      Set to 1 to also install the host egress rules for app
+#                      containers (scripts/egress-rules.sh apply). Off by default.
 #   RUNWAY_REPO        Git repository to clone (default: github.com/wiggertdehaan/Runway)
 #   RUNWAY_VERSION     Branch / tag / commit to check out (default: main)
 #   RUNWAY_DIR         Install directory (default: /opt/runway)
@@ -201,6 +203,19 @@ EOF
   docker compose up -d --build
 
   wait_for_tls_cert "$DASHBOARD_DOMAIN"
+
+  # Optional host firewall step: keeps app containers off the cloud metadata
+  # address, the host and private networks. See scripts/egress-rules.sh.
+  if [ "${RUNWAY_EGRESS:-0}" = "1" ]; then
+    log "Installing egress rules for app containers..."
+    bash "$RUNWAY_DIR/scripts/egress-rules.sh" apply
+    warn "The rules are not persistent. To keep them across reboots:"
+    warn "  bash $RUNWAY_DIR/scripts/egress-rules.sh persist | sudo tee /etc/systemd/system/runway-egress.service"
+    warn "  sudo systemctl daemon-reload && sudo systemctl enable --now runway-egress"
+  else
+    log "Optional: limit what app containers can reach (metadata, host, private networks):"
+    log "  sudo $RUNWAY_DIR/scripts/egress-rules.sh plan"
+  fi
 
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

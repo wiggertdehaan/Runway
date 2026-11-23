@@ -20,6 +20,8 @@ import { startRebuildScheduler } from "./deploy/rebuild-scheduler.js";
 import { startQuarantineMonitor } from "./deploy/quarantine.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
 import { cleanupStaleUploads } from "./deploy/upload.js";
+import { docker } from "./deploy/docker.js";
+import { startGatewayNetworkReconciler, type NetworkDocker } from "./deploy/networks.js";
 
 migrate();
 loadBuiltinSkills();
@@ -101,6 +103,15 @@ try {
 } catch (err) {
   console.error("SSO route repair failed:", err);
 }
+
+// Each app has its own network; the gateway is attached to them at runtime, so
+// recreating the gateway container (docker compose up) detaches it from all of
+// them. Reattach at startup and every minute, and sweep networks of deleted apps.
+startGatewayNetworkReconciler({
+  docker: docker as unknown as NetworkDocker,
+  appIds: () => new Set(listApps().map((a) => a.id)),
+  log: (m) => console.log(m),
+});
 
 const port = parseInt(process.env.PORT || "3000", 10);
 

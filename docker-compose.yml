@@ -10,9 +10,12 @@ services:
   # proxies HTTP to named services resolved through the internal
   # Docker DNS (e.g. http://control:3000).
   #
-  # Joins two networks: `runway-internal` so it can reach the
+  # Joins two networks here: `runway-internal` so it can reach the
   # control plane (for the dashboard and forward-auth), and
-  # `runway-apps` so it can route to deployed app containers.
+  # `runway-apps`, which only the apps deployed before per-app networks
+  # still use. Every app now gets its own network (runway-net-<id>) and
+  # control attaches this container to it at runtime, so a recreated
+  # gateway is reattached by control within a minute (deploy/networks.ts).
   #
   # The dashboard/insecure API is intentionally disabled.
   gateway:
@@ -89,7 +92,8 @@ services:
   # Web dashboard + REST API backing the MCP server.
   #
   # Lives on `runway-internal` only. Deployed app containers live
-  # on `runway-apps` and therefore cannot reach `control:3000`
+  # on their own per-app networks (or, until redeployed, `runway-apps`)
+  # and therefore cannot reach `control:3000`
   # directly. Gateway straddles both networks to route traffic.
   control:
     build:
@@ -147,7 +151,11 @@ networks:
   # build sandboxes.
   runway-internal:
     name: runway-internal
-  # Deployed app containers ↔ gateway. No control-plane reachability.
+  # Shared network of apps deployed before per-app networks (0.39). Kept so
+  # they keep running until their next deploy or rebuild moves them to their
+  # own network, and as the target of RUNWAY_APP_NETWORK_MODE=shared. It
+  # can be removed from this file once no app container is left on it
+  # (control logs how many still are at startup).
   runway-apps:
     name: runway-apps
   # BuildKit only. Isolated so build-time RUN steps cannot reach

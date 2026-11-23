@@ -7,16 +7,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { extractTarSafe, tarLimits } from "./safe-tar.js";
+import {
+  LEGACY_APPS_NETWORK,
+  connectGateway,
+  ensureAppNetwork,
+  networkMode,
+  networkNameForContainer,
+  type NetworkDocker,
+} from "./networks.js";
 
-// Network that deployed user containers join. Traefik straddles this
-// network + runway-internal so it can route edge traffic to apps, but
-// apps themselves do NOT share a network with the control plane —
-// otherwise a malicious container could reach http://control:3000
-// directly, bypassing Traefik and any edge-level protection.
-const RUNWAY_NETWORK = process.env.RUNWAY_NETWORK || "runway-apps";
+// Every app gets its own network (deploy/networks.ts) and Traefik joins each
+// of them, so apps cannot reach each other or the control plane. The shared
+// `runway-apps` network is what every app used before; it is only used when
+// RUNWAY_APP_NETWORK_MODE=shared (an emergency switch) and for apps that have
+// not been redeployed since the upgrade.
 const BUILDKIT_CONTAINER = process.env.BUILDKIT_CONTAINER || "runway-buildkit";
 
 export const docker = new Docker({ socketPath: "/var/run/docker.sock" });
+
+/** dockerode, seen through the part of its API that deploy/networks.ts uses. */
+function networkApi(): NetworkDocker {
+  return docker as unknown as NetworkDocker;
+}
 
 export interface BuildOptions {
   imageTag: string;
@@ -293,6 +305,10 @@ export interface RunOptions {
   cpuLimit?: string;
   memoryLimit?: string;
   healthCheckPath?: string | null;
+  /** Owner of the container, stored as a label on its network. */
+  appId?: string;
+  /** Override the per-app network name (tests). */
+  network?: string;
 }
 
 export interface RunResult {
@@ -301,8 +317,9 @@ export interface RunResult {
 
 /**
  * Create and start a container, replacing any existing container with
- * the same name. Joins the runway-apps network so Traefik (which also
- * sits on runway-apps) can reach it by container name.
+ * the same name. Joins the app's own network, to which the gateway is
+ * attached first so Traefik can reach it by container name from the moment
+ * the container starts.
  */
 export async function runContainer(opts: RunOptions): Promise<RunResult> {
   // Stop + remove any existing container with this name
@@ -330,6 +347,15 @@ export async function runContainer(opts: RunOptions): Promise<RunResult> {
       }
     : {};
 
+  let network = LEGACY_APPS_NETWORK;
+  if (networkMode() === "per-app") {
+    network = opts.network ?? networkNameForContainer(opts.containerName);
+    // Failing here fails the deploy: falling back to the shared network
+    // would quietly undo the isolation.
+    await ensureAppNetwork(networkApi(), network, opts.appId);
+    await connectGateway(networkApi(), network);
+  }
+
   const container = await docker.createContainer({
     name: opts.containerName,
     Image: opts.imageTag,
@@ -338,7 +364,7 @@ export async function runContainer(opts: RunOptions): Promise<RunResult> {
     ...healthcheck,
     HostConfig: {
       RestartPolicy: { Name: "unless-stopped" },
-      NetworkMode: RUNWAY_NETWORK,
+      NetworkMode: network,
       ...(opts.volumes?.length ? { Binds: opts.volumes } : {}),
       ...(memory ? { Memory: memory } : {}),
       ...(nanoCpus ? { NanoCpus: nanoCpus } : {}),
