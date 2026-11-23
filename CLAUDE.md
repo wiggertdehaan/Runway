@@ -353,6 +353,29 @@ without knowing why.
   the transaction that adds the column. Do not make it re-run: it would
   hand an ownerless app to whoever has since taken that username.
 
+### App containers are hardened in one place (S08)
+- `deploy/hardening.ts` is the only code that sets capabilities, PID limit,
+  swap, log rotation and read-only rootfs for an app container. `runContainer`
+  merges its output into the HostConfig and then runs `assertSafeHostConfig`,
+  which refuses Privileged, host namespaces, devices, `Mounts`, host-path
+  binds (the Docker socket is one), CapAdd outside the standard list and
+  `unconfined` security options. Do not add HostConfig fields to
+  `runContainer` by hand.
+- Profiles: `standard` (CapDrop ALL + CHOWN, DAC_OVERRIDE, FOWNER, SETGID,
+  SETUID, NET_BIND_SERVICE; no-new-privileges; PidsLimit 512; MemorySwap =
+  Memory; json-file 10m x 3), `strict` (same, no CapAdd), `relaxed` (Docker
+  defaults, log rotation only). `apps.hardening_profile` NULL = instance
+  default; `apps.readonly_rootfs` is an opt-in (tmpfs on /tmp).
+- `RUNWAY_HARDENING=relaxed` on the control container is an emergency brake
+  that beats a per-app `strict`; `standard`/`strict` there set the instance
+  default; a typo is ignored (never turns hardening off). The compose file
+  passes `RUNWAY_HARDENING` and `RUNWAY_PIDS_LIMIT` through.
+- A running container keeps what it started with: a changed profile (or a
+  new release of Runway) reaches an app at its next deploy, rebuild or
+  rollback. The PID limit counts threads, so JVM/Node apps with big pools
+  need headroom: raise `RUNWAY_PIDS_LIMIT` before relaxing a profile.
+- Out of scope here: control as non-root and BuildKit privileged (S07, S16).
+
 ### Uploads are streamed to disk and checked before use (S06)
 - `POST /api/v1/app/deploy` streams the body to `UPLOAD_DIR` (default
   `<db dir>/uploads`, on the data volume: `/tmp` is a tmpfs, i.e. RAM) with a

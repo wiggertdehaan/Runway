@@ -444,6 +444,15 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "auto_update_deps_major")) {
     db.exec(`ALTER TABLE apps ADD COLUMN auto_update_deps_major INTEGER NOT NULL DEFAULT 0`);
   }
+  // Container hardening (S08, see deploy/hardening.ts): an administrator's
+  // per-app profile (NULL = the instance default) and an opt-in read-only
+  // root filesystem. Both take effect when the container is next created.
+  if (!appCols.some((c) => c.name === "hardening_profile")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN hardening_profile TEXT`);
+  }
+  if (!appCols.some((c) => c.name === "readonly_rootfs")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN readonly_rootfs INTEGER NOT NULL DEFAULT 0`);
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS dep_update_attempts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -130,6 +130,13 @@ services:
       - RUNWAY_NETWORK=runway-apps
       - BUILDKIT_CONTAINER=runway-buildkit
       - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN must be set in .env}
+      # Hardening of the app containers (S08), see deploy/hardening.ts.
+      # RUNWAY_HARDENING: standard (default) | strict | relaxed. `relaxed` is an
+      # emergency brake that switches the capability, PID and read-only rules
+      # off for every app at their next (re)deploy. RUNWAY_PIDS_LIMIT: tasks
+      # (threads included) per app container, default 512.
+      - RUNWAY_HARDENING=${RUNWAY_HARDENING:-}
+      - RUNWAY_PIDS_LIMIT=${RUNWAY_PIDS_LIMIT:-}
     security_opt:
       - no-new-privileges:true
     tmpfs:

@@ -290,6 +290,7 @@ button for admins.
 - Content Security Policy headers
 - Isolated builds via BuildKit (user code never touches the Docker socket)
 - One Docker network per app: apps cannot reach each other or the control plane; optional host egress rules keep them off the cloud metadata address, the host and private networks
+- Hardened app containers: reduced Linux capabilities, no new privileges, a process limit, no swap, rotated logs, and an opt-in read-only root filesystem per app (`standard` / `strict` / `relaxed` profile; `RUNWAY_HARDENING=relaxed` is the emergency brake, takes effect at an app's next deploy or rebuild)
 - Traefik has zero Docker socket access
 - Per-deploy Trivy scan (image CVEs, hardcoded secrets, Dockerfile misconfigs) with a configurable blocking threshold
 - Two-role access model (admin / member) with per-user ownership of apps

@@ -8,6 +8,12 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { extractTarSafe, tarLimits } from "./safe-tar.js";
 import {
+  assertSafeHostConfig,
+  buildHardening,
+  pidsLimitFromEnv,
+  resolveHardening,
+} from "./hardening.js";
+import {
   LEGACY_APPS_NETWORK,
   connectGateway,
   ensureAppNetwork,
@@ -309,6 +315,10 @@ export interface RunOptions {
   appId?: string;
   /** Override the per-app network name (tests). */
   network?: string;
+  /** Administrator's per-app hardening profile (apps.hardening_profile); null = instance default. */
+  hardening?: string | null;
+  /** Opt-in read-only root filesystem (apps.readonly_rootfs). */
+  readonlyRootfs?: boolean;
 }
 
 export interface RunResult {
@@ -356,19 +366,34 @@ export async function runContainer(opts: RunOptions): Promise<RunResult> {
     await connectGateway(networkApi(), network);
   }
 
+  // Capabilities, PID limit, swap, log rotation and read-only rootfs come
+  // from one pure helper (S08); nothing else adds security options here.
+  const hardening = buildHardening({
+    mode: resolveHardening(opts.hardening).mode,
+    readonlyRootfs: opts.readonlyRootfs,
+    memoryBytes: memory,
+    pidsLimit: pidsLimitFromEnv(),
+  });
+
+  const hostConfig = {
+    RestartPolicy: { Name: "unless-stopped" },
+    NetworkMode: network,
+    ...(opts.volumes?.length ? { Binds: opts.volumes } : {}),
+    ...(memory ? { Memory: memory } : {}),
+    ...(nanoCpus ? { NanoCpus: nanoCpus } : {}),
+    ...hardening,
+  };
+  // Last line of defence: an app container never gets Privileged, a host
+  // namespace, a device, an unusual capability or a host path as a mount.
+  assertSafeHostConfig(hostConfig);
+
   const container = await docker.createContainer({
     name: opts.containerName,
     Image: opts.imageTag,
     Env: envList,
     ExposedPorts: { [`${opts.port}/tcp`]: {} },
     ...healthcheck,
-    HostConfig: {
-      RestartPolicy: { Name: "unless-stopped" },
-      NetworkMode: network,
-      ...(opts.volumes?.length ? { Binds: opts.volumes } : {}),
-      ...(memory ? { Memory: memory } : {}),
-      ...(nanoCpus ? { NanoCpus: nanoCpus } : {}),
-    },
+    HostConfig: hostConfig,
   });
 
   await container.start();

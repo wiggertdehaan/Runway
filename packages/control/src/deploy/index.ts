@@ -335,6 +335,8 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     volumes: buildVolumeBinds(app.id),
     cpuLimit: app.cpu_limit,
     memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
     healthCheckPath: app.health_check_path,
   });
 
@@ -359,6 +361,8 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
             volumes: buildVolumeBinds(app.id),
             cpuLimit: app.cpu_limit,
             memoryLimit: app.memory_limit,
+            hardening: app.hardening_profile,
+            readonlyRootfs: app.readonly_rootfs === 1,
             healthCheckPath: app.health_check_path,
           });
           updateApp(app.id, { status: "running", container_id: back.containerId });
@@ -505,6 +509,8 @@ export async function rollbackApp(
     volumes: buildVolumeBinds(app.id),
     cpuLimit: app.cpu_limit,
     memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
     healthCheckPath: app.health_check_path,
   });
 
@@ -563,6 +569,8 @@ export async function restoreApp(app: App): Promise<void> {
     volumes: buildVolumeBinds(app.id),
     cpuLimit: app.cpu_limit,
     memoryLimit: app.memory_limit,
+    hardening: app.hardening_profile,
+    readonlyRootfs: app.readonly_rootfs === 1,
     healthCheckPath: app.health_check_path,
   });
   if (app.domain) {

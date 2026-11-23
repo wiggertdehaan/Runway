@@ -149,3 +149,142 @@ describe("runContainer networks (S04)", () => {
     expect(fake.calls.some((c) => c.startsWith("create runway-net"))).toBe(false);
   });
 });
+
+describe("runContainer hardening (S08)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.RUNWAY_HARDENING;
+    delete process.env.RUNWAY_PIDS_LIMIT;
+  });
+
+  async function hostConfig(extra: Partial<Parameters<typeof runContainer>[0]> = {}) {
+    const { created } = fakeDaemon();
+    await runContainer({
+      containerName: "runway-app-h",
+      imageTag: "img:v1",
+      port: 3000,
+      appId: "h",
+      memoryLimit: "512m",
+      cpuLimit: "1",
+      ...extra,
+    });
+    return created[0].HostConfig as Record<string, any>;
+  }
+
+  it("drops all capabilities, adds back only the small list, and blocks privilege gain", async () => {
+    const hc = await hostConfig();
+    expect(hc.CapDrop).toEqual(["ALL"]);
+    expect(hc.CapAdd).toEqual(["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "NET_BIND_SERVICE"]);
+    expect(hc.SecurityOpt).toEqual(["no-new-privileges:true"]);
+  });
+
+  it("limits PIDs, disables swap and rotates logs", async () => {
+    const hc = await hostConfig();
+    expect(hc.PidsLimit).toBe(512);
+    expect(hc.Memory).toBe(512 * 1024 * 1024);
+    expect(hc.MemorySwap).toBe(hc.Memory);
+    expect(hc.LogConfig).toEqual({ Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } });
+  });
+
+  it("keeps the memory and CPU limits exactly as before", async () => {
+    const hc = await hostConfig({ memoryLimit: "1g", cpuLimit: "2" });
+    expect(hc.Memory).toBe(1024 * 1024 * 1024);
+    expect(hc.NanoCpus).toBe(2e9);
+  });
+
+  it("an app without a memory limit gets no swap rule", async () => {
+    const hc = await hostConfig({ memoryLimit: undefined });
+    expect(hc.Memory).toBeUndefined();
+    expect(hc.MemorySwap).toBeUndefined();
+  });
+
+  it("never sets Privileged, a host namespace, a device or Mounts", async () => {
+    const hc = await hostConfig({ volumes: ["runway-data-h-data:/data"] });
+    expect(hc.Privileged).toBeUndefined();
+    for (const k of ["PidMode", "IpcMode", "UTSMode", "UsernsMode", "CgroupnsMode", "Devices", "Mounts"]) {
+      expect(hc[k]).toBeUndefined();
+    }
+    expect(hc.NetworkMode).toBe("runway-net-h");
+  });
+
+  it("passes only named volumes as Binds", async () => {
+    const hc = await hostConfig({ volumes: ["runway-data-h-data:/data", "runway-data-h-uploads:/uploads"] });
+    expect(hc.Binds).toEqual(["runway-data-h-data:/data", "runway-data-h-uploads:/uploads"]);
+    for (const b of hc.Binds as string[]) expect(b.split(":")[0]).not.toContain("/");
+  });
+
+  it("refuses to create the container when a bind would be a host path (the Docker socket)", async () => {
+    const { created } = fakeDaemon();
+    await expect(
+      runContainer({
+        containerName: "runway-app-h",
+        imageTag: "img:v1",
+        port: 3000,
+        appId: "h",
+        volumes: ["/var/run/docker.sock:/var/run/docker.sock"],
+      })
+    ).rejects.toThrow(/host path/);
+    expect(created).toHaveLength(0);
+  });
+
+  it("the strict profile adds no capabilities back", async () => {
+    const hc = await hostConfig({ hardening: "strict" });
+    expect(hc.CapDrop).toEqual(["ALL"]);
+    expect(hc.CapAdd).toBeUndefined();
+  });
+
+  it("the relaxed profile keeps Docker's defaults but still rotates logs", async () => {
+    const hc = await hostConfig({ hardening: "relaxed", readonlyRootfs: true });
+    expect(hc.CapDrop).toBeUndefined();
+    expect(hc.CapAdd).toBeUndefined();
+    expect(hc.SecurityOpt).toBeUndefined();
+    expect(hc.PidsLimit).toBeUndefined();
+    expect(hc.MemorySwap).toBeUndefined();
+    expect(hc.ReadonlyRootfs).toBeUndefined();
+    expect(hc.LogConfig.Config["max-size"]).toBe("10m");
+    expect(hc.Memory).toBe(512 * 1024 * 1024);
+  });
+
+  it("RUNWAY_HARDENING=relaxed is an emergency brake over a per-app strict", async () => {
+    process.env.RUNWAY_HARDENING = "relaxed";
+    const hc = await hostConfig({ hardening: "strict" });
+    expect(hc.CapDrop).toBeUndefined();
+    expect(hc.PidsLimit).toBeUndefined();
+  });
+
+  it("RUNWAY_HARDENING=strict is the instance default; an unknown value does not weaken anything", async () => {
+    process.env.RUNWAY_HARDENING = "strict";
+    expect((await hostConfig()).CapAdd).toBeUndefined();
+    process.env.RUNWAY_HARDENING = "off";
+    const hc = await hostConfig();
+    expect(hc.CapDrop).toEqual(["ALL"]);
+    expect(hc.CapAdd).toHaveLength(6);
+  });
+
+  it("RUNWAY_PIDS_LIMIT raises the limit within bounds", async () => {
+    process.env.RUNWAY_PIDS_LIMIT = "2048";
+    expect((await hostConfig()).PidsLimit).toBe(2048);
+    process.env.RUNWAY_PIDS_LIMIT = "5";
+    expect((await hostConfig()).PidsLimit).toBe(64);
+  });
+
+  it("the read-only root filesystem is off by default and opt-in per app, with a writable /tmp", async () => {
+    const off = await hostConfig();
+    expect(off.ReadonlyRootfs).toBeUndefined();
+    expect(off.Tmpfs).toBeUndefined();
+    const on = await hostConfig({ readonlyRootfs: true });
+    expect(on.ReadonlyRootfs).toBe(true);
+    expect(Object.keys(on.Tmpfs)).toEqual(["/tmp"]);
+  });
+
+  it("hardening applies in the shared-network emergency mode too", async () => {
+    process.env.RUNWAY_APP_NETWORK_MODE = "shared";
+    try {
+      const hc = await hostConfig();
+      expect(hc.NetworkMode).toBe("runway-apps");
+      expect(hc.CapDrop).toEqual(["ALL"]);
+    } finally {
+      delete process.env.RUNWAY_APP_NETWORK_MODE;
+    }
+  });
+});

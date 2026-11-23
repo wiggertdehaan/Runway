@@ -1,3 +1,4 @@
+import { resolveHardening } from "../deploy/hardening.js";
 import { Hono } from "hono";
 import { apiAuth } from "../middleware/auth.js";
 import {
@@ -94,6 +95,8 @@ function toConfigResponse(app: App) {
     port: app.port,
     cpu_limit: app.cpu_limit,
     memory_limit: app.memory_limit,
+    hardening: resolveHardening(app.hardening_profile).mode,
+    read_only_rootfs: app.readonly_rootfs === 1,
     status: app.status,
     health_check_path: app.health_check_path,
     scan_threshold: app.scan_threshold,

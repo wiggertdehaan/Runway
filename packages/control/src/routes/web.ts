@@ -21,6 +21,8 @@ import {
   renderRebuildLine,
 } from "../ui/app-page.js";
 import { renderMaintenance } from "../ui/maintenance.js";
+import { renderHardening } from "../ui/hardening.js";
+import { parseHardeningMode } from "../deploy/hardening.js";
 import { renderEarlierRun, renderRunResult, runHeading } from "../ui/rebuild-result.js";
 
 const APP_VERSION = (() => {
@@ -1778,6 +1780,8 @@ webRoutes.get("/apps/:id", async (c) => {
               </form>
             </div>
 
+            ${renderHardening(app, admin)}
+
             <div class="card">
               <h2>Environment variables</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
@@ -2904,6 +2908,27 @@ webRoutes.post("/rebuild/quarantine-term", async (c) => {
     logAudit(user.id, user.username, "quarantine_term_changed", { detail: `${clamped} day(s)` });
   }
   return c.redirect("/rebuild?saved=1");
+});
+
+webRoutes.post("/apps/:id/hardening", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const raw = String(body["profile"] ?? "").trim();
+  // "" = inherit the server default; anything else must be a known profile.
+  // An unknown value changes nothing: a typo must not turn hardening off.
+  const profile = raw === "" ? null : parseHardeningMode(raw);
+  if (raw !== "" && profile === null) {
+    return c.redirect(`/apps/${encodeURIComponent(app.id)}#hardening`);
+  }
+  const readonly = body["readonly"] === "1" ? 1 : 0;
+  updateApp(app.id, { hardening_profile: profile, readonly_rootfs: readonly });
+  logAudit(user.id, user.username, "app_hardening_changed", {
+    detail: `${app.id}: profile=${profile ?? "server default"}, read-only rootfs=${readonly ? "on" : "off"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#hardening`);
 });
 
 webRoutes.post("/apps/:id/auto-minor", async (c) => {
