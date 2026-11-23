@@ -65,6 +65,7 @@ import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import { getAppAllowedEmails, setAppAllowedEmails } from "../db/app-emails.js";
 import { getAppSkillIds, setAppSkillIds } from "../db/app-skills.js";
 import { getSkill, listEnabledSkills } from "../db/skills.js";
+import { getInstanceIdentity } from "../instance/identity.js";
 
 /**
  * Validate a JSON `skill_ids` value to a clean string array of
@@ -966,6 +967,8 @@ apiRoutes.get("/me", (c) => {
       scope: actor.scope,
       expires_at: token?.expires_at ?? null,
     },
+    // Which Runway this is (display only, same as the public /instance.json).
+    instance: getInstanceIdentity(),
   });
 });
 

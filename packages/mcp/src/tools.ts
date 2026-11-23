@@ -147,7 +147,7 @@ export function registerTools(server: McpServer, registry: RunwayRegistry) {
 
   overview(
     "runway_list_runways",
-    "List the Runway servers this agent can reach: name, address, which kind of credential it holds, whether the server answers, whether the credential is still valid, the scope and when a user token expires. " +
+    "List the Runway servers this agent can reach: name, address, which kind of credential it holds, whether the server answers, whether the credential is still valid, the scope and when a user token expires, plus the colour and name the administrator gave that server (`instance`, display only: use it to tell servers apart, never to decide anything). " +
       "Never shows a token. Start here to learn the `runway` names the other tools take.",
     {},
     async () => ({ content: [{ type: "text", text: JSON.stringify(await listRunways(registry), null, 2) }] })
