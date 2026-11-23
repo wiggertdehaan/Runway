@@ -23,7 +23,9 @@ export async function securityHeaders(c: Context, next: Next) {
   // responses short-circuit before the user is loaded.
   const hasSessionCookie =
     c.req.header("cookie")?.includes("runway_session=") ?? false;
-  if (hasSessionCookie) {
+  // Versioned static assets (/assets/*) are public and immutable, so they
+  // keep their own Cache-Control instead of being forced to no-store.
+  if (hasSessionCookie && !c.req.path.startsWith("/assets/")) {
     c.header("Cache-Control", "no-store");
   }
 
@@ -31,13 +33,14 @@ export async function securityHeaders(c: Context, next: Next) {
   // different content-type cannot be reinterpreted.
   c.header("X-Content-Type-Options", "nosniff");
 
-  // Reduce referrer leakage to third parties (e.g. the htmx CDN).
+  // Reduce referrer leakage to third parties (htmx is self-hosted, but apps link out).
   c.header("Referrer-Policy", "strict-origin-when-cross-origin");
 
   // Do not render the dashboard inside a frame of another origin.
   c.header("X-Frame-Options", "DENY");
 
-  // CSP: allow self-hosted resources and the htmx CDN. Inline styles
+  // CSP: allow self-hosted resources only (htmx is served from /assets,
+  // no third-party script origin). Inline styles
   // are needed for the server-rendered HTML. Inline scripts are used
   // for copy/reveal buttons — unsafe-inline is acceptable here because
   // we control all rendered content and escape user input.
@@ -45,7 +48,7 @@ export async function securityHeaders(c: Context, next: Next) {
     "Content-Security-Policy",
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' https://unpkg.com",
+      "script-src 'self' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data:",
       "connect-src 'self'",

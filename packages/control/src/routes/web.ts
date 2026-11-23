@@ -3,6 +3,9 @@ import { Hono } from "hono";
 import { html, raw } from "hono/html";
 import { deleteCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
+import { HTMX_INTEGRITY, HTMX_PATH } from "./assets.js";
+import { APP_CSS } from "../ui/styles.js";
+import { CLIENT_JS, PREPAINT_JS } from "../ui/client.js";
 
 const APP_VERSION = (() => {
   try {
@@ -239,238 +242,72 @@ function layout(
       `$1${csrf}`
     );
   }
+  const icon = (d: string) =>
+    `<svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+  const link = (href: string, label: string, d: string) =>
+    `<a class="nav-link" href="${href}" title="${label}">${icon(d)}<span class="lb">${label}</span></a>`;
   const adminLinks = admin
-    ? `<a href="/users">Users</a>
-         <a href="/skills">Skills</a>
-         <a href="/settings">Settings</a>
-         <a href="/audit">Audit</a>
-         <a href="/rebuild">Rebuild</a>
-         <a href="/health">Health</a>`
+    ? [
+        link("/rebuild", "Rebuild", '<path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/>'),
+        link("/audit", "Audit", '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>'),
+        link("/health", "Health", '<path d="M3 12h4l3-8 4 16 3-8h4"/>'),
+        link("/users", "Users", '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.5-3.5 3.2-5.5 6.5-5.5s6 2 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.8c2 .6 3.3 2.4 3.5 5.2"/>'),
+        link("/skills", "Skills", '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>'),
+        link("/settings", "Settings", '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
+      ].join("")
     : "";
-  const nav = username
-    ? `<nav class="nav">
-         <a href="/" class="nav-brand">&#9992; Runway</a>
-         <a href="/">Apps</a>
-         ${adminLinks}
-         <div class="nav-spacer"></div>
-         <span class="nav-meta">v${escapeHtml(APP_VERSION)}</span>
-         <span class="nav-meta"><a href="https://github.com/wiggertdehaan/Runway" target="_blank" rel="noopener noreferrer" title="Documentation">Docs</a></span>
-         <a href="/account" style="font-weight:400">${escapeHtml(username)}</a>
-         <form method="POST" action="/logout" style="display:inline;margin:0">
-           ${csrf ?? ""}
-           <button type="submit" class="ghost">Logout</button>
-         </form>
-       </nav>`
-    : "";
+  const themeBtn = (cls: string) =>
+    `<button type="button" class="${cls}" data-act="theme" aria-pressed="false" title="Toggle light/dark theme">
+       <span class="theme-ic-light">${icon('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>')}</span>
+       <span class="theme-ic-dark">${icon('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>')}</span>
+       <span class="lb">Theme</span>
+     </button>`;
+  const mark = `<span class="mark"><svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12 21 4l-5 16-4-6.5z"/><path d="m12 13.5 9-9.5"/></svg></span>`;
+  const shell = username
+    ? `<div class="shell">
+         <aside class="side" aria-label="Sidebar">
+           <div class="side-head">
+             <a class="brand" href="/">${mark}<span class="lb">Runway</span></a>
+             <button type="button" class="menu-btn" id="menubtn" aria-label="Menu" aria-expanded="false" aria-controls="side-body">${icon('<path d="M4 7h16M4 12h16M4 17h16"/>')}</button>
+           </div>
+           <div class="side-body" id="side-body">
+             <nav class="side-nav" aria-label="Main">
+               ${link("/", "Apps", '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>')}
+               ${adminLinks}
+             </nav>
+             <div class="side-foot">
+               <div class="side-meta">v${escapeHtml(APP_VERSION)} &middot; <a href="https://github.com/wiggertdehaan/Runway" target="_blank" rel="noopener noreferrer" title="Documentation">Docs</a></div>
+               ${themeBtn("side-btn")}
+               <button type="button" class="side-btn collapse-btn" data-act="collapse" aria-expanded="true" title="Collapse sidebar">${icon('<path class="collapse-ic" d="m15 6-6 6 6 6"/>')}<span class="lb">Collapse</span></button>
+               <a class="side-user" href="/account" title="Account"><span class="av" aria-hidden="true">${escapeHtml(username.slice(0, 1).toUpperCase())}</span><span class="lb">${escapeHtml(username)}</span></a>
+               <form method="POST" action="/logout">
+                 ${csrf ?? ""}
+                 <button type="submit" class="side-btn" title="Log out">${icon('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>')}<span class="lb">Logout</span></button>
+               </form>
+             </div>
+           </div>
+         </aside>
+         <main class="main" id="main"><div class="page">${body}</div></main>
+       </div>`
+    : `<div class="bare-top">${themeBtn("side-btn")}</div>
+       <main class="page" id="main">${body}</main>`;
 
   return html`<!doctype html>
     <html lang="en">
       <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="color-scheme" content="light dark" />
         <title>${title} - Runway</title>
-        <script src="https://unpkg.com/htmx.org@2.0.4"></script>
-        <style>
-          :root {
-            --bg: #0a0a0a; --bg-card: #171717; --bg-inset: #0f0f0f;
-            --border: #262626; --text: #e5e5e5; --text-muted: #8a8a8a; --text-dim: #6a6a6a;
-            --brand: #60a5fa; --brand-hover: #3b82f6;
-            --status-success: #4ade80; --status-success-bg: #14532d;
-            --status-warn: #fbbf24; --status-warn-bg: #3b2f00;
-            --status-error: #f87171; --status-error-bg: #7f1d1d;
-            --status-info: #60a5fa; --status-info-bg: #1e3a5f;
-            --status-neutral: #a3a3a3; --status-neutral-bg: #262626;
-          }
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; }
-          h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 1.5rem; letter-spacing: -0.01em; }
-          h2 { font-size: 1.1rem; }
-          .container { max-width: 960px; margin: 0 auto; }
-          .app-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1rem; }
-          @media (max-width: 500px) { .app-grid { grid-template-columns: 1fr; } }
-          .app-card { display: flex; flex-direction: column; border-left: 3px solid var(--border); }
-          .app-card.status-running { border-left-color: var(--status-success); }
-          .app-card.status-building, .app-card.status-starting { border-left-color: var(--status-warn); }
-          .app-card.status-failed, .app-card.status-exited { border-left-color: var(--status-error); }
-          .app-card.status-created { border-left-color: var(--status-info); }
-          .overflow-menu { position: relative; }
-          .overflow-menu summary { list-style: none; cursor: pointer; color: var(--text-dim); font-size: 1.1rem; padding: 0.1rem 0.4rem; border-radius: 4px; line-height: 1; }
-          .overflow-menu summary:hover { color: var(--text); background: var(--border); }
-          .overflow-menu summary::-webkit-details-marker { display: none; }
-          .overflow-menu[open] .overflow-dropdown { display: block; }
-          .overflow-dropdown { display: none; position: absolute; right: 0; top: 100%; z-index: 10; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 0.25rem; min-width: 180px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
-          .overflow-dropdown button, .overflow-dropdown .overflow-item { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text-muted); font-size: 0.8rem; padding: 0.4rem 0.75rem; cursor: pointer; border-radius: 4px; font-family: inherit; }
-          .overflow-dropdown button:hover, .overflow-dropdown .overflow-item:hover { background: var(--border); color: var(--text); }
-          .overflow-dropdown .overflow-danger:hover { color: var(--status-error); }
-          .dashboard-filter { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
-          .dashboard-filter input[type="search"] { flex: 1; min-width: 180px; }
-          .nav { display: flex; gap: 1rem; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
-          .nav a { color: var(--text); text-decoration: none; font-weight: 500; }
-          .nav a:hover { color: var(--brand); }
-          .nav-brand { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.02em; margin-right: 0.75rem; color: var(--text) !important; }
-          .nav-brand:hover { color: var(--brand) !important; }
-          .nav-meta { font-size: 0.75rem; color: var(--text-dim); }
-          .nav-meta a { color: var(--text-dim); font-weight: 400; font-size: 0.75rem; }
-          .nav-meta a:hover { color: var(--text-muted); }
-          .nav-spacer { flex: 1; }
-          .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
-          .tabs { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
-          .tabs input[type="radio"] { display: none; }
-          .tabs label { padding: 0.6rem 1.2rem; cursor: pointer; color: var(--text-dim); border-bottom: 3px solid transparent; font-size: 0.95rem; font-weight: 500; transition: color 0.15s; }
-          .tabs label:hover { color: var(--text); }
-          .tabs input:checked + label { color: var(--text); border-bottom-color: var(--brand); }
-          .tab-panel { display: none; }
-          #tab-deploys:checked ~ .tab-panels .panel-deploys,
-          #tab-access:checked ~ .tab-panels .panel-access,
-          #tab-config:checked ~ .tab-panels .panel-config,
-          #tab-general:checked ~ .tab-panels .panel-general,
-          #tab-security:checked ~ .tab-panels .panel-security,
-          #tab-sso:checked ~ .tab-panels .panel-sso { display: block; }
-          .card h2 { margin-bottom: 0.5rem; }
-          .meta { color: var(--text-muted); font-size: 0.85rem; }
-          .key { font-family: monospace; background: var(--border); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; word-break: break-all; }
-          .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; text-transform: lowercase; }
-          .badge-created { background: var(--status-info-bg); color: var(--status-info); }
-          .badge-running { background: var(--status-success-bg); color: var(--status-success); }
-          .badge-starting, .badge-building { background: var(--status-warn-bg); color: var(--status-warn); }
-          .badge-quarantined { background: var(--status-error-bg); color: var(--status-error); outline: 1px solid var(--status-error); }
-          .badge-exited, .badge-stopped, .badge-failed { background: var(--status-error-bg); color: var(--status-error); }
-          .badge-restarting, .badge-paused { background: #3a1d5f; color: #c084fc; }
-          .badge-healthy { background: var(--status-success-bg); color: var(--status-success); }
-          .badge-unhealthy { background: var(--status-error-bg); color: var(--status-error); }
-          .badge-starting-health { background: var(--status-warn-bg); color: var(--status-warn); }
-          .stats {
-            display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 0.75rem;
-            margin-top: 1rem;
-            padding: 0.75rem;
-            background: #0f0f0f;
-            border: 1px solid #262626;
-            border-radius: 6px;
-          }
-          .stat-label {
-            color: #737373;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-            margin-bottom: 0.25rem;
-          }
-          .stat-value {
-            font-size: 0.9rem;
-            font-weight: 600;
-            color: #e5e5e5;
-            font-variant-numeric: tabular-nums;
-          }
-          code { font-family: monospace; background: #262626; padding: 1px 4px; border-radius: 4px; font-size: 0.85rem; }
-          @media (max-width: 640px) {
-            .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-          }
-          form { margin-bottom: 1.5rem; }
-          input, select, button { padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #262626; background: #171717; color: #e5e5e5; font-size: 0.9rem; font-family: inherit; }
-          input:focus, select:focus { outline: none; border-color: #2563eb; }
-          button { background: #2563eb; border-color: #2563eb; cursor: pointer; font-weight: 600; }
-          button:hover { background: #1d4ed8; }
-          button.danger { background: #dc2626; border-color: #dc2626; }
-          button.danger:hover { background: #b91c1c; }
-          button.ghost { background: transparent; border-color: #262626; }
-          button.ghost:hover { background: #171717; }
-          .flex { display: flex; gap: 0.5rem; align-items: center; }
-          .between { justify-content: space-between; }
-          .auth-card { max-width: 400px; margin: 0 auto; min-height: calc(100vh - 8rem); display: flex; flex-direction: column; justify-content: center; }
-          .auth-card input { width: 100%; margin-bottom: 0.75rem; }
-          .auth-card button[type="submit"] { width: 100%; }
-          .auth-brand { text-align: center; margin-bottom: 2rem; }
-          .auth-brand h1 { font-size: 2rem; margin-bottom: 0.25rem; }
-          .auth-brand p { color: var(--text-muted); font-size: 0.9rem; }
-          .error { background: #451a1a; border: 1px solid #dc2626; color: #fca5a5; padding: 0.75rem; border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem; }
-          .hint { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem; }
-          .feature-body { transition: opacity 0.15s; }
-          .feature-body.disabled { opacity: 0.35; pointer-events: none; }
-          .settings-layout { display: grid; grid-template-columns: 180px 1fr; gap: 2rem; }
-          .settings-nav { position: sticky; top: 2rem; align-self: start; display: flex; flex-direction: column; gap: 0.25rem; }
-          .settings-nav a { color: var(--text-dim); text-decoration: none; font-size: 0.85rem; padding: 0.4rem 0.75rem; border-radius: 4px; transition: color 0.15s, background 0.15s; }
-          .settings-nav a:hover { color: var(--text); background: var(--bg-card); }
-          .settings-nav a.active { color: var(--brand); background: var(--bg-card); }
-          @media (max-width: 700px) { .settings-layout { grid-template-columns: 1fr; } .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; } }
-          .health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.75rem; }
-          .health-tile { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; display: flex; align-items: flex-start; gap: 0.75rem; }
-          .health-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 0.3rem; flex-shrink: 0; }
-          .health-dot.ok { background: var(--status-success); }
-          .health-dot.warn { background: var(--status-warn); }
-          .health-dot.fail { background: var(--status-error); }
-          .copy-group { position: relative; display: flex; align-items: stretch; background: #0f0f0f; border: 1px solid #262626; border-radius: 6px; margin-top: 0.5rem; }
-          .copy-group code { flex: 1; padding: 0.6rem 0.75rem; background: transparent; border: none; font-size: 0.8rem; white-space: nowrap; overflow-x: auto; display: block; }
-          .copy-btn { padding: 0.4rem 0.75rem; background: #262626; border: none; border-left: 1px solid #262626; color: #a3a3a3; cursor: pointer; font-size: 0.75rem; font-family: inherit; border-radius: 0 5px 5px 0; white-space: nowrap; }
-          .copy-btn:hover { background: #333; color: #e5e5e5; }
-          .app-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.25rem; }
-          .app-header h2 { margin: 0; }
-          .app-domain { color: #60a5fa; text-decoration: none; font-size: 0.8rem; display: block; margin-bottom: 0.25rem; }
-          .app-domain:hover { text-decoration: underline; }
-          .section-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.75rem; margin-top: 1.25rem; color: #a3a3a3; }
-        </style>
-        <script>
-          function filterApps() {
-            var q = (document.getElementById('app-search') || {}).value || '';
-            q = q.toLowerCase();
-            var cards = document.querySelectorAll('.app-card[data-name]');
-            var shown = 0;
-            cards.forEach(function(c) {
-              var match = !q || c.getAttribute('data-name').toLowerCase().indexOf(q) !== -1
-                || (c.getAttribute('data-domain') || '').toLowerCase().indexOf(q) !== -1;
-              c.style.display = match ? '' : 'none';
-              if (match) shown++;
-            });
-            var empty = document.getElementById('no-match');
-            if (empty) empty.style.display = shown === 0 && q ? '' : 'none';
-          }
-          document.body.addEventListener('htmx:afterSwap', function(e) {
-            // After the live-apps swap reinserts fresh cards, re-apply
-            // the current search filter so the user's query keeps
-            // hiding non-matching cards.
-            var target = e && e.detail && e.detail.target;
-            if (target && target.id === 'apps-live') filterApps();
-          });
-          document.addEventListener('click', function(e) {
-            document.querySelectorAll('.overflow-menu[open]').forEach(function(m) {
-              if (!m.contains(e.target)) m.removeAttribute('open');
-            });
-          });
-          function featureToggle(checkbox) {
-            var body = checkbox.closest('.card').querySelector('.feature-body');
-            if (body) { body.classList.toggle('disabled', !checkbox.checked); }
-          }
-          function confirmDelete(form) {
-            var expected = form.getAttribute('data-app-name');
-            var input = prompt('Type "' + expected + '" to confirm deletion:');
-            if (input !== expected) return false;
-            return true;
-          }
-          function toggleSecret(btn) {
-            var code = btn.previousElementSibling;
-            if (code.textContent === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022') {
-              code.textContent = code.getAttribute('data-value');
-              btn.textContent = 'Hide';
-            } else {
-              code.textContent = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
-              btn.textContent = 'Show';
-            }
-          }
-          function copyText(btn) {
-            var text = btn.getAttribute('data-copy');
-            navigator.clipboard.writeText(text).then(function() {
-              var orig = btn.textContent;
-              btn.textContent = 'Copied!';
-              setTimeout(function() { btn.textContent = orig; }, 1500);
-            });
-          }
-        </script>
+        <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0a'/%3E%3Cpath d='M7 16 25 8l-5 17-4-7z' fill='none' stroke='%23fff' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E" />
+        <script>${raw(PREPAINT_JS)}</script>
+        <script src="${HTMX_PATH}" integrity="${HTMX_INTEGRITY}"></script>
+        <style>${raw(APP_CSS)}</style>
       </head>
       <body>
-        <div class="container">
-          ${raw(nav)}
-          ${raw(body)}
-        </div>
+        <a class="skip" href="#main">Skip to content</a>
+        ${raw(shell)}
+        <script>${raw(CLIENT_JS)}</script>
       </body>
     </html>`;
 }
@@ -565,7 +402,7 @@ webRoutes.get("/login", (c) => {
   const hasMicrosoft = !!getSetting("oauth_microsoft_client_id");
 
   const oauthButtons = (hasGoogle || hasMicrosoft)
-    ? `<div style="margin-top:1rem;border-top:1px solid #333;padding-top:1rem">
+    ? `<div style="margin-top:1rem;border-top:1px solid var(--line2);padding-top:1rem">
         ${hasGoogle ? `<a href="/auth/google${returnParam}" style="display:block;text-align:center;padding:0.6rem;margin-bottom:0.5rem;background:#1a73e8;color:#fff;text-decoration:none;border-radius:4px;font-size:0.9rem">Sign in with Google</a>` : ""}
         ${hasMicrosoft ? `<a href="/auth/microsoft${returnParam}" style="display:block;text-align:center;padding:0.6rem;background:#0078d4;color:#fff;text-decoration:none;border-radius:4px;font-size:0.9rem">Sign in with Microsoft</a>` : ""}
       </div>`
@@ -932,7 +769,7 @@ async function renderAppsLive(
           <h2 style="margin-bottom:1rem">Get started</h2>
           <p class="hint" style="max-width:500px;margin:0 auto 1.5rem">
             Create your first app to get an API key. Then open your project in
-            <a href="https://claude.ai/code" target="_blank" style="color:#60a5fa">Claude Code</a>
+            <a href="https://claude.ai/code" target="_blank" style="color:var(--tx)">Claude Code</a>
             and paste the deploy instruction — Runway handles the rest.
           </p>
           <p style="margin-bottom:1.5rem">
@@ -941,8 +778,8 @@ async function renderAppsLive(
             <strong>3.</strong> Paste it in Claude Code
           </p>
           <p class="meta">
-            Need help? Check the <a href="https://github.com/wiggertdehaan/Runway#deploying-an-app" target="_blank" style="color:#60a5fa">deploy guide</a>
-            or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:#60a5fa">API docs</a>.
+            Need help? Check the <a href="https://github.com/wiggertdehaan/Runway#deploying-an-app" target="_blank" style="color:var(--tx)">deploy guide</a>
+            or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:var(--tx)">API docs</a>.
           </p>
         </div>`
       : `<div class="app-grid">${appCards}</div>
@@ -974,20 +811,20 @@ webRoutes.get("/", async (c) => {
     layout(
       "Dashboard",
       `
-      ${c.req.query("forbidden") ? '<div class="card" style="border-color:#7f1d1d;color:#fca5a5;margin-bottom:1.5rem"><strong>Not allowed.</strong> That page is admin-only. Ask an administrator if you need access.</div>' : ""}
+      ${c.req.query("forbidden") ? '<div class="card" style="border-color:var(--err);color:var(--err);margin-bottom:1.5rem"><strong>Not allowed.</strong> That page is admin-only. Ask an administrator if you need access.</div>' : ""}
       ${c.req.query("welcome") ? `
-        <div class="card" style="border-color:#14532d;color:#4ade80;margin-bottom:1.5rem">
+        <div class="card" style="border-color:var(--ok);color:var(--ok);margin-bottom:1.5rem">
           <strong>Welcome to Runway!</strong> Your admin account is ready.
           Create your first app below to get started.
         </div>
       ` : ""}
       ${c.req.query("new") ? `
-        <div class="card" style="border-color:#1e3a8a;margin-bottom:1.5rem">
-          <strong style="color:#93c5fd">New app created.</strong>
-          <p style="margin:0.5rem 0 0;font-size:0.9rem;color:#d4d4d4">
+        <div class="card" style="border-color:var(--line2);margin-bottom:1.5rem">
+          <strong style="color:var(--tx)">New app created.</strong>
+          <p style="margin:0.5rem 0 0;font-size:0.9rem;color:var(--tx)">
             Scroll down to the highlighted card, click
             <em>Copy deploy instruction</em>, and paste it into
-            <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:#60a5fa">Claude Code</a>
+            <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:var(--tx)">Claude Code</a>
             inside your project directory. Claude reads your Dockerfile (or generates one),
             packages the project, uploads it, and the server builds &amp; runs the container.
             The app's URL appears on the card once it's live.
@@ -1135,14 +972,14 @@ function renderDeployHistory(
       );
       const statusColor =
         d.status === "success"
-          ? "#4ade80"
+          ? "var(--ok)"
           : d.status === "blocked"
-          ? "#fca5a5"
+          ? "var(--err)"
           : d.status === "warned"
-          ? "#fbbf24"
+          ? "var(--warn)"
           : d.status === "failed"
-          ? "#f87171"
-          : "#a3a3a3";
+          ? "var(--err)"
+          : "var(--mu)";
       const statusLabel = escapeHtml(d.status);
       const when = escapeHtml(formatRelative(d.created_at));
       const tagShort = d.image_tag
@@ -1170,7 +1007,7 @@ function renderDeployHistory(
            </form>`
         : "";
       return `
-        <tr style="border-bottom:1px solid #262626">
+        <tr style="border-bottom:1px solid var(--line)">
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.8rem">#${d.id}</td>
           <td style="padding:0.4rem 0.75rem"><span style="color:${statusColor};font-size:0.8rem">${statusLabel}</span></td>
           <td style="padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem" title="${escapeHtml(d.image_tag ?? "")}">${tagShort}</td>
@@ -1195,7 +1032,7 @@ function renderDeployHistory(
       <div style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse">
           <thead>
-            <tr style="text-align:left;border-bottom:1px solid #262626">
+            <tr style="text-align:left;border-bottom:1px solid var(--line)">
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Deploy</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Status</th>
               <th style="padding:0.5rem 0.75rem;font-size:0.8rem">Image</th>
@@ -1234,7 +1071,7 @@ function renderScanSection(
   const floorApplies = effective !== app.scan_threshold && serverFloor !== "none";
 
   const floorNote = floorApplies
-    ? `<p style="color:#fbbf24;font-size:0.8rem;margin:0.5rem 0">
+    ? `<p style="color:var(--warn);font-size:0.8rem;margin:0.5rem 0">
          &#9888; Server-wide floor <strong>${escapeHtml(serverFloor)}</strong> raises
          this app's effective threshold above its per-app setting.
        </p>`
@@ -1322,7 +1159,7 @@ function renderScanSection(
       const report: ScanResult = JSON.parse(latest.scan_report);
       const findings = report.findings ?? [];
       if (findings.length === 0) {
-        reportHtml = `<p style="color:#4ade80">&#10003; No findings in deploy #${latest.id} (image <code>${escapeHtml(latest.image_tag ?? "?")}</code>).</p>`;
+        reportHtml = `<p style="color:var(--ok)">&#10003; No findings in deploy #${latest.id} (image <code>${escapeHtml(latest.image_tag ?? "?")}</code>).</p>`;
       } else {
         const sevRank: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
         const threshRank: Record<string, number> = { none: -1, low: 1, medium: 2, high: 3, critical: 4 };
@@ -1398,7 +1235,7 @@ function renderScanSection(
           <div style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:0.8rem">
               <thead>
-                <tr style="text-align:left;border-bottom:1px solid #262626">
+                <tr style="text-align:left;border-bottom:1px solid var(--line)">
                   <th style="padding:0.4rem 0.6rem">Severity</th>
                   <th style="padding:0.4rem 0.6rem">Source</th>
                   <th style="padding:0.4rem 0.6rem">ID</th>
@@ -1410,7 +1247,7 @@ function renderScanSection(
               <tbody>${rows}</tbody>
             </table>
           </div>
-          ${more}` : `<p style="color:#4ade80;margin-bottom:0.5rem">&#10003; No findings at or above the effective threshold.</p>`}
+          ${more}` : `<p style="color:var(--ok);margin-bottom:0.5rem">&#10003; No findings at or above the effective threshold.</p>`}
           ${belowSummary}
           ${imageHint}
         `;
@@ -1466,21 +1303,21 @@ function renderScanBadge(app: ReturnType<typeof listApps>[number]): string {
   const otherSuffix = other > 0 ? ` <span style="opacity:0.6">(+${other} other)</span>` : "";
   if (status === "passed") {
     label = "&#10003; secure";
-    color = "#14532d;color:#4ade80";
+    color = "var(--okbg);color:var(--ok)";
   } else if (status === "blocked") {
     label = `&#10007; blocked: ${crit} crit, ${high} high`;
-    color = "#7f1d1d;color:#fca5a5";
+    color = "var(--errbg);color:var(--err)";
   } else if (status === "warned") {
     const serious = crit + high;
     label = serious > 0
       ? `&#9888; ${serious} issue${serious !== 1 ? "s" : ""}${otherSuffix}`
       : `&#9888; ${other} low`;
     color = serious > 0
-      ? "#713f12;color:#fbbf24"
-      : "#262626;color:#a3a3a3";
+      ? "var(--warnbg);color:var(--warn)"
+      : "var(--line);color:var(--mu)";
   } else {
     label = "scan skipped";
-    color = "#262626;color:#737373";
+    color = "var(--line);color:var(--mu)";
   }
   return `<a href="/apps/${encodeURIComponent(app.id)}#scan" class="badge" style="background:${color};text-decoration:none;font-size:0.7rem">${label}</a>`;
 }
@@ -1628,7 +1465,7 @@ function renderAppCard(
         <p style="font-size:0.8rem;margin:0 0 0.5rem;color:var(--text-muted)">
           Paste this in <a href="https://claude.ai/code" target="_blank" rel="noopener" style="color:var(--brand)">Claude Code</a>:
         </p>
-        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;margin:0 0 0.5rem;font-size:0.65rem;white-space:pre-wrap;word-break:break-all;color:#d4d4d4;user-select:all">${escapeHtml(claudeInstruction)}</pre>
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:0.4rem 0.6rem;margin:0 0 0.5rem;font-size:0.65rem;white-space:pre-wrap;word-break:break-all;color:var(--tx);user-select:all">${escapeHtml(claudeInstruction)}</pre>
         <button type="button" style="padding:0.25rem 0.6rem;font-size:0.75rem;width:auto" data-copy="${escapeHtml(claudeInstruction)}" onclick="copyText(this)">Copy</button>
       </div>`
     : "";
@@ -1753,10 +1590,10 @@ webRoutes.get("/apps/:id", (c) => {
     layout(
       app.name ?? "App",
       `
-      <p style="margin-bottom:1.5rem"><a href="/" style="color:#60a5fa;text-decoration:none">&larr; Back to apps</a></p>
+      <p style="margin-bottom:1.5rem"><a href="/" style="color:var(--tx);text-decoration:none">&larr; Back to apps</a></p>
       <h1>${escapeHtml(app.name ?? app.id)}</h1>
-      ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Saved.</div>' : ""}
-      ${rollbackError ? `<div class="card" style="border-color:#7f1d1d;color:#fca5a5"><strong>Rollback failed:</strong> ${escapeHtml(rollbackError)}</div>` : ""}
+      ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Saved.</div>' : ""}
+      ${rollbackError ? `<div class="card" style="border-color:var(--err);color:var(--err)"><strong>Rollback failed:</strong> ${escapeHtml(rollbackError)}</div>` : ""}
 
       <div class="tabs">
         <input type="radio" name="app-tab" id="tab-deploys" checked />
@@ -1869,7 +1706,7 @@ webRoutes.get("/apps/:id", (c) => {
                   ? `<div style="overflow-x:auto;margin-bottom:1rem">
                       <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
                         <thead>
-                          <tr style="text-align:left;border-bottom:1px solid #262626">
+                          <tr style="text-align:left;border-bottom:1px solid var(--line)">
                             <th style="padding:0.5rem 0.75rem">Key</th>
                             <th style="padding:0.5rem 0.75rem">Value</th>
                             <th style="padding:0.5rem 0.75rem"></th>
@@ -1900,7 +1737,7 @@ webRoutes.get("/apps/:id", (c) => {
                   ? `<div style="overflow-x:auto;margin-bottom:1rem">
                       <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
                         <thead>
-                          <tr style="text-align:left;border-bottom:1px solid #262626">
+                          <tr style="text-align:left;border-bottom:1px solid var(--line)">
                             <th style="padding:0.5rem 0.75rem">Mount path</th>
                             <th style="padding:0.5rem 0.75rem">Added</th>
                             <th style="padding:0.5rem 0.75rem"></th>
@@ -2468,7 +2305,7 @@ webRoutes.get("/settings", (c) => {
       "Settings",
       `
       <h1>Settings</h1>
-      ${saved ? '<div class="card" style="border-color:#14532d;color:#4ade80">Settings saved.</div>' : ""}
+      ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Settings saved.</div>' : ""}
       ${dnsWarning ? `<div class="error">${escapeHtml(dnsWarning)}</div>` : ""}
       ${webhookError ? `<div class="error">${escapeHtml(webhookError)}</div>` : ""}
 
@@ -3181,7 +3018,7 @@ webRoutes.get("/audit", (c) => {
       <div class="card" style="overflow-x:auto">
         <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
           <thead>
-            <tr style="text-align:left;border-bottom:1px solid #262626">
+            <tr style="text-align:left;border-bottom:1px solid var(--line)">
               <th style="padding:0.5rem 0.75rem">Time</th>
               <th style="padding:0.5rem 0.75rem">User</th>
               <th style="padding:0.5rem 0.75rem">Action</th>
@@ -3319,10 +3156,10 @@ webRoutes.get("/skills", (c) => {
         skills are imported from a public GitHub bundle; custom skills
         are pasted in below.
       </p>
-      ${saved === "added" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill added.</div>' : ""}
-      ${saved === "imported" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill imported.</div>' : ""}
-      ${saved === "toggled" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Updated.</div>' : ""}
-      ${saved === "deleted" ? '<div class="card" style="border-color:#14532d;color:#4ade80">Skill deleted.</div>' : ""}
+      ${saved === "added" ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Skill added.</div>' : ""}
+      ${saved === "imported" ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Skill imported.</div>' : ""}
+      ${saved === "toggled" ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Updated.</div>' : ""}
+      ${saved === "deleted" ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Skill deleted.</div>' : ""}
       ${errorMessage ? `<div class="error">${escapeHtml(errorMessage)}</div>` : ""}
 
       ${skills.length > 0 ? rows : '<p class="meta">No skills loaded yet.</p>'}
@@ -3340,7 +3177,7 @@ webRoutes.get("/skills", (c) => {
           Trusted publishers (signed): ${trustedList}.
         </p>
         <form method="POST" action="/skills/import">
-          <input type="text" name="source" required placeholder="anthropics/skills/pdf" style="width:100%;font-family:monospace;font-size:0.9rem;padding:0.5rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;color:#d4d4d4" />
+          <input type="text" name="source" required placeholder="anthropics/skills/pdf" style="width:100%;font-family:monospace;font-size:0.9rem;padding:0.5rem;background:var(--bg2);border:1px solid var(--line);border-radius:6px;color:var(--tx)" />
           <label class="meta" style="display:block;margin-top:0.6rem;font-size:0.8rem">
             <input type="checkbox" name="allow_untrusted" value="1" style="vertical-align:middle" />
             I have reviewed this source and want to import even though
@@ -3358,7 +3195,7 @@ webRoutes.get("/skills", (c) => {
           <code>description</code>. Max ${MAX_SKILL_MD_BYTES / 1024} KB.
         </p>
         <form method="POST" action="/skills">
-          <textarea name="skill_md" rows="14" required style="width:100%;font-family:monospace;font-size:0.85rem;padding:0.6rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;color:#d4d4d4" placeholder="---&#10;name: my-skill&#10;description: When and why to use this skill.&#10;---&#10;&#10;# Skill content here"></textarea>
+          <textarea name="skill_md" rows="14" required style="width:100%;font-family:monospace;font-size:0.85rem;padding:0.6rem;background:var(--bg2);border:1px solid var(--line);border-radius:6px;color:var(--tx)" placeholder="---&#10;name: my-skill&#10;description: When and why to use this skill.&#10;---&#10;&#10;# Skill content here"></textarea>
           <button type="submit" style="margin-top:0.75rem">Add skill</button>
         </form>
       </div>
@@ -3642,7 +3479,7 @@ webRoutes.get("/account", (c) => {
       <p class="meta" style="margin-top:0.5rem;margin-bottom:0.75rem">
         Changing your password signs you out of other devices.
       </p>
-      ${pwSaved ? '<p style="color:#4ade80;margin:0 0 0.75rem">Password updated.</p>' : ""}
+      ${pwSaved ? '<p style="color:var(--ok);margin:0 0 0.75rem">Password updated.</p>' : ""}
       ${pwError === "wrong" ? '<div class="error" style="margin-bottom:0.75rem">Current password is incorrect.</div>' : ""}
       ${pwError === "short" ? '<div class="error" style="margin-bottom:0.75rem">New password must be at least 8 characters.</div>' : ""}
       ${pwError === "mismatch" ? '<div class="error" style="margin-bottom:0.75rem">New passwords do not match.</div>' : ""}
@@ -3738,7 +3575,7 @@ webRoutes.get("/account", (c) => {
         Each token is tied to your account; the token is shown only
         once when you generate it.
       </p>
-      ${tokenRevoked ? '<p style="color:#4ade80;margin:0.75rem 0 0">Token revoked.</p>' : ""}
+      ${tokenRevoked ? '<p style="color:var(--ok);margin:0.75rem 0 0">Token revoked.</p>' : ""}
       ${tokensRows}
       <form method="POST" action="/account/tokens" style="margin-top:0.75rem">
         <div class="flex" style="gap:0.5rem">
@@ -3797,14 +3634,14 @@ webRoutes.post("/account/tokens", async (c) => {
           Store it in your password manager if you want to keep a copy.
         </p>
         <p style="margin-top:0.75rem;font-size:0.85rem">Token:</p>
-        <pre style="background:#0f0f0f;border:1px solid #262626;border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.85rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(created.token)}</pre>
+        <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.85rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(created.token)}</pre>
         <button type="button" style="margin-top:0.5rem;padding:0.3rem 0.7rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(created.token)}" onclick="copyText(this)">Copy token</button>
 
         <p style="margin-top:1.5rem;font-size:0.85rem">
           Paste this into a terminal to register the skill server with
           <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" style="color:var(--brand)">Claude Code</a>:
         </p>
-        <pre style="background:#0f0f0f;border:1px solid #262626;border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.8rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(installCmd)}</pre>
+        <pre style="background:var(--bg2);border:1px solid var(--line);border-radius:6px;padding:0.6rem 0.75rem;margin:0.25rem 0 0;font-family:monospace;font-size:0.8rem;user-select:all;word-break:break-all;white-space:pre-wrap">${escapeHtml(installCmd)}</pre>
         <button type="button" style="margin-top:0.5rem;padding:0.3rem 0.7rem;font-size:0.8rem;width:auto" data-copy="${escapeHtml(installCmd)}" onclick="copyText(this)">Copy install command</button>
 
         <div style="margin-top:1.5rem">
@@ -3956,9 +3793,9 @@ webRoutes.post("/account/2fa/verify", async (c) => {
           (e.g. your password manager). You can generate new ones
           later from the account page, which invalidates the old set.
         </p>
-        <pre style="margin-top:1rem;padding:1rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;font-family:monospace;font-size:0.95rem;line-height:1.6">${codes.map((c) => escapeHtml(c)).join("\n")}</pre>
+        <pre style="margin-top:1rem;padding:1rem;background:var(--bg2);border:1px solid var(--line);border-radius:6px;font-family:monospace;font-size:0.95rem;line-height:1.6">${codes.map((c) => escapeHtml(c)).join("\n")}</pre>
         <div style="margin-top:1rem">
-          <a href="/account" style="color:#60a5fa">I've saved them — back to account</a>
+          <a href="/account" style="color:var(--tx)">I've saved them — back to account</a>
         </div>
       </div>
     `,
@@ -4015,9 +3852,9 @@ webRoutes.post("/account/2fa/regenerate", async (c) => {
           Your previous backup codes have been invalidated. Store
           these new ones somewhere safe.
         </p>
-        <pre style="margin-top:1rem;padding:1rem;background:#0f0f0f;border:1px solid #262626;border-radius:6px;font-family:monospace;font-size:0.95rem;line-height:1.6">${codes.map((c) => escapeHtml(c)).join("\n")}</pre>
+        <pre style="margin-top:1rem;padding:1rem;background:var(--bg2);border:1px solid var(--line);border-radius:6px;font-family:monospace;font-size:0.95rem;line-height:1.6">${codes.map((c) => escapeHtml(c)).join("\n")}</pre>
         <div style="margin-top:1rem">
-          <a href="/account" style="color:#60a5fa">I've saved them — back to account</a>
+          <a href="/account" style="color:var(--tx)">I've saved them — back to account</a>
         </div>
       </div>
     `,
