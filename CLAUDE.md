@@ -413,6 +413,27 @@ Do not add a new place that calls `verifyAndConsumeTotp` for a signed-in or
 pre-auth user without going through `verifySecondFactor`. The per-IP limit on
 the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 
+### The Rebuild page has two buttons, one selection rule
+- `selectRebuildCandidates` (`deploy/rebuild.ts`, pure over a findings provider) is
+  the ONE place that decides which apps "have issues": a deployed image and a
+  `rebuildReason` (actively exploited CVE, critical with a fix, dependency
+  updates when the app lets Runway raise them). The weekly run
+  (`onlyVulnerable`) and the manual "Rebuild apps with issues" button
+  (`onlyWithIssues`) both go through it; the only difference is
+  `includeOptedOut`: a person asking gets apps with automatic rebuild switched
+  off too, the weekly job does not. A quarantined app always qualifies on that
+  point. Do not copy the selection into a route or the page.
+- `POST /rebuild/run` takes `mode=issues` (default, also for anything unknown) or
+  `mode=all`. `all` needs `confirm=all`, which only the in-page confirmation panel
+  (`ui/rebuild-actions.ts`, a `<details>`, no `confirm()`) sends; without it you are
+  sent back to that panel. `issues` with nothing to rebuild starts nothing
+  (`/rebuild?none=1`). Busy is answered first. Audited as `rebuild_issues_started`
+  / `rebuild_all_started` with the mode and the number of apps. Admin-only, CSRF,
+  one run at a time; `/admin/api/rebuild-all` is unchanged (all apps).
+- The page shows what each button would touch (`previewRebuildSelection`, KEV list
+  waited for at most 4 s on the page, in full on a POST) and says when the KEV list
+  could not be refreshed.
+
 ### What the API does is audited by one middleware (S12)
 - `middleware/api-audit.ts` sits right after `apiAuth` on `/api/v1/*` and writes
   one `audit_log` line for every POST/PUT/PATCH/DELETE (also when the request is

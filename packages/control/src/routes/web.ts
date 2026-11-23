@@ -142,8 +142,11 @@ import {
   RebuildBusyError,
   activeRebuildRun,
   activeRebuildRunId,
+  previewRebuildSelection,
+  rebuildableApps,
   startRebuildRun,
 } from "../deploy/rebuild.js";
+import { renderRebuildActions } from "../ui/rebuild-actions.js";
 import {
   SCHEDULE_TZ,
   normalizeTime,
@@ -2963,8 +2966,11 @@ webRoutes.get("/rebuild", async (c) => {
   const runs = listRebuildRuns(5);
   const running = activeRebuildRunId() !== null;
   const latest = runs[0];
+  const preview = await previewRebuildSelection({ kevTimeoutMs: 4000 });
   const flash =
     c.req.query("busy") ? '<div class="error">A rebuild run is already in progress.</div>'
+    : c.req.query("none") === "all" ? '<div class="card" style="margin-bottom:1rem">No app has been deployed yet, so there is nothing to rebuild.</div>'
+    : c.req.query("none") ? '<div class="card" style="margin-bottom:1rem">Nothing needs a rebuild: no app has an actively exploited vulnerability, a critical finding with a fix, or dependency updates waiting.</div>'
     : c.req.query("saved") ? '<div class="card" style="margin-bottom:1rem">Saved.</div>'
     : c.req.query("started") ? '<div class="card" style="margin-bottom:1rem">Rebuild started. Apps are rebuilt one after another; this page refreshes while it runs.</div>'
     : "";
@@ -3003,11 +3009,21 @@ webRoutes.get("/rebuild", async (c) => {
             <h1>Rebuild</h1>
             <p class="meta rr-lead">Keeps every app on the newest safe base image and dependencies. Apps are rebuilt one after another; live apps keep serving until their own swap.</p>
           </div>
-          <form method="POST" action="/rebuild/run" onsubmit="return confirm('Rebuild all apps now?')">
-            <button type="submit" style="width:auto"${running ? " disabled" : ""}>${running ? "Run in progress&hellip;" : "Rebuild all apps"}</button>
-          </form>
         </div>
         ${flash}
+        ${renderRebuildActions({
+          issues: preview.issues.map((r) => ({
+            id: r.app.id,
+            name: r.app.name ?? r.app.id,
+            reason: r.reason,
+            optedOut: r.optedOut,
+            quarantined: r.quarantined,
+          })),
+          all: preview.all.map((a) => ({ id: a.id, name: a.name ?? a.id })),
+          running,
+          confirmAll: c.req.query("confirm") === "all",
+          kevStale: preview.kevStale,
+        })}
         <details class="attn-how rr-how">
           <summary>How a rebuild works</summary>
           <p class="meta">
@@ -3068,11 +3084,41 @@ webRoutes.get("/rebuild", async (c) => {
   );
 });
 
+/**
+ * Start a manual run from the Rebuild page. Two modes, both admin-only
+ * (the whole /rebuild tree is):
+ *  - "issues" (default, also for anything unrecognised): the apps the
+ *    page just listed, chosen by the same function as the weekly run. If
+ *    none qualifies nothing starts.
+ *  - "all": every deployed app, but only with `confirm=all`, which the
+ *    confirmation panel on the page sends. Without it the visitor is sent
+ *    back to that panel, so a stray or forged POST cannot rebuild the lot.
+ * One run at a time stays the rule for both.
+ */
 webRoutes.post("/rebuild/run", async (c) => {
   const user = c.get("user");
+  const body = await c.req.parseBody();
+  const mode = body["mode"] === "all" ? "all" : "issues";
+  if (mode === "all" && body["confirm"] !== "all") return c.redirect("/rebuild?confirm=all");
+  if (activeRebuildRunId() !== null) return c.redirect("/rebuild?busy=1");
   try {
-    const id = startRebuildRun({ trigger: "manual" });
-    logAudit(user.id, user.username, "rebuild_all_started", { detail: `run ${id}` });
+    if (mode === "all") {
+      const n = rebuildableApps().length;
+      if (n === 0) return c.redirect("/rebuild?none=all");
+      const id = startRebuildRun({ trigger: "manual" });
+      logAudit(user.id, user.username, "rebuild_all_started", { detail: `run ${id} (mode all, ${n} apps)` });
+    } else {
+      const { issues } = await previewRebuildSelection();
+      if (issues.length === 0) return c.redirect("/rebuild?none=1");
+      const id = startRebuildRun({
+        trigger: "manual",
+        appIds: issues.map((r) => r.app.id),
+        onlyWithIssues: true,
+      });
+      logAudit(user.id, user.username, "rebuild_issues_started", {
+        detail: `run ${id} (mode issues, ${issues.length} apps)`,
+      });
+    }
   } catch (err) {
     if (err instanceof RebuildBusyError) return c.redirect("/rebuild?busy=1");
     throw err;

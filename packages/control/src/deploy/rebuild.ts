@@ -92,6 +92,100 @@ export function rebuildReason(
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
+/** One app the selection picked, and why. */
+export interface RebuildCandidate {
+  app: App;
+  /** Why it qualifies, from {@link rebuildReason}. */
+  reason: string;
+  /** The app opted out of the weekly rebuild (a person asking overrides that). */
+  optedOut: boolean;
+  /** Offline for an actively exploited CVE: a rebuild is how it comes back. */
+  quarantined: boolean;
+}
+
+export interface SelectionContext {
+  kev: Set<string>;
+  findings: (appId: string) => Finding[];
+  /** Dependency updates that failed recently and are not worth another try yet. */
+  depFailures: (appId: string) => Set<string>;
+}
+
+/**
+ * Pure: the apps a rebuild with a purpose should touch. ONE rule for
+ * the weekly run and for the button "Rebuild apps with issues": the app
+ * has a deployed image and {@link rebuildReason} finds something a
+ * rebuild can fix (actively exploited CVE, critical with a fix,
+ * dependency updates). The only difference is `includeOptedOut`: the
+ * weekly job leaves apps with automatic rebuild switched off alone, a
+ * person who asks for the run does not. A quarantined app always
+ * qualifies on that point, because a successful rebuild is how it gets
+ * back online. Order is that of `apps`.
+ */
+export function selectRebuildCandidates(
+  apps: App[],
+  ctx: SelectionContext,
+  opts: { includeOptedOut: boolean }
+): RebuildCandidate[] {
+  const out: RebuildCandidate[] = [];
+  for (const app of apps) {
+    if (!app.image_tag) continue;
+    const quarantined = app.status === "quarantined";
+    const optedOut = !app.auto_rebuild;
+    if (optedOut && !quarantined && !opts.includeOptedOut) continue;
+    const reason = rebuildReason(
+      ctx.findings(app.id),
+      ctx.kev,
+      app.auto_update_deps
+        ? { deps: true, major: !!app.auto_update_deps_major, skip: ctx.depFailures(app.id) }
+        : {}
+    );
+    if (reason === null) continue;
+    out.push({ app, reason, optedOut, quarantined });
+  }
+  return out;
+}
+
+function selectionContext(kev: Set<string>): SelectionContext {
+  return { kev, findings: getLatestPeriodicScanFindings, depFailures: (id) => recentDepFailures(id) };
+}
+
+/** Apps that have something to rebuild at all (a deployed image). */
+export function rebuildableApps(): App[] {
+  return listApps().filter((a) => a.image_tag);
+}
+
+/**
+ * What the two buttons on the Rebuild page would touch right now.
+ * "issues" is exactly what a manual issues-run selects; "all" is every
+ * deployed app. Reads the stored scans and the (cached) KEV list; it
+ * starts nothing.
+ */
+export async function previewRebuildSelection(
+  opts: { kevTimeoutMs?: number } = {}
+): Promise<{
+  issues: RebuildCandidate[];
+  all: App[];
+  kevStale: boolean;
+}> {
+  // The page must not hang on a slow KEV feed: give up after kevTimeoutMs
+  // and say so (stale) instead. A POST waits for the real list.
+  const kevList = opts.kevTimeoutMs
+    ? await Promise.race([
+        getKevList(),
+        new Promise<{ ids: Set<string>; stale: boolean }>((resolve) => {
+          const t = setTimeout(() => resolve({ ids: new Set(), stale: true }), opts.kevTimeoutMs);
+          t.unref?.();
+        }),
+      ])
+    : await getKevList();
+  const all = rebuildableApps();
+  return {
+    issues: selectRebuildCandidates(all, selectionContext(kevList.ids), { includeOptedOut: true }),
+    all,
+    kevStale: kevList.stale,
+  };
+}
+
 export function snapshot(
   findings: Finding[],
   kev: Set<string>
@@ -551,6 +645,12 @@ export interface RunOptions {
   appIds?: string[];
   /** Scheduled mode: only apps with KEV / critical-with-fix and auto_rebuild on. */
   onlyVulnerable?: boolean;
+  /**
+   * Manual "apps with issues": the same selection as the weekly run, but
+   * apps with automatic rebuild switched off are included because a
+   * person asked. Ignored when `onlyVulnerable` is set.
+   */
+  onlyWithIssues?: boolean;
   log?: Logger;
   /** Called once when the run is over, with what happened per app (audit trail). */
   onFinished?: (results: RebuildAppResult[]) => void;
@@ -599,21 +699,12 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
     let apps = listApps().filter((a) => a.image_tag);
     if (opts.appIds) apps = apps.filter((a) => opts.appIds!.includes(a.id));
     const reasons = new Map<string, string>();
-    if (opts.onlyVulnerable) {
-      apps = apps.filter((a) => {
-        // A quarantined app is always retried, whatever its opt-out says:
-        // a successful rebuild is how it gets back online.
-        if (!a.auto_rebuild && a.status !== "quarantined") return false;
-        const reason = rebuildReason(
-          getLatestPeriodicScanFindings(a.id),
-          kevList.ids,
-          a.auto_update_deps
-            ? { deps: true, major: !!a.auto_update_deps_major, skip: recentDepFailures(a.id) }
-            : {}
-        );
-        if (reason) reasons.set(a.id, reason);
-        return reason !== null;
+    if (opts.onlyVulnerable || opts.onlyWithIssues) {
+      const chosen = selectRebuildCandidates(apps, selectionContext(kevList.ids), {
+        includeOptedOut: !opts.onlyVulnerable,
       });
+      apps = chosen.map((c) => c.app);
+      for (const c of chosen) reasons.set(c.app.id, c.reason);
     }
 
     for (const app of apps) {

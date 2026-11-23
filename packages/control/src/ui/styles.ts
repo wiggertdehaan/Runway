@@ -222,8 +222,33 @@ p.sec-ok{border:1px solid var(--line);border-left:3px solid var(--ok);border-rad
 .rr-earlier{border:1px solid var(--line);border-radius:var(--r3);background:var(--bg);margin-bottom:0.5rem;padding:0.6rem 0.9rem}
 .rr-earlier summary{cursor:pointer;overflow-wrap:anywhere}
 .rr-earlier[open] summary{margin-bottom:0.75rem}
+.rr-actions{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:1rem;align-items:start;margin:0 0 1rem}
+.rr-act{border:1px solid var(--line);border-radius:var(--r3);background:var(--bg);padding:0.85rem 1rem;min-width:0}
+.rr-act form{margin:0 0 0.5rem}
+.rr-act button[type="submit"],.rr-act button.ghost{width:auto;min-height:40px}
+.rr-act-lead{margin:0 0 0.5rem}
+.rr-act button:disabled{background:var(--bg2);border-color:var(--line);color:var(--mu);cursor:not-allowed;opacity:1}
+.rr-sel{list-style:none;margin:0;padding:0}
+.rr-sel-item{padding:0.3rem 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
+.rr-sel-item:first-child{border-top:0}
+.rr-sel-more{padding-top:0.3rem;border-top:1px solid var(--line)}
+.rr-stale{margin:0.5rem 0 0;color:var(--warn)}
+.rr-all{padding:0}
+.rr-all-sum{list-style:none;cursor:pointer;display:flex;align-items:center;min-height:40px;padding:0.5rem 1rem;border-radius:var(--r3);font-weight:600;color:var(--tx)}
+.rr-all-sum::-webkit-details-marker{display:none}
+.rr-all-sum::after{content:"";margin-left:auto;width:6px;height:6px;border:solid var(--mu);border-width:0 2px 2px 0;transform:rotate(45deg);transition:transform 0.15s}
+.rr-all[open] .rr-all-sum::after{transform:rotate(-135deg)}
+.rr-all-sum:hover{background:var(--bg2)}
+.rr-all[open] .rr-all-sum{border-bottom:1px solid var(--line);border-radius:var(--r3) var(--r3) 0 0}
+.rr-all-body{padding:0.85rem 1rem}
+.rr-all-warn{margin:0 0 0.5rem}
+.rr-all-form{display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin:0.75rem 0 0}
+@media (max-width:899px){
+  .rr-actions{grid-template-columns:minmax(0,1fr)}
+}
 @media (max-width:699px){
   .rr-head form,.rr-head button{width:100%}
+  .rr-act button[type="submit"],.rr-act button.ghost,.rr-all-form .btn-link{width:100%;justify-content:center}
   .rr-what{max-width:none}
   .rr-tbl .rr-scan{white-space:normal}
 }
