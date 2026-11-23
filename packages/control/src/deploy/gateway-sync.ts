@@ -45,3 +45,44 @@ export async function repairSsoRoutes(deps: SsoRepairDeps): Promise<string[]> {
   }
   return fixed;
 }
+
+/**
+ * S23: every app's route now starts with a middleware that drops a visitor's
+ * X-Forwarded-User. Route files are only rewritten on deploy, so apps that
+ * are already running would keep trusting a forged header until someone
+ * redeploys them. At startup every app that already has a route file (and is
+ * not quarantined) gets its route written again from the same inputs, which
+ * is idempotent.
+ *
+ * Skipped on purpose: apps without a route file (writing one would expose an
+ * undeployed app), quarantined apps (their hosts point at the maintenance
+ * page) and apps with no domain.
+ */
+export function needsRouteRefresh(app: App): boolean {
+  return !!app.domain && app.status !== "quarantined";
+}
+
+export interface RouteRefreshDeps extends SsoRepairDeps {
+  /** App ids already rewritten in this start (the SSO repair), not done twice. */
+  skip?: Iterable<string>;
+}
+
+/** Returns the ids of the apps whose route was rewritten. Never throws. */
+export async function refreshAppRoutes(deps: RouteRefreshDeps): Promise<string[]> {
+  const skip = new Set(deps.skip ?? []);
+  const done: string[] = [];
+  for (const app of deps.listApps()) {
+    if (skip.has(app.id) || !needsRouteRefresh(app)) continue;
+    try {
+      if (!(await deps.routeExists(app.id))) continue;
+      await deps.writeRoute(app);
+      done.push(app.id);
+    } catch (err) {
+      deps.log?.(`Could not refresh the route of ${app.id}: ${String(err)}`);
+    }
+  }
+  if (done.length > 0) {
+    deps.log?.(`Refreshed the gateway route of ${done.length} app(s) (X-Forwarded-User is dropped from visitors)`);
+  }
+  return done;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { needsSsoRouteRepair, repairSsoRoutes } from "./gateway-sync.js";
+import { needsRouteRefresh, needsSsoRouteRepair, refreshAppRoutes, repairSsoRoutes } from "./gateway-sync.js";
 import type { App } from "../db/apps.js";
 
 const mk = (o: Partial<App>): App =>
@@ -50,5 +50,55 @@ describe("repairSsoRoutes", () => {
     expect(
       await repairSsoRoutes({ listApps: () => [], routeExists: async () => true, writeRoute: async () => {} })
     ).toEqual([]);
+  });
+});
+
+describe("refreshAppRoutes (S23: header strip reaches running apps without a redeploy)", () => {
+  it("rewrites every app that has a route file and is not quarantined, SSO or not", async () => {
+    const writeRoute = vi.fn(async () => {});
+    const log = vi.fn();
+    const done = await refreshAppRoutes({
+      listApps: () => [
+        mk({ id: "plain", sso_enabled: 0, custom_domain: null }),
+        mk({ id: "basic", sso_enabled: 0 }),
+        mk({ id: "no-file", sso_enabled: 0 }),
+        mk({ id: "no-domain", domain: null }),
+        mk({ id: "q", status: "quarantined" }),
+        mk({ id: "already" }),
+      ],
+      routeExists: async (id) => id !== "no-file",
+      writeRoute,
+      skip: ["already"],
+      log,
+    });
+    expect(done).toEqual(["plain", "basic"]);
+    expect(writeRoute).toHaveBeenCalledTimes(2);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Refreshed the gateway route of 2 app(s)"));
+  });
+
+  it("needsRouteRefresh: a domain and not quarantined", () => {
+    expect(needsRouteRefresh(mk({ sso_enabled: 0, custom_domain: null }))).toBe(true);
+    expect(needsRouteRefresh(mk({ domain: null }))).toBe(false);
+    expect(needsRouteRefresh(mk({ status: "quarantined" }))).toBe(false);
+  });
+
+  it("keeps going when one app fails and never throws", async () => {
+    const log = vi.fn();
+    const done = await refreshAppRoutes({
+      listApps: () => [mk({ id: "bad" }), mk({ id: "good" })],
+      routeExists: async () => true,
+      writeRoute: async (a) => {
+        if (a.id === "bad") throw new Error("disk full");
+      },
+      log,
+    });
+    expect(done).toEqual(["good"]);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Could not refresh the route of bad"));
+  });
+
+  it("logs nothing when there is nothing to do", async () => {
+    const log = vi.fn();
+    expect(await refreshAppRoutes({ listApps: () => [], routeExists: async () => true, writeRoute: async () => {}, log })).toEqual([]);
+    expect(log).not.toHaveBeenCalled();
   });
 });

@@ -339,6 +339,21 @@ without knowing why.
   custom domain is protected exactly like the Runway address.
 - **SSO vs basic auth**: when both are enabled on an app, SSO takes
   precedence — the forwardAuth middleware replaces basicAuth.
+- **`X-Forwarded-User` is only ever set by forwardAuth (S23).** Every app
+  router starts with a `<router>-stripuser` headers middleware (an empty
+  value deletes the header), then forwardAuth for SSO apps, so a visitor
+  cannot forge "Runway signed this person in" towards an app that trusts the
+  header. `refreshAppRoutes()` (startup) writes the routes of already-running
+  apps again so they get it without a redeploy. Keep the strip FIRST in the
+  chain and on every app, SSO or not.
+- **`/auth/verify` and `/maintenance` are for Traefik only (S23).** Traefik
+  reaches them through the service URL (`http://control:3000`), never through
+  the dashboard router. The dashboard route file therefore has a
+  `control-internal` router (higher priority, deny-all allow-list) for those
+  two paths on the dashboard host, and `middleware/internal-routes.ts` answers
+  404 when the Host header is the dashboard's own. Two locks: do not remove
+  either. A forward-auth call carries `Host: control:3000`; the quarantine
+  rewrite carries the app's host.
 - OAuth client credentials are stored in the settings table
   (`oauth_google_client_id`, `oauth_google_client_secret`,
   `oauth_microsoft_client_id`, `oauth_microsoft_client_secret`).

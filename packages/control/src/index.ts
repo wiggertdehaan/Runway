@@ -7,7 +7,7 @@ import {
   appRouteExists,
   appBasicAuth,
 } from "./deploy/gateway.js";
-import { repairSsoRoutes } from "./deploy/gateway-sync.js";
+import { repairSsoRoutes, refreshAppRoutes } from "./deploy/gateway-sync.js";
 import { listApps } from "./db/apps.js";
 import { appContainerName } from "./deploy/index.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
@@ -99,24 +99,33 @@ if (dashboardDomain) {
 
 // Routes written by an older version leave an SSO app's custom domain open;
 // rewrite them now so the fix does not wait for the next deploy.
+const writeRoute = (a: ReturnType<typeof listApps>[number]) =>
+  writeAppRoute({
+    appId: a.id,
+    containerName: appContainerName(a.id),
+    domain: a.domain!,
+    customDomain: a.custom_domain,
+    port: a.port,
+    basicAuth: appBasicAuth(a),
+    ssoEnabled: !!a.sso_enabled,
+  });
 try {
-  await repairSsoRoutes({
+  const repaired = await repairSsoRoutes({
     listApps,
     routeExists: appRouteExists,
-    writeRoute: (a) =>
-      writeAppRoute({
-        appId: a.id,
-        containerName: appContainerName(a.id),
-        domain: a.domain!,
-        customDomain: a.custom_domain,
-        port: a.port,
-        basicAuth: appBasicAuth(a),
-        ssoEnabled: !!a.sso_enabled,
-      }),
+    writeRoute,
+    log: (m) => console.log(m),
+  });
+  // S23: every other app's route gets the header-stripping middleware too.
+  await refreshAppRoutes({
+    listApps,
+    routeExists: appRouteExists,
+    writeRoute,
+    skip: repaired,
     log: (m) => console.log(m),
   });
 } catch (err) {
-  console.error("SSO route repair failed:", err);
+  console.error("Route repair failed:", err);
 }
 
 // Each app has its own network; the gateway is attached to them at runtime, so
