@@ -22,6 +22,7 @@ import {
 } from "../ui/app-page.js";
 import { renderMaintenance } from "../ui/maintenance.js";
 import { renderHardening } from "../ui/hardening.js";
+import { renderOwnerCard } from "../ui/owner.js";
 import { parseHardeningMode } from "../deploy/hardening.js";
 import { renderEarlierRun, renderRunResult, runHeading } from "../ui/rebuild-result.js";
 
@@ -33,7 +34,7 @@ const APP_VERSION = (() => {
     return "dev";
   }
 })();
-import { listApps, createApp, deleteApp, getApp, ownerUsernameOf, type App } from "../db/apps.js";
+import { listApps, createApp, deleteApp, getApp, ownerUsernameOf, setAppOwner, type App } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import {
@@ -1962,6 +1963,8 @@ webRoutes.get("/apps/:id", async (c) => {
 
             ${renderHardening(app, admin)}
 
+            ${admin ? renderOwnerCard(app, ownerUsernameOf(app), listUsers().map((u) => ({ id: u.id, username: u.username, role: u.role }))) : ""}
+
             <div class="card">
               <h2>Environment variables</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
@@ -3198,6 +3201,28 @@ webRoutes.post("/apps/:id/hardening", async (c) => {
     detail: `${app.id}: profile=${profile ?? "server default"}, read-only rootfs=${readonly ? "on" : "off"}`,
   });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#hardening`);
+});
+
+webRoutes.post("/apps/:id/owner", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const raw = String(body["owner"] ?? "").trim();
+  const target = raw === "" ? null : raw;
+  const back = `/apps/${encodeURIComponent(app.id)}#owner`;
+  const previousName = ownerUsernameOf(app);
+  const moved = setAppOwner(app.id, target);
+  // An unknown user id changes nothing and says nothing more than "not saved".
+  if (!moved.ok) return c.redirect(back);
+  const nextName = target ? getUser(target)?.username ?? null : null;
+  logAudit(user.id, user.username, "app_owner_assigned", {
+    targetUserId: target ?? undefined,
+    targetUsername: nextName ?? undefined,
+    detail: `${app.id}: ${previousName ?? "no owner"} -> ${nextName ?? "no owner"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#owner`);
 });
 
 webRoutes.post("/apps/:id/auto-minor", async (c) => {
