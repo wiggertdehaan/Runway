@@ -152,6 +152,10 @@ services:
       - EVENTS_RETENTION_DAYS=${EVENTS_RETENTION_DAYS:-}
       - EVENTS_MAX_PER_APP=${EVENTS_MAX_PER_APP:-}
       - HEALTH_WATCH_INTERVAL_MS=${HEALTH_WATCH_INTERVAL_MS:-}
+      # One-time token that /setup asks for until the first admin exists (S19).
+      # install.sh writes one into .env. Empty = control generates one on first
+      # start and prints it in its log. It does nothing once an admin exists.
+      - SETUP_TOKEN=${SETUP_TOKEN:-}
       # Per-app networks (S04). RUNWAY_APP_NETWORK_MODE=shared is the emergency
       # brake: new deploys go back on the shared runway-apps network. The pool
       # and prefix decide which private subnets the per-app networks use;

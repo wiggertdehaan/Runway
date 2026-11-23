@@ -24,12 +24,17 @@ import { startQuarantineMonitor } from "./deploy/quarantine.js";
 import { startHealthWatch } from "./deploy/health-watch.js";
 import { pruneEvents } from "./db/events.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
+import { setupTokenAnnouncement } from "./auth/setup-token.js";
 import { cleanupStaleUploads } from "./deploy/upload.js";
 import { docker } from "./deploy/docker.js";
 import { startGatewayNetworkReconciler, type NetworkDocker } from "./deploy/networks.js";
 
 migrate();
 loadBuiltinSkills();
+
+// S19: while no admin exists, /setup needs a one-time token. Print it so the
+// person who runs the server can read it (docker logs ... | grep -i "setup token").
+for (const line of setupTokenAnnouncement()) console.log(line);
 
 // Tail Traefik's access log so the dashboard can show per-app
 // activity (idle vs active) and a 7-day request sparkline. No-op

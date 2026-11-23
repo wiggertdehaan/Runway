@@ -176,6 +176,19 @@ configure_firewall() {
   fi
 }
 
+# ── Setup token ───────────────────────────────────────────
+# 24 random bytes, URL-safe, with a prefix so it is recognisable. openssl is
+# on practically every server; /dev/urandom is the fallback.
+generate_setup_token() {
+  local raw
+  if command -v openssl &>/dev/null; then
+    raw="$(openssl rand -base64 24)"
+  else
+    raw="$(head -c 24 /dev/urandom | base64)"
+  fi
+  printf 'rws_%s' "$(printf '%s' "$raw" | tr '+/' '-_' | tr -d '=\n')"
+}
+
 # ── Clone & Start ─────────────────────────────────────────
 install_runway() {
   log "Installing Runway to $RUNWAY_DIR..."
@@ -191,12 +204,22 @@ install_runway() {
 
   cd "$RUNWAY_DIR"
 
+  # One-time token that /setup asks for until the first admin account exists,
+  # so nobody else can claim a fresh server first. It goes into .env (mode 600)
+  # and onto this terminal at the end, never into a log file or onto a command
+  # line. It does nothing once an admin exists.
+  SETUP_TOKEN="$(generate_setup_token)"
+
   # Write .env (compose reads this)
   log "Writing configuration to $RUNWAY_DIR/.env"
-  cat > .env <<EOF
+  (
+    umask 077
+    cat > .env <<EOF
 DASHBOARD_DOMAIN=$DASHBOARD_DOMAIN
 ACME_EMAIL=$ACME_EMAIL
+SETUP_TOKEN=$SETUP_TOKEN
 EOF
+  )
   chmod 600 .env
 
   log "Building and starting Runway stack..."
@@ -222,8 +245,13 @@ EOF
   log "Runway is running!"
   echo ""
   log "Dashboard:  https://$DASHBOARD_DOMAIN"
-  log "            Open the URL above to create your admin account,"
+  log "            Open https://$DASHBOARD_DOMAIN/setup to create your admin account,"
   log "            then click \"Generate new API key\" for each app."
+  log ""
+  log "Setup token (asked for once, on the first visit):"
+  log "            $SETUP_TOKEN"
+  log "            Lost it? docker logs runway-control 2>&1 | grep -i \"setup token\""
+  log "            It stops working as soon as the first admin exists."
   log ""
   log "Agent docs: https://$DASHBOARD_DOMAIN/llms.txt"
   log "            Hand this URL + your API key to Claude Code and"
