@@ -97,7 +97,7 @@ describe("classifyRequest", () => {
     expect(classifyRequest("PATCH", "/api/v1/app/x")).toBe("write");
   });
   it("lists a small, known set as heavy", () => {
-    expect(HEAVY_ROUTES.size).toBe(3);
+    expect(HEAVY_ROUTES.size).toBe(5);
   });
 });
 

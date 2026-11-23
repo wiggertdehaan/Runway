@@ -1,14 +1,15 @@
 import type { Context, Next } from "hono";
 import { routePath } from "hono/route";
-import type { App } from "../db/apps.js";
 import { logApiAudit } from "../db/audit.js";
 import { getClientIp } from "./rate-limit.js";
+import type { ApiEnv } from "./auth.js";
 import {
   actionFor,
   clientHint,
   describeBody,
   describeParams,
   resultForStatus,
+  safeName,
   type AuditResult,
 } from "../util/audit-detail.js";
 
@@ -34,6 +35,7 @@ export const MUTATING_METHODS: ReadonlySet<string> = new Set([
 export const AUDITED_READS: ReadonlySet<string> = new Set([
   "/api/v1/app/env", // environment variables, values included
   "/api/v1/app/source", // the full source archive
+  "/api/v1/tokens/all", // every person's tokens (names, hints, last use)
 ]);
 
 /** Read-only routes that are deliberately NOT audited. */
@@ -47,14 +49,15 @@ export const UNAUDITED_READS: ReadonlySet<string> = new Set([
   "/api/v1/app/sso",
   "/api/v1/app/skills",
   "/api/v1/app/deploys",
+  "/api/v1/me", // who am I (user token)
+  "/api/v1/apps", // the apps this person may see
+  "/api/v1/tokens", // this person's own token list
 ]);
 
 /** Largest JSON body the middleware looks at to name the fields. */
 const MAX_INSPECT_BYTES = 1_000_000;
 
-type Env = { Variables: { app: App } };
-
-export async function apiAudit(c: Context<Env>, next: Next) {
+export async function apiAudit(c: Context<ApiEnv>, next: Next) {
   const method = c.req.method;
   const mutating = MUTATING_METHODS.has(method);
 
@@ -80,12 +83,16 @@ export async function apiAudit(c: Context<Env>, next: Next) {
     const matched = routePath(c, -1);
     const audited = mutating || AUDITED_READS.has(matched);
     if (audited) {
+      const actor = c.get("actor");
       const app = c.get("app");
-      if (app) {
+      if (actor) {
         const status = c.res?.status ?? 500;
         const result: AuditResult = threw ? "error" : resultForStatus(status);
         const client = clientHint(c.req.header("x-runway-client"));
         const detail = [
+          // For a user token the person is part of the record (the token id
+          // is the actor, but "who is that" is the first question).
+          actor.kind === "user-token" ? `user=${safeName(actor.username)}` : "",
           describeParams(c.req.param() as Record<string, string>),
           fields,
           `status=${threw ? 500 : status}`,
@@ -95,8 +102,9 @@ export async function apiAudit(c: Context<Env>, next: Next) {
           .join(" ");
         try {
           logApiAudit({
-            actorType: "api-key",
-            appId: app.id,
+            actorType: actor.kind === "app-key" ? "api-key" : "user-token",
+            actorId: actor.kind === "app-key" ? actor.appId : actor.tokenId,
+            appId: app?.id ?? null,
             action: actionFor(method, matched),
             result,
             ip: getClientIp(c),

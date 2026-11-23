@@ -422,6 +422,40 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 - The MCP client sends `X-Runway-Client: runway-mcp`; it is shown in the log as
   a hint and decides nothing.
 
+### Tokens are hashes, user tokens carry a scope (S10, S11, S18)
+- Three kinds, by prefix (`util/token-hash.ts`): `rwy_` app key (one app, all
+  of it), `rwd_` developer token (skills MCP, read-only), `rwu_` user token (a
+  person, every app they may see, on `/api/v1` and `/mcp`). A secret is shown
+  once and only its SHA-256 is stored (`apps.api_key_hash`,
+  `dev_tokens.token_hash`, `user_tokens.token_hash`). The old plaintext
+  columns hold the placeholder `hashed:<id>` (NOT NULL UNIQUE). `createApp`
+  and `rotateAppKey` return the plaintext once, on the returned object; every
+  later read (`getApp`) has the placeholder in `api_key`. Never add the key to
+  a log, an audit detail, a response or a page. `migrateTokenStorage` is
+  data-driven and idempotent; `getAppByKey` also adopts a row that still has a
+  plaintext key and no hash.
+- The dashboard cannot show an old key. `util/key-reveal.ts` holds a NEW key in
+  memory for 10 minutes for the one person who made it (the home page
+  re-renders every 5 s, so a single read is not enough); never persist it.
+- Rotation (`rotateAppKey`, `POST /apps/:id/key/rotate`, `POST
+  /api/v1/app/rotate-key`): the old key can keep working for 0 to 7 days
+  (`prev_key_hash`, `prev_key_expires_at`); rotating again ends the earlier
+  overlap, so there is at most one extra key.
+- `/api/v1/*` order is `apiAuth` (who) → `apiTokenLimit` (counts every call,
+  refusals too) → `apiAuthorize` (scope; for a user token the app named in
+  `X-Runway-App`/`?app=` must pass `appVisibleTo`, an unknown and a foreign app
+  both 404) → `apiAudit`. Tests pin the order. App keys are refused on the
+  routes in `USER_TOKEN_ONLY_ROUTES`. A route not named in `ADMIN_ROUTES` and
+  not a plain read needs `deploy`, so a new route is never a free read.
+- Scopes are a ladder `read < deploy < admin` (`util/token-scopes.ts`). `admin`
+  also needs the person to be an administrator NOW (role is read on every
+  request). Rights are the dashboard's own functions (`appVisibleTo`,
+  `mayRebuild`, `mayRescan`), evaluated per request. A token cannot make
+  tokens: that is dashboard-only (session + CSRF).
+- User tokens expire (90 days default, 1 year at most), at most 20 active per
+  person, die with the person (FK cascade), revoke keeps the row (`revoked_at`,
+  `revoked_by`). The administrator sees and revokes all on `/users`.
+
 ### Rate limits are per key, plus a cap on wrong keys per source (S21)
 - `middleware/token-limit.ts` + `util/token-limit.ts` (pure). `apiTokenLimit`
   sits right after `apiAuth` and before `apiAudit` on `/api/v1/*`; `/mcp`
@@ -431,7 +465,7 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
   10 min (`HEAVY_ROUTES`: deploy, rollback, source download). Anything that is
   not a GET/HEAD is `write` by default, so a new route is never a free read;
   put an expensive new route in `HEAVY_ROUTES` (a test fails on a stale entry).
-  User tokens (to come) use the same functions under their own actor prefix.
+  User tokens use the same functions under the actor `user-token:<token id>`.
 - Wrong keys: `guessBlocked` runs BEFORE the key is looked up and refuses a
   source (429, even for a correct key) that has presented 20 unknown keys in
   10 minutes; `recordWrongKey` counts only a key that does not exist, not a

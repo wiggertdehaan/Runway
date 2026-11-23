@@ -104,10 +104,13 @@ export function describeBody(body: unknown): string {
  * out, so the name is the same for every call to the same endpoint.
  */
 export function actionFor(method: string, routePath: string): string {
-  const sub = routePath
-    .replace(/^\/api\/v1\/app\/?/, "")
+  const segments = routePath
+    .replace(/^\/api\/v1\/?/, "")
     .split("/")
-    .filter((seg) => seg && !seg.startsWith(":"))
+    .filter((seg) => seg && !seg.startsWith(":"));
+  // Routes about one app live under /app/…; the word "app" itself adds nothing.
+  if (segments[0] === "app") segments.shift();
+  const sub = segments
     .join("_")
     .replace(/[^A-Za-z0-9_]/g, "")
     .toLowerCase();

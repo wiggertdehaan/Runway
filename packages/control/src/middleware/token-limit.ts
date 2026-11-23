@@ -1,5 +1,5 @@
 import type { Context, Next } from "hono";
-import type { App } from "../db/apps.js";
+import { actorKey, type ApiEnv } from "./auth.js";
 import { logDeniedAudit } from "../db/audit.js";
 import { getClientIp } from "./rate-limit.js";
 import {
@@ -52,7 +52,7 @@ export function tooManyRequests(c: Context, retryAfterSec: number): Response {
 
 function auditDenied(
   c: Context,
-  actorType: "api-key" | "mcp",
+  actorType: "api-key" | "mcp" | "user-token",
   action: string,
   reason: string
 ): void {
@@ -72,7 +72,7 @@ export function enforceTokenLimit(
   c: Context,
   actor: string,
   bucket: Bucket,
-  actorType: "api-key" | "mcp"
+  actorType: "api-key" | "mcp" | "user-token"
 ): Response | null {
   const win = currentLimits()[bucket];
   const r = tokenCounter.hit(`${actor}|${bucket}`, win);
@@ -83,17 +83,19 @@ export function enforceTokenLimit(
   return tooManyRequests(c, r.retryAfterSec);
 }
 
-/** After `apiAuth`: the per-key allowance for the API. */
-export async function apiTokenLimit(
-  c: Context<{ Variables: { app: App } }>,
-  next: Next
-) {
-  const app = c.get("app");
+/** After `apiAuth`: the per-key (or per-user-token) allowance for the API. */
+export async function apiTokenLimit(c: Context<ApiEnv>, next: Next) {
+  const actor = c.get("actor");
   // apiAuth always sets it; without an identity there is nothing to count
   // against, and the request is not let through either way.
-  if (!app) return c.json({ error: "Unauthorized" }, 401);
+  if (!actor) return c.json({ error: "Unauthorized" }, 401);
   const bucket = classifyRequest(c.req.method, c.req.path);
-  const refused = enforceTokenLimit(c, `api-key:${app.id}`, bucket, "api-key");
+  const refused = enforceTokenLimit(
+    c,
+    actorKey(actor),
+    bucket,
+    actor.kind === "app-key" ? "api-key" : "user-token"
+  );
   if (refused) return refused;
   await next();
 }
@@ -104,7 +106,7 @@ export async function apiTokenLimit(
  */
 export function guessBlocked(
   c: Context,
-  actorType: "api-key" | "mcp"
+  actorType: "api-key" | "mcp" | "user-token"
 ): Response | null {
   const ip = getClientIp(c);
   const r = guessCounter.blocked(`auth|${ip}`, currentLimits().authFail);

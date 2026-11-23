@@ -11,6 +11,7 @@ import { createApp } from "../db/apps.js";
 import { setSetting } from "../db/settings.js";
 import { apiAudit, AUDITED_READS, MUTATING_METHODS, UNAUDITED_READS } from "../middleware/api-audit.js";
 import { apiAuth } from "../middleware/auth.js";
+import { apiAuthorize, USER_TOKEN_ONLY_ROUTES } from "../middleware/api-authorize.js";
 import { actionFor } from "../util/audit-detail.js";
 import { apiTokenLimit, resetTokenLimits } from "../middleware/token-limit.js";
 
@@ -65,7 +66,9 @@ describe("the audit middleware is in place", () => {
     expect(auth).toBeGreaterThanOrEqual(0);
     // S21: the limiter refuses (and audits, once) before this middleware runs.
     expect(handlers.indexOf(apiTokenLimit)).toBe(auth + 1);
-    expect(aud).toBe(auth + 2);
+    // S18: so does the scope / app check, which audits its own refusals as counted rows.
+    expect(handlers.indexOf(apiAuthorize)).toBe(auth + 2);
+    expect(aud).toBe(auth + 3);
   });
 
   it("every GET route is consciously audited or not (a new route must pick)", () => {
@@ -97,6 +100,9 @@ describe("every mutating route writes an audit line", () => {
 
   it("each one, even when it refuses the request, is audited with the right action and actor", async () => {
     for (const r of mutating()) {
+      // Routes for a user token are refused for an app key before they get
+      // here; their audit lines are checked in user-tokens.test.ts.
+      if (USER_TOKEN_ONLY_ROUTES.has(r.path)) continue;
       db.exec("DELETE FROM audit_log");
       // Fill in the path parameters with something harmless.
       const url = r.path
@@ -178,9 +184,10 @@ describe("what goes into a line", () => {
   });
 
   it("a handler that throws is audited as an error and still fails for the caller", async () => {
-    const probe = new Hono<{ Variables: { app: { id: string } } }>();
+    const probe = new Hono<{ Variables: { app: { id: string }; actor: { kind: string; appId: string } } }>();
     probe.use("*", async (c, next) => {
       c.set("app", { id: "probe1" });
+      c.set("actor", { kind: "app-key", appId: "probe1" });
       await next();
     });
     probe.use("*", apiAudit as any);

@@ -92,6 +92,8 @@ export const HEAVY_ROUTES: ReadonlySet<string> = new Set([
   "POST /api/v1/app/deploy", // builds an image
   "POST /api/v1/app/rollback", // starts a container
   "GET /api/v1/app/source", // streams the whole source archive
+  "POST /api/v1/app/rebuild", // rebuilds an image
+  "POST /api/v1/app/rescan", // runs a vulnerability scan
 ]);
 
 export function classifyRequest(method: string, path: string): Bucket {

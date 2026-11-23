@@ -157,6 +157,15 @@ existing shell and HTTP tools — no MCP server or SDK is required.
 
 You will be given an API key of the form \`rwy_...\`. Each key is tied to
 one app on the server. Treat it as a secret and do not echo it to the user.
+The server keeps only a hash of a key: it is shown once, when the app is
+created or its key is rotated, and cannot be shown again. If a key is lost or
+exposed, the owner rotates it on the app's Access tab (the old key can keep
+working for a chosen overlap).
+
+A person may instead give you a user token of the form \`rwu_...\`. It
+reaches every app that person may see (list them with \`GET /api/v1/apps\`);
+send the app id in the \`X-Runway-App\` header on the calls below. Its scope
+(read, deploy, admin) limits what it may do, and it expires.
 
 ## Authentication
 

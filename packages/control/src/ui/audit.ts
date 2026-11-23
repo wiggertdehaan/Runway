@@ -66,7 +66,14 @@ function resultTag(result: string | null): string {
 function actorCell(e: AuditRowInput): string {
   const name = escapeHtml(e.username);
   if (!e.actor_type) return name;
-  const kind = e.actor_type === "api-key" ? "API key" : e.actor_type === "mcp" ? "MCP" : "Unknown caller";
+  const kind =
+    e.actor_type === "api-key"
+      ? "API key"
+      : e.actor_type === "user-token"
+        ? "User token"
+        : e.actor_type === "mcp"
+          ? "MCP"
+          : "Unknown caller";
   return `${name} <span class="meta">${escapeHtml(kind)}</span>`;
 }
 

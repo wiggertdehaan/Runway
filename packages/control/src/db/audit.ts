@@ -1,7 +1,7 @@
 import { db } from "./index.js";
 import { finalizeDetail, type AuditResult } from "../util/audit-detail.js";
 
-export type ActorType = "api-key" | "mcp" | "anonymous";
+export type ActorType = "api-key" | "mcp" | "user-token" | "anonymous";
 
 export interface AuditEntry {
   id: number;
@@ -53,19 +53,27 @@ export function logAudit(
  */
 export function logApiAudit(opts: {
   actorType: ActorType;
-  appId: string;
+  /**
+   * Who acted. For an app key the app's id; for a user token the token's id
+   * (not the token, not the person: a token is revoked by id, and one person
+   * may hold several). Defaults to the app id.
+   */
+  actorId?: string;
+  /** The app acted on; null for calls that are not about one app (list, tokens). */
+  appId: string | null;
   action: string;
   result: AuditResult;
   ip: string;
   detail?: string;
 }): void {
+  const actor = `${opts.actorType}:${opts.actorId ?? opts.appId ?? "none"}`;
   db.prepare(
     `INSERT INTO audit_log
        (user_id, username, action, detail, actor_type, app_id, result, source_ip)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    `${opts.actorType}:${opts.appId}`,
-    `${opts.actorType}:${opts.appId}`,
+    actor,
+    actor,
     opts.action,
     opts.detail ? finalizeDetail(opts.detail) : null,
     opts.actorType,

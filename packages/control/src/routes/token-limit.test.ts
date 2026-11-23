@@ -11,6 +11,7 @@ import { createUser } from "../db/users.js";
 import { setSetting } from "../db/settings.js";
 import { apiAuth } from "../middleware/auth.js";
 import { apiAudit } from "../middleware/api-audit.js";
+import { apiAuthorize } from "../middleware/api-authorize.js";
 import {
   apiTokenLimit,
   resetTokenLimits,
@@ -76,12 +77,13 @@ function audit(where = "1=1") {
 }
 
 describe("the limiter is in place", () => {
-  it("sits between the key check and the audit middleware", () => {
+  it("sits right after the key check, before the scope check and the audit middleware", () => {
     const handlers = app.routes.filter((r) => r.path === "/api/v1/*").map((r) => r.handler);
     const auth = handlers.indexOf(apiAuth);
     expect(auth).toBeGreaterThanOrEqual(0);
     expect(handlers.indexOf(apiTokenLimit)).toBe(auth + 1);
-    expect(handlers.indexOf(apiAudit)).toBe(auth + 2);
+    expect(handlers.indexOf(apiAuthorize)).toBe(auth + 2);
+    expect(handlers.indexOf(apiAudit)).toBe(auth + 3);
   });
 
   it("every heavy route is still a real route (no stale entry)", () => {

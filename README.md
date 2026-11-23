@@ -285,7 +285,8 @@ button for admins.
 - Optional TOTP two-factor authentication with backup codes
 - Login rate limiting (5 attempts / 15 minutes per IP), persisted in SQLite
 - API rate limiting per key (120 reads / 60 writes per minute, 10 deploys per 10 minutes) and per address (see below)
-- Per-app API keys, independent from dashboard sessions
+- Per-app API keys, independent from dashboard sessions, stored as hashes (shown once), rotatable with an optional overlap
+- User tokens (`rwu_`): one token per person for every app they may see, with a scope (read / deploy / admin), an expiry, and revocation by the person or an administrator
 - Audit log for all admin actions
 - Content Security Policy headers
 - Isolated builds via BuildKit (user code never touches the Docker socket)
