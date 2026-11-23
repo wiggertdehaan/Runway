@@ -19,6 +19,7 @@ import { startCachePruner } from "./deploy/cache-pruner.js";
 import { startRebuildScheduler } from "./deploy/rebuild-scheduler.js";
 import { startQuarantineMonitor } from "./deploy/quarantine.js";
 import { loadBuiltinSkills } from "./skills/builtin-loader.js";
+import { cleanupStaleUploads } from "./deploy/upload.js";
 
 migrate();
 loadBuiltinSkills();
@@ -34,6 +35,12 @@ setInterval(() => {
   cleanupExpiredEntries();
 }, 60 * 60 * 1000);
 deleteExpiredSessions();
+
+// Deploy uploads are removed by the deploy itself; this catches what a crash
+// in the middle of an upload left in the upload folder.
+void cleanupStaleUploads().then((n) => {
+  if (n > 0) console.log(`Removed ${n} stale upload file(s)`);
+});
 
 // Daily Trivy vulnerability DB refresh (every 24h, first run 60s after startup)
 setTimeout(() => {

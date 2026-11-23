@@ -341,6 +341,37 @@ without knowing why.
   the transaction that adds the column. Do not make it re-run: it would
   hand an ownerless app to whoever has since taken that username.
 
+### Uploads are streamed to disk and checked before use (S06)
+- `POST /api/v1/app/deploy` streams the body to `UPLOAD_DIR` (default
+  `<db dir>/uploads`, on the data volume: `/tmp` is a tmpfs, i.e. RAM) with a
+  hard byte cap (`deploy/upload.ts`), so a body without `Content-Length` is
+  cut off at the limit instead of being read in full. The file is then
+  checked entry by entry (`deploy/safe-tar.ts`, `inspectTarFile`) and only
+  after that read into a Buffer for the rest of the pipeline (bounded by the
+  upload limit, ceiling 2048 MB: moving the pipeline to file paths is the
+  follow-up that removes the Buffer).
+- Refused with 400 `{status:"rejected", code}`: gzip/zstd (the contract is a
+  plain tar), absolute paths, `..`, symlinks that are absolute or leave the
+  project (`..` after a real segment is refused too: if that segment is a
+  link the real path differs), hard links outside, device nodes/fifos, too
+  many entries (`RUNWAY_TAR_MAX_ENTRIES`, default 100000), long paths
+  (`RUNWAY_TAR_MAX_PATH`), deep nesting (`RUNWAY_TAR_MAX_DEPTH`), more file
+  bytes than the upload limit. A header that claims a huge size is refused
+  from the header, before any data is read.
+- Unpacking (`extractTarSafe`, used by `buildImageFromTar` and `scanSource`)
+  is in-process with the `tar` library, async, no shell, and forces ownership
+  to nobody (65534). It runs the same check first and again as a filter. Do
+  not go back to `sh -c "tar xf"`. Control is still root (S07, not done):
+  that is why nothing is unpacked outside these two paths, and the dep-update
+  code keeps using `tar -xO` on single members.
+- Stored sources and patched rebuild tars go through the same check when they
+  are built or scanned, so a source stored before this change that holds an
+  absolute or outward-pointing symlink now fails its rebuild with a clear
+  message instead of being unpacked.
+- The MCP client (`packages/mcp/src/tar.ts`) leaves such symlinks out (and
+  says so) and stops at `RUNWAY_MAX_UPLOAD_MB` (default 100), mirroring the
+  server, which would otherwise refuse the whole upload.
+
 ## Migrations
 
 `packages/control/src/db/index.ts` runs `migrate()` on startup. It

@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AppConfig, RunwayClient, Runtime } from "./client.js";
-import { tarProject } from "./tar.js";
+import { tarProjectDetailed } from "./tar.js";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { Readable } from "node:stream";
@@ -138,8 +138,11 @@ export function registerTools(server: McpServer, client: RunwayClient) {
 
       const root = project_root ?? process.cwd();
       let tarBuffer: Buffer;
+      let skippedLinks: string[] = [];
       try {
-        tarBuffer = await tarProject(root);
+        const packed = await tarProjectDetailed(root);
+        tarBuffer = packed.buffer;
+        skippedLinks = packed.skippedLinks;
       } catch (err: any) {
         return {
           content: [
@@ -157,6 +160,9 @@ export function registerTools(server: McpServer, client: RunwayClient) {
       const blocked = result.status === "blocked";
       const lines = [
         `Uploaded ${(tarBuffer.length / 1024).toFixed(1)} KB from ${root}.`,
+        skippedLinks.length > 0
+          ? `Left out ${skippedLinks.length} symlink(s) that point outside the project: ${skippedLinks.slice(0, 5).join(", ")}${skippedLinks.length > 5 ? ", ..." : ""}.`
+          : "",
         "",
         blocked
           ? `DEPLOY BLOCKED by security scan. The previous container is still running; the new image (${result.image_tag ?? "?"}) was built but not started.`

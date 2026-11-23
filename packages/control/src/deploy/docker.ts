@@ -6,6 +6,7 @@ import { createReadStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
+import { extractTarSafe, tarLimits } from "./safe-tar.js";
 
 // Network that deployed user containers join. Traefik straddles this
 // network + runway-internal so it can route edge traffic to apps, but
@@ -80,7 +81,10 @@ export async function buildImageFromTar(
     // Write tar to shared volume and extract
     const localCtxTar = `/exchange/${buildId}-ctx.tar`;
     await writeFile(localCtxTar, contextBuf);
-    execFileSync("sh", ["-c", `mkdir -p ${exchangeCtx} && tar xf ${localCtxTar} -C ${exchangeCtx}`]);
+    // S06: in-process, async, entry-checked unpack (no shell, no root-owned
+    // files from the archive). The tar was already checked at upload; this
+    // also covers stored sources and patched rebuild tars.
+    await extractTarSafe(localCtxTar, exchangeCtx, tarLimits(contextBuf.length));
     await unlink(localCtxTar);
     if (opts.dockerfileOverride !== undefined) {
       // Fresh mtime on purpose: BuildKit's incremental context sync
@@ -98,7 +102,9 @@ export async function buildImageFromTar(
 
     return { imageTag: opts.imageTag, log };
   } finally {
-    execFileSync("sh", ["-c", `rm -rf ${exchangeCtx} ${exchangeOut}`], { stdio: "ignore" });
+    await rm(exchangeCtx, { recursive: true, force: true }).catch(() => {});
+    await rm(exchangeOut, { force: true }).catch(() => {});
+    await rm(`${exchangeCtx}.tar`, { force: true }).catch(() => {});
   }
 }
 

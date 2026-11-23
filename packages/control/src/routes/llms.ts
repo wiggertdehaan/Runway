@@ -419,6 +419,12 @@ Notes:
 - The body must be a plain POSIX \`tar\` stream (not gzip).
 - Maximum upload size defaults to 100 MB (an admin can change this
   under Settings). If you exceed it, tighten the ignore files.
+- The tar is checked before anything is built. It is refused with
+  \`400\` (\`{"status":"rejected","code":...,"error":...}\`) when it holds
+  absolute paths or \`..\`, symlinks that are absolute or point outside the
+  project, hard links outside the project, device nodes or fifos, more than
+  100,000 entries, or more than the upload limit of file data. Symlinks
+  inside the project are fine.
 - The request may take tens of seconds: the server builds the image
   and starts the container before returning.
 
