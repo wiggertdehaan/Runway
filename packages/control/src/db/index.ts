@@ -3,7 +3,12 @@ import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { ensureUniqueDomainIndexes } from "./domain-index.js";
 import { backfillOwnerUserIds } from "./owner-migration.js";
-import { ensureUserTokensTable, migrateTokenStorage } from "./token-migration.js";
+import {
+  LEGACY_DEV_TOKEN_DAYS,
+  ensureUserTokensTable,
+  expireLegacyDevTokens,
+  migrateTokenStorage,
+} from "./token-migration.js";
 
 const DB_PATH = process.env.DB_PATH || join(process.cwd(), "runway.db");
 
@@ -571,6 +576,14 @@ export function migrate() {
     console.log(
       `Stored ${moved.appKeys} app key(s) and ${moved.devTokens} developer token(s) as hashes. ` +
         `Keys still work; the dashboard can no longer show an old key (rotate to get a new one).`
+    );
+  }
+  // Developer tokens that never expire get an expiry (90 days) so none lives forever.
+  const dated = expireLegacyDevTokens(db);
+  if (dated > 0) {
+    console.log(
+      `${dated} developer token(s) had no expiry and now expire in ${LEGACY_DEV_TOKEN_DAYS} days. ` +
+        `They work until then; their owners are told on the Account page.`
     );
   }
   ensureUserTokensTable(db);

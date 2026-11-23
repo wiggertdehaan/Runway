@@ -254,6 +254,30 @@ export function isAppOwner(
   return app.owner_user_id !== null && app.owner_user_id === user.id;
 }
 
+/**
+ * Give an app to a user, or (userId = null) to nobody: an ownerless app is
+ * admin-only. Rights follow `owner_user_id`, so this is the one place that
+ * moves them. Refuses a user id that does not exist (a dangling owner would
+ * be an app nobody could ever see). Returns the previous owner id so the
+ * caller can audit the move.
+ */
+export function setAppOwner(
+  appId: string,
+  userId: string | null
+): { ok: true; previous: string | null } | { ok: false } {
+  const app = getApp(appId);
+  if (!app) return { ok: false };
+  if (userId !== null) {
+    const exists = db.prepare(`SELECT 1 AS ok FROM users WHERE id = ?`).get(userId);
+    if (!exists) return { ok: false };
+  }
+  db.prepare(`UPDATE apps SET owner_user_id = ?, updated_at = datetime('now') WHERE id = ?`).run(
+    userId,
+    appId
+  );
+  return { ok: true, previous: app.owner_user_id };
+}
+
 /** Current username of an app's owner, for display only; null when it has none. */
 export function ownerUsernameOf(app: { owner_user_id: string | null }): string | null {
   if (!app.owner_user_id) return null;

@@ -152,6 +152,30 @@ services:
       - EVENTS_RETENTION_DAYS=${EVENTS_RETENTION_DAYS:-}
       - EVENTS_MAX_PER_APP=${EVENTS_MAX_PER_APP:-}
       - HEALTH_WATCH_INTERVAL_MS=${HEALTH_WATCH_INTERVAL_MS:-}
+      # One-time token that /setup asks for until the first admin exists (S19).
+      # install.sh writes one into .env. Empty = control generates one on first
+      # start and prints it in its log. It does nothing once an admin exists.
+      - SETUP_TOKEN=${SETUP_TOKEN:-}
+      # Per-app networks (S04). RUNWAY_APP_NETWORK_MODE=shared is the emergency
+      # brake: new deploys go back on the shared runway-apps network. The pool
+      # and prefix decide which private subnets the per-app networks use;
+      # change them only when 10.250.0.0/16 collides with something on the host.
+      - RUNWAY_APP_NETWORK_MODE=${RUNWAY_APP_NETWORK_MODE:-}
+      - RUNWAY_APP_NET_POOL=${RUNWAY_APP_NET_POOL:-}
+      - RUNWAY_APP_NET_PREFIX=${RUNWAY_APP_NET_PREFIX:-}
+      # How long (days) and how many lines of what API keys and tokens did are
+      # kept in the audit log (S12). Empty = 90 days and 100000 lines. Lines
+      # about people in the dashboard are never pruned.
+      - AUDIT_API_RETENTION_DAYS=${AUDIT_API_RETENTION_DAYS:-}
+      - AUDIT_API_MAX_ROWS=${AUDIT_API_MAX_ROWS:-}
+      # Uploads (S06): limits on a source tar. Empty = built-in defaults.
+      - RUNWAY_TAR_MAX_ENTRIES=${RUNWAY_TAR_MAX_ENTRIES:-}
+      - RUNWAY_TAR_MAX_PATH=${RUNWAY_TAR_MAX_PATH:-}
+      - RUNWAY_TAR_MAX_DEPTH=${RUNWAY_TAR_MAX_DEPTH:-}
+      # How many stored source tarballs to keep per app. Empty = 10.
+      - RUNWAY_SOURCE_RETENTION=${RUNWAY_SOURCE_RETENTION:-}
+      # Hours between the periodic scans of running apps. Empty = the default.
+      - PERIODIC_SCAN_INTERVAL_HOURS=${PERIODIC_SCAN_INTERVAL_HOURS:-}
     security_opt:
       - no-new-privileges:true
     tmpfs:

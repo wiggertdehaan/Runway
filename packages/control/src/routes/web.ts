@@ -22,6 +22,8 @@ import {
 } from "../ui/app-page.js";
 import { renderMaintenance } from "../ui/maintenance.js";
 import { renderHardening } from "../ui/hardening.js";
+import { renderOwnerCard } from "../ui/owner.js";
+import { clearSetupToken, currentSetupToken, setupTokenMatches } from "../auth/setup-token.js";
 import { parseHardeningMode } from "../deploy/hardening.js";
 import { renderEarlierRun, renderRunResult, runHeading } from "../ui/rebuild-result.js";
 
@@ -33,7 +35,7 @@ const APP_VERSION = (() => {
     return "dev";
   }
 })();
-import { listApps, createApp, deleteApp, getApp, ownerUsernameOf, type App } from "../db/apps.js";
+import { listApps, createApp, deleteApp, getApp, ownerUsernameOf, setAppOwner, type App } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import {
@@ -180,7 +182,7 @@ import {
 } from "../db/user-tokens.js";
 import { deleteDevTokenAsAdmin, listAllDevTokens } from "../db/dev-tokens.js";
 import { grantableScopes, isScope, USER_TOKEN_DEFAULT_DAYS, USER_TOKEN_MAX_DAYS } from "../util/token-scopes.js";
-import { renderNewTokenForm, renderTokenTable } from "../ui/token-lists.js";
+import { legacyExpiryNotice, renderNewTokenForm, renderTokenTable } from "../ui/token-lists.js";
 import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
 import { describeBaseImage, lineOf, parseImageRef } from "../deploy/base-images.js";
 import {
@@ -389,16 +391,33 @@ function authLayout(title: string, body: string, csrf?: string) {
 
 // ── Public routes (no auth) ──────────────────────────────
 
+const SETUP_WINDOW_MS = 15 * 60 * 1000;
+const SETUP_MAX_PER_IP = 5;
+const SETUP_MAX_TOTAL = 30;
+
 webRoutes.get("/setup", (c) => {
   if (countUsers() > 0) return c.redirect("/login");
+  const error = c.req.query("error");
+  const errorMsg =
+    error === "wait"
+      ? '<div class="error">Too many attempts. Wait a few minutes and try again.</div>'
+      : error === "token"
+        ? '<div class="error">That setup token is not right.</div>'
+        : "";
   return c.html(
     authLayout(
       "Setup",
       `
       <h1>Welcome to Runway</h1>
       <p class="hint">Create the first admin account and configure your base domain.</p>
+      ${errorMsg}
       <form method="POST" action="/setup">
-        <input type="text" name="username" placeholder="Username" aria-label="Username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus />
+        <input type="password" name="setup_token" placeholder="Setup token" aria-label="Setup token" autocomplete="off" autocapitalize="none" spellcheck="false" required autofocus />
+        <p class="hint">
+          One-time token that proves you installed this server. The installer printed it; on the server run
+          <span class="key">docker logs runway-control 2>&amp;1 | grep -i "setup token"</span>.
+        </p>
+        <input type="text" name="username" placeholder="Username" aria-label="Username" autocomplete="username" autocapitalize="none" spellcheck="false" required />
         <input type="password" name="password" placeholder="Password (min 8 characters)" aria-label="Password" autocomplete="new-password" minlength="8" required />
         <input type="text" name="base_domain" placeholder="Base domain (optional, e.g. runway.example.com)" aria-label="Base domain" autocomplete="off" />
         <p class="hint">
@@ -416,7 +435,23 @@ webRoutes.get("/setup", (c) => {
 webRoutes.post("/setup", async (c) => {
   if (countUsers() > 0) return c.redirect("/login");
 
+  // S19: nobody becomes the first admin without the one-time setup token.
+  // Wrong guesses are counted per address and for the whole server; the answer
+  // never says more than "not right", and the token never goes into a URL.
+  const ip = getClientIp(c);
+  if (isRateLimited(`setup:${ip}`, SETUP_MAX_PER_IP, SETUP_WINDOW_MS) || isRateLimited("setup:all", SETUP_MAX_TOTAL, SETUP_WINDOW_MS)) {
+    return c.redirect("/setup?error=wait");
+  }
   const body = await c.req.parseBody();
+  const expected = currentSetupToken();
+  if (!expected || !setupTokenMatches(body["setup_token"] as string | undefined, expected.token)) {
+    recordFailedAttempt(`setup:${ip}`, SETUP_WINDOW_MS);
+    recordFailedAttempt("setup:all", SETUP_WINDOW_MS);
+    console.warn(`Setup attempt with a wrong token from ${ip}`);
+    return c.redirect("/setup?error=token");
+  }
+  clearAttempts(`setup:${ip}`);
+
   const username = (body["username"] as string | undefined)?.trim();
   const password = body["password"] as string | undefined;
   const baseDomainRaw = body["base_domain"] as string | undefined;
@@ -426,6 +461,8 @@ webRoutes.post("/setup", async (c) => {
   }
 
   const user = await createUser(username, password, "admin");
+  // Setup is done: the token is of no further use (setup stays closed).
+  clearSetupToken();
 
   if (baseDomainRaw && baseDomainRaw.trim()) {
     const normalized = normalizeBaseDomain(baseDomainRaw);
@@ -1962,6 +1999,8 @@ webRoutes.get("/apps/:id", async (c) => {
 
             ${renderHardening(app, admin)}
 
+            ${admin ? renderOwnerCard(app, ownerUsernameOf(app), listUsers().map((u) => ({ id: u.id, username: u.username, role: u.role }))) : ""}
+
             <div class="card">
               <h2>Environment variables</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
@@ -2412,6 +2451,7 @@ function renderAdminTokensCard(revoked: string | undefined): string {
     hint: t.token_hint,
     scope: null,
     expires_at: t.expires_at,
+    expiry_assigned: t.expiry_assigned,
     last_used_at: t.last_used_at,
     revoked_at: null,
     username: t.username,
@@ -3200,6 +3240,28 @@ webRoutes.post("/apps/:id/hardening", async (c) => {
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#hardening`);
 });
 
+webRoutes.post("/apps/:id/owner", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/");
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const raw = String(body["owner"] ?? "").trim();
+  const target = raw === "" ? null : raw;
+  const back = `/apps/${encodeURIComponent(app.id)}#owner`;
+  const previousName = ownerUsernameOf(app);
+  const moved = setAppOwner(app.id, target);
+  // An unknown user id changes nothing and says nothing more than "not saved".
+  if (!moved.ok) return c.redirect(back);
+  const nextName = target ? getUser(target)?.username ?? null : null;
+  logAudit(user.id, user.username, "app_owner_assigned", {
+    targetUserId: target ?? undefined,
+    targetUsername: nextName ?? undefined,
+    detail: `${app.id}: ${previousName ?? "no owner"} -> ${nextName ?? "no owner"}`,
+  });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#owner`);
+});
+
 webRoutes.post("/apps/:id/auto-minor", async (c) => {
   const user = c.get("user");
   if (!isAdmin(user)) return c.redirect("/");
@@ -3901,7 +3963,7 @@ webRoutes.get("/account", (c) => {
             <tr style="border-top:1px solid var(--border)">
               <td style="padding:0.5rem 0.6rem 0.5rem 0">${escapeHtml(t.name)}${t.token_hint ? ` <span class="meta"><code>…${escapeHtml(t.token_hint)}</code></span>` : ""}</td>
               <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.last_used_at ? escapeHtml(formatRelative(t.last_used_at)) : "never"}</td>
-              <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.expires_at ? escapeHtml(t.expires_at.slice(0, 10)) : "never"}</td>
+              <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${t.expires_at ? escapeHtml(t.expires_at.slice(0, 10)) : "never"}${t.expiry_assigned === 1 ? ' <span class="tag tag-warn" title="This token had no expiry. The upgrade gave it one. Make a new token before then and revoke this one.">set by upgrade</span>' : ""}</td>
               <td style="padding:0.5rem 0.6rem;color:var(--text-muted)">${escapeHtml(formatRelative(t.created_at))}</td>
               <td style="padding:0.5rem 0 0.5rem 0.6rem;text-align:right">
                 <form method="POST" action="/account/tokens/${escapeHtml(t.id)}/delete" style="margin:0" onsubmit="return confirm('Revoke this token? Any Claude Code session using it will lose access.')">
@@ -3963,6 +4025,7 @@ webRoutes.get("/account", (c) => {
       "Account",
       `
       <h1>Account</h1>
+      ${legacyExpiryNotice(tokens.map((t) => ({ expires_at: t.expires_at, revoked_at: null, expiry_assigned: t.expiry_assigned })))}
       ${
         error === "locked"
           ? `<div class="error">Too many failed attempts. Try again in ${waitText(lockRemainingSeconds(user.id) || 60)}.</div>`

@@ -25,6 +25,8 @@ export interface TokenRow {
   revoked_at: string | null;
   /** Whose token, for the administrator's list; null on a person's own list. */
   username?: string | null;
+  /** 1 when the upgrade, not the person, gave this token its expiry. */
+  expiry_assigned?: number;
 }
 
 export type TokenState = "active" | "expired" | "revoked";
@@ -63,7 +65,42 @@ function day(value: string | null): string {
 /** "no expiry" is spelled out: an old developer token has none, and that is worth seeing. */
 function expiryCell(t: TokenRow, state: TokenState): string {
   if (!t.expires_at) return '<span class="tag tag-warn" title="Issued before tokens expired. Revoke it and make a new one.">No expiry</span>';
-  return state === "expired" ? `${day(t.expires_at)}` : `until ${day(t.expires_at)}`;
+  if (state === "expired") return `${day(t.expires_at)}`;
+  const set =
+    t.expiry_assigned === 1
+      ? ' <span class="tag tag-warn" title="This token had no expiry. The upgrade gave it one. Make a new token before then and revoke this one.">set by upgrade</span>'
+      : "";
+  return `until ${day(t.expires_at)}${set}`;
+}
+
+/**
+ * The banner on the Account page: developer tokens that had no expiry were
+ * given one by the upgrade, and will stop working on that day. Empty when
+ * none of the person's tokens are in that situation (or they have all
+ * expired or been revoked already).
+ */
+export function legacyExpiryNotice(
+  rows: Array<Pick<TokenRow, "expires_at" | "revoked_at" | "expiry_assigned">>,
+  now = Date.now()
+): string {
+  const open = rows.filter(
+    (t) => t.expiry_assigned === 1 && t.expires_at && tokenState(t, now) === "active"
+  );
+  if (open.length === 0) return "";
+  const first = open
+    .map((t) => t.expires_at as string)
+    .sort()[0]!;
+  const many = open.length > 1;
+  return `<div class="card" id="legacy-expiry" style="border-color:var(--warn,#b45309)">
+      <h2>${many ? `${open.length} of your tokens` : "One of your tokens"} will stop working on ${day(first)}</h2>
+      <p class="meta" style="margin-top:0.5rem">
+        ${many ? "These skill MCP tokens were" : "This skill MCP token was"} made before tokens expired, so
+        ${many ? "they had" : "it had"} no end date. ${many ? "They now expire" : "It now expires"} on ${day(first)}
+        (the date is in the list below). Until then ${many ? "they work" : "it works"} as before.
+        To keep working, generate a new token under "Skill MCP tokens", put it in your Claude Code configuration, and
+        revoke the old one.
+      </p>
+    </div>`;
 }
 
 /**

@@ -22,7 +22,8 @@ export type SettingKey =
   | "auto_rebuild_time"
   | "auto_rebuild_last_date"
   | "quarantine_term_days"
-  | "sessions_host_only_v1";
+  | "sessions_host_only_v1"
+  | "setup_token";
 
 export function getSetting(key: SettingKey): string | undefined {
   const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as
