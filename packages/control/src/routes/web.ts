@@ -8,6 +8,7 @@ import { APP_CSS } from "../ui/styles.js";
 import { CLIENT_JS, PREPAINT_JS } from "../ui/client.js";
 import { appStatus, countStates, type AppStatus } from "../ui/status.js";
 import { homeChips, needsAttention, renderChips } from "../ui/home.js";
+import { navCount, renderSecurityPage, type SecurityApp } from "../ui/security-page.js";
 import {
   deployReason,
   mayRebuild,
@@ -270,6 +271,8 @@ function layout(
         link("/settings", "Settings", '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
       ].join("")
     : "";
+  const secCount = username ? navCount(securityCountFor(username, admin)) : "";
+  const securityLink = `<a class="nav-link" href="/security" title="Security${secCount ? ` (${secCount} need attention)` : ""}">${icon('<path d="M12 3 4 6v6c0 4.5 3.2 8 8 9 4.8-1 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/>')}<span class="lb">Security</span>${secCount ? `<span class="nav-count" aria-label="${escapeHtml(secCount)} need attention">${escapeHtml(secCount)}</span>` : ""}</a>`;
   const themeBtn = (cls: string) =>
     `<button type="button" class="${cls}" data-act="theme" aria-pressed="false" title="Toggle light/dark theme">
        <span class="theme-ic-light">${icon('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>')}</span>
@@ -287,6 +290,7 @@ function layout(
            <div class="side-body" id="side-body">
              <nav class="side-nav" aria-label="Main">
                ${link("/", "Apps", '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>')}
+               ${securityLink}
                ${adminLinks}
              </nav>
              <div class="side-foot">
@@ -591,6 +595,7 @@ function getCookieValue(c: Context, name: string): string | undefined {
 
 webRoutes.use("/", requireSession);
 webRoutes.use("/partials/*", requireSession);
+webRoutes.use("/security", requireSession);
 webRoutes.use("/apps", requireSession);
 webRoutes.use("/apps/*", requireSession);
 webRoutes.use("/apps/:id", requireAppAccess);
@@ -659,6 +664,20 @@ function collectAtRisk(apps: App[]): Map<string, AtRiskApp> {
     });
   }
   return out;
+}
+
+/** The apps this viewer may see: all for an admin, their own for an owner. */
+function appsVisibleTo(username: string, admin: boolean): App[] {
+  return admin ? listApps() : listApps().filter((a) => a.created_by === username);
+}
+
+/**
+ * The sidebar counter next to Security: apps in a KEV term or offline,
+ * among the apps this viewer may see (same number as the home page's
+ * attention strip, and never a hint about somebody else's apps).
+ */
+function securityCountFor(username: string, admin: boolean): number {
+  return collectAtRisk(appsVisibleTo(username, admin)).size;
 }
 
 /** App-page section: quarantine status, exemption, owner notices. */
@@ -817,6 +836,39 @@ async function renderAppsLive(
 
   return `${renderSecurityAttention([...atRisk.values()], now, admin)}${header}${kevStatus}${body}`;
 }
+
+webRoutes.get("/security", async (c) => {
+  const user = c.get("user");
+  const admin = isAdmin(user);
+  const apps = appsVisibleTo(user.username, admin);
+  const now = Date.now();
+  const atRisk = collectAtRisk(apps);
+  const allStats = await getAppStatsBulk(apps);
+  const rows: SecurityApp[] = apps.map((app, i) => ({
+    id: app.id,
+    name: app.name ?? app.id,
+    owner: app.created_by,
+    kev: atRisk.get(app.id),
+    status: statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now),
+    hasImage: !!app.image_tag,
+  }));
+  const scannedIds = listPeriodicScanAppIds();
+  const running = apps.filter((a) => a.status === "running");
+  const kevStatusHtml = renderKevStatus(
+    kevCacheInfo(),
+    { running: running.length, scanned: running.filter((a) => scannedIds.has(a.id)).length },
+    atRisk.size,
+    now,
+    admin
+  );
+  return c.html(
+    layout(
+      "Security",
+      renderSecurityPage({ apps: rows, now, admin, kevStatusHtml, termDays: getQuarantineTermDays() }),
+      { username: user.username, csrf: csrfField(c), isAdmin: admin }
+    )
+  );
+});
 
 webRoutes.get("/", async (c) => {
   const user = c.get("user");
