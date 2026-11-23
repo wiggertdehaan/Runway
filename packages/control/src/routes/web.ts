@@ -11,6 +11,8 @@ import { homeChips, needsAttention, renderChips } from "../ui/home.js";
 import {
   deployReason,
   mayRebuild,
+  mayRescan,
+  rescanBlockedReason,
   rebuildBlockedReason,
   rebuildLine,
   renderKevBlock,
@@ -162,6 +164,7 @@ import {
   type AtRiskApp,
 } from "./security-view.js";
 import { rescanApp } from "../deploy/periodic-scanner.js";
+import { activeRescan, endRescan, tryBeginRescan } from "../deploy/rescan-guard.js";
 import { THRESHOLDS, isValidThreshold, effectiveThreshold, getScannerHealth, type Threshold, type ScanResult, type Finding } from "../deploy/scan.js";
 import { appBasicAuth, buildHtpasswd, writeAppRoute } from "../deploy/gateway.js";
 import { getAppAllowedEmails, addAppAllowedEmail, removeAppAllowedEmail } from "../db/app-emails.js";
@@ -1068,7 +1071,8 @@ function renderScanSection(
   app: ReturnType<typeof listApps>[number],
   admin: boolean,
   canRebuild = false,
-  rebuildDisabledReason: string | null = null
+  rebuildDisabledReason: string | null = null,
+  canRescan = false
 ): string {
   const thresholdOptions = THRESHOLDS.map((t) => {
     const selected = app.scan_threshold === t ? " selected" : "";
@@ -1133,12 +1137,12 @@ function renderScanSection(
         after the deploy gate ran.
       </p>`;
   }
-  const rescanButton =
-    admin && app.image_tag && app.status === "running"
-      ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/rescan" style="margin:0 0 0.5rem">
+  // Rescan is for the owner as well as the admin, same rule as rebuild.
+  const rescanButton = canRescan
+    ? `<form method="POST" action="/apps/${encodeURIComponent(app.id)}/rescan" style="margin:0 0 0.5rem">
           <button type="submit" class="ghost" style="font-size:0.8rem;padding:0.3rem 0.7rem">Rescan now</button>
         </form>`
-      : "";
+    : "";
 
   // Rebuild is for the owner as well as the admin; the switches below stay admin-only.
   const rebuildButton = canRebuild
@@ -1503,6 +1507,14 @@ webRoutes.get("/apps/:id", async (c) => {
     rebuildBlockedReason(app) ??
     (running ? "A rebuild is already running. Only one runs at a time." : null);
   const canRebuild = mayRebuild(user, app) && blockedReason === null;
+  const canRescan = mayRescan(user, app) && rescanBlockedReason(app) === null && activeRescan() === null;
+  const rescanFlag = c.req.query("rescan");
+  const rescanNote =
+    rescanFlag === "busy"
+      ? '<div class="error">A rescan is already running. Only one runs at a time; try again when it is done.</div>'
+      : rescanFlag === "blocked"
+        ? `<div class="error">${escapeHtml(rescanBlockedReason(app) ?? "This app cannot be rescanned right now.")}</div>`
+        : "";
   const rebuildFlag = c.req.query("rebuild");
   const rebuildNote =
     rebuildFlag === "busy"
@@ -1583,6 +1595,7 @@ webRoutes.get("/apps/:id", async (c) => {
       </header>
       ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Saved.</div>' : ""}
       ${rebuildNote}
+      ${rescanNote}
       ${
         kev
           ? renderKevBlock({
@@ -1591,6 +1604,7 @@ webRoutes.get("/apps/:id", async (c) => {
               now,
               canRebuild,
               rebuildDisabledReason: mayRebuild(user, app) ? blockedReason : "Only the app's owner or an admin can rebuild it.",
+              canRescan,
               isAdmin: admin,
             })
           : ""
@@ -1617,7 +1631,7 @@ webRoutes.get("/apps/:id", async (c) => {
           <!-- ── Security tab ───────────────────────── -->
           <div class="tab-panel panel-security">
             ${renderQuarantineSection(app, admin)}
-            ${renderScanSection(app, admin, canRebuild, mayRebuild(user, app) ? blockedReason : null)}
+            ${renderScanSection(app, admin, canRebuild, mayRebuild(user, app) ? blockedReason : null, canRescan)}
           </div>
 
           <!-- ── Access tab ─────────────────────────── -->
@@ -1948,19 +1962,30 @@ webRoutes.post("/apps/:id/scan-threshold", async (c) => {
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 
+/**
+ * Rescan one app's current image with Trivy. An admin, or the app's owner:
+ * requireAppAccess already turns every other member away for /apps/:id/*,
+ * and mayRescan() says the same again here so the rule survives a
+ * reordering of the middleware. An app without an owner is admin-only.
+ * One manual rescan at a time for everybody (it runs inline and Trivy is
+ * heavy); every rescan is audited.
+ */
 webRoutes.post("/apps/:id/rescan", async (c) => {
   const user = c.get("user");
-  if (!isAdmin(user)) return c.redirect("/");
   const app = getApp(c.req.param("id"));
-  if (!app) return c.redirect("/");
-  if (!app.image_tag) {
-    return c.redirect(
-      `/apps/${encodeURIComponent(app.id)}?error=no_image#scan`,
-    );
+  if (!app || !mayRescan(user, app)) return c.redirect("/?forbidden=1");
+  const back = (flag: string) => c.redirect(`/apps/${encodeURIComponent(app.id)}?rescan=${flag}#scan`);
+  if (rescanBlockedReason(app)) return back("blocked");
+  if (!tryBeginRescan(app.id)) return back("busy");
+  try {
+    // Run inline so the page reload reflects the new periodic-scan row.
+    await rescanApp(app);
+  } finally {
+    endRescan(app.id);
   }
-  // Run inline so the page reload reflects the new periodic-scan row.
-  await rescanApp(app);
-  logAudit(user.id, user.username, "app_rescanned", { detail: app.id });
+  logAudit(user.id, user.username, "app_rescanned", {
+    detail: `${app.id}${isAdmin(user) ? "" : " (by owner)"}`,
+  });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1#scan`);
 });
 

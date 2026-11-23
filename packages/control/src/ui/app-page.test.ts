@@ -145,3 +145,42 @@ describe("renderKevBlock", () => {
     expect(html).not.toContain("<img>");
   });
 });
+
+import { mayRescan, rescanBlockedReason } from "./app-page.js";
+
+describe("mayRescan", () => {
+  it("allows an admin, the owner, and nobody else", () => {
+    expect(mayRescan({ username: "root", role: "admin" }, { created_by: "alice" })).toBe(true);
+    expect(mayRescan({ username: "alice", role: "member" }, { created_by: "alice" })).toBe(true);
+    expect(mayRescan({ username: "bob", role: "member" }, { created_by: "alice" })).toBe(false);
+  });
+
+  it("keeps an app without an owner admin-only", () => {
+    expect(mayRescan({ username: "alice", role: "member" }, { created_by: null })).toBe(false);
+    expect(mayRescan({ username: "root", role: "admin" }, { created_by: null })).toBe(true);
+  });
+});
+
+describe("rescanBlockedReason", () => {
+  it("needs an image and a running app", () => {
+    expect(rescanBlockedReason({ image_tag: null, status: "running" })).toMatch(/Deploy the app once/);
+    expect(rescanBlockedReason({ image_tag: "x:1", status: "stopped" })).toMatch(/running app/);
+    expect(rescanBlockedReason({ image_tag: "x:1", status: "running" })).toBeNull();
+  });
+});
+
+describe("renderKevBlock rescan button", () => {
+  const base = {
+    app: { id: "a1", name: "Shop" },
+    kev: kev(),
+    now: NOW,
+    canRebuild: true,
+    rebuildDisabledReason: null,
+    isAdmin: false,
+  };
+  it("shows a rescan form only when the viewer may rescan", () => {
+    expect(renderKevBlock({ ...base, canRescan: true })).toContain('action="/apps/a1/rescan"');
+    expect(renderKevBlock({ ...base, canRescan: false })).not.toContain("/rescan");
+    expect(renderKevBlock(base)).not.toContain("/rescan");
+  });
+});

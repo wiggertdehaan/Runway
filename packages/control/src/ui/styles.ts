@@ -309,6 +309,7 @@ button.ghost:hover{background:var(--bg2);opacity:1}
 /* The card lives inside .tabs, whose label rules (tab buttons) must not reach it. */
 .tabs .swr label,.tabs label.sw{padding:0;border:0;color:var(--tx);font-size:inherit;font-weight:inherit;text-align:left;flex:none;transition:none}
 .tabs .swr label:hover{color:var(--tx)}
+.kev-rescan{display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin:0.75rem 0 0}
 .swb{font-size:0.8rem;padding:0.3rem 0.7rem}
 .swfoot{padding:0.7rem 1rem;border-top:1px solid var(--line);margin:0;font-size:var(--fs-s)}
 @media(max-width:600px){.maint-h{flex-direction:column}.swr{padding:0.85rem}}

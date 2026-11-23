@@ -42,6 +42,26 @@ export function rebuildBlockedReason(app: { image_tag: string | null }): string 
 }
 
 /**
+ * Who may start a rescan of an app: the same people as for a rebuild, an
+ * admin or the user who created the app; an app without an owner is
+ * admin-only. Kept as its own function so the two rights can diverge
+ * without a hidden coupling.
+ */
+export function mayRescan(
+  user: { username: string; role: string },
+  app: { created_by: string | null }
+): boolean {
+  return mayRebuild(user, app);
+}
+
+/** Why a rescan cannot start for this app right now, or null when it can. */
+export function rescanBlockedReason(app: { image_tag: string | null; status: string }): string | null {
+  if (!app.image_tag) return "Deploy the app once first: a rescan needs a built image.";
+  if (app.status !== "running") return "A rescan needs a running app.";
+  return null;
+}
+
+/**
  * Text an owner can paste into their coding agent. It names the app and
  * the CVEs and tells the agent what "fixed" means, so the owner does not
  * have to understand the vulnerability to act on it.
@@ -172,6 +192,8 @@ export interface KevBlockInput {
   canRebuild: boolean;
   /** Why not, shown instead of the button. */
   rebuildDisabledReason: string | null;
+  /** May this user start a rescan right now? Omitted = no button. */
+  canRescan?: boolean;
   /** Admins can grant more time; everybody else is told who to ask. */
   isAdmin: boolean;
   csrf?: string;
@@ -193,6 +215,9 @@ export function renderKevBlock(i: KevBlockInput): string {
   const rebuild = i.canRebuild
     ? `<form method="POST" action="/apps/${encodeURIComponent(i.app.id)}/rebuild" onsubmit="return confirm('Rebuild this app from source without cache? It can take a few minutes.')"><button type="submit">Rebuild now</button></form>`
     : `<p class="meta">${esc(i.rebuildDisabledReason ?? "You cannot rebuild this app.")}</p>`;
+  const rescan = i.canRescan
+    ? `<form method="POST" action="/apps/${encodeURIComponent(i.app.id)}/rescan" class="kev-rescan"><span class="meta">Already deployed a fix? Check it now instead of waiting for the daily scan.</span> <button type="submit" class="ghost">Rescan now</button></form>`
+    : "";
   const prompt = agentPrompt(i.app, i.kev.cves);
   const more = i.isAdmin
     ? `Grant an exemption under <a href="#quarantine">Security</a>. It needs a reason, is kept in the audit log and has an end date.`
@@ -211,6 +236,7 @@ export function renderKevBlock(i: KevBlockInput): string {
         <button type="button" class="ghost" data-copy="${esc(prompt)}" onclick="copyText(this)">Copy prompt</button></div></li>
       <li><strong>Get more time.</strong> ${more}</li>
     </ol>
+    ${rescan}
   </section>`;
 }
 
