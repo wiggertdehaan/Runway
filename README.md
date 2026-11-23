@@ -280,6 +280,14 @@ by field before the model sees it; text that came from an app stays fenced as
 untrusted. A server that is slow, down or rate limiting (HTTP 429) is
 reported on its own and does not stop the others.
 
+**Telling your Runways apart.** An administrator can give each server a colour
+and a short name under *Settings, Instance identity*. The colour fills the logo
+square and the browser-tab icon, the name shows next to "Runway", in the page
+title and on the login page, so you see which server you are on, also before
+signing in. `runway_list_runways` shows both per server (`instance`); it is a
+label, nothing is routed or decided on it. The public `/instance.json` has
+exactly those two fields.
+
 ## Features
 
 ### Environment variables

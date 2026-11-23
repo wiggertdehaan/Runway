@@ -697,6 +697,33 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 - Not built on purpose: rotating an app key from the MCP (the new key would be
   shown to the model).
 
+### Instance identity is a colour and a name, for display only
+- `instance/identity.ts` (pure helpers + `getInstanceIdentity()` over the
+  settings keys `instance_color`, `instance_name`; no migration). The colour
+  is `#rrggbb`, the name at most 24 characters from a fixed set (letters,
+  digits, space, `. _ & + ' ( ) -`; `checkName`). Both are validated when
+  saved (`POST /settings/instance-identity`, admin, CSRF, audit
+  `instance_identity_changed`) AND when read, so a hand-edited row can never
+  put markup or a CSS value into a page: a bad stored value reads as "not set".
+- It reaches the page through `layout()` only: the logo square
+  (`ui/instance-card.ts` `renderMark`, icon white or near-black by
+  `iconColorFor`), the name under "Runway", a 3px colour line on the sidebar,
+  `pageTitle()` ("Overview · Runway WSV"), the favicon link and the login/setup
+  heading (`authLayout`). Without a colour the page is the standard look
+  (inline favicon, no line, no name).
+- Public, no session: `GET /favicon.svg` (the paper plane in the colour,
+  `Cache-Control: public, max-age=300`; the `?v=<colour>` only busts caches) and
+  `GET /instance.json` (exactly `{name, color}`, nothing else, no CORS). The
+  same pair is `instance` on `GET /api/v1/me`. Keep it to those two fields: the
+  endpoint is readable by anyone.
+- The MCP client shows it in `runway_list_runways` (`cleanInstance` in
+  `packages/mcp/src/multi.ts` rebuilds it: `#rrggbb` only, name only if it
+  passes the same character set). It never routes or decides on it, and the
+  local config name stays the key. The public fetch sends no credential.
+- The eight swatches are mid-tones that stay at least 3:1 against both
+  sidebars (`identity.test.ts` measures it); a custom colour is allowed and
+  only gets a hint when it is faint.
+
 ## Migrations
 
 `packages/control/src/db/index.ts` runs `migrate()` on startup. It
