@@ -116,6 +116,8 @@ import {
   KEEP_IMAGE_VERSIONS_CEILING,
 } from "../db/settings.js";
 import { runCachePrune } from "../deploy/cache-pruner.js";
+import { peopleError, peopleSummary, renderPersonCard, type PersonRow } from "../ui/people.js";
+import { renderEmptyState } from "../ui/empty-state.js";
 import {
   RebuildBusyError,
   activeRebuildRun,
@@ -356,9 +358,9 @@ webRoutes.get("/setup", (c) => {
       <h1>Welcome to Runway</h1>
       <p class="hint">Create the first admin account and configure your base domain.</p>
       <form method="POST" action="/setup">
-        <input type="text" name="username" placeholder="Username" required autofocus />
-        <input type="password" name="password" placeholder="Password (min 8 characters)" minlength="8" required />
-        <input type="text" name="base_domain" placeholder="Base domain (optional, e.g. runway.example.com)" />
+        <input type="text" name="username" placeholder="Username" aria-label="Username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus />
+        <input type="password" name="password" placeholder="Password (min 8 characters)" aria-label="Password" autocomplete="new-password" minlength="8" required />
+        <input type="text" name="base_domain" placeholder="Base domain (optional, e.g. runway.example.com)" aria-label="Base domain" autocomplete="off" />
         <p class="hint">
           Point a wildcard DNS record <span class="key">*.your-domain</span> to this server.
           Each app will get its own subdomain automatically.
@@ -439,10 +441,11 @@ webRoutes.get("/login", (c) => {
       ${errorMsg}
       ${oauthError}
       <form method="POST" action="/login">
-        <input type="text" name="username" placeholder="Username" required autofocus />
-        <input type="password" name="password" placeholder="Password" required />
+        <input type="text" name="username" placeholder="Username" aria-label="Username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus />
+        <input type="password" name="password" placeholder="Password" aria-label="Password" autocomplete="current-password" required />
         <button type="submit">Sign in</button>
       </form>
+      <p class="hint" style="margin-top:1rem;text-align:center">Trouble signing in? Ask your administrator.</p>
       ${oauthButtons}
     `,
       csrfField(c)
@@ -799,23 +802,7 @@ async function renderAppsLive(
 
   const body =
     apps.length === 0
-      ? `<div class="card" style="text-align:center;padding:3rem 2rem">
-          <h2 style="margin-bottom:1rem">Get started</h2>
-          <p class="hint" style="max-width:500px;margin:0 auto 1.5rem">
-            Create your first app to get an API key. Then open your project in
-            <a href="https://claude.ai/code" target="_blank" style="color:var(--tx)">Claude Code</a>
-            and paste the deploy instruction — Runway handles the rest.
-          </p>
-          <p style="margin-bottom:1.5rem">
-            <strong>1.</strong> Click <em>"+ New app"</em> above<br/>
-            <strong>2.</strong> Copy the deploy instruction<br/>
-            <strong>3.</strong> Paste it in Claude Code
-          </p>
-          <p class="meta">
-            Need help? Check the <a href="https://github.com/wiggertdehaan/Runway#deploying-an-app" target="_blank" style="color:var(--tx)">deploy guide</a>
-            or the <a href="${escapeHtml(dashboardDomain ? "https://" + dashboardDomain + "/llms.txt" : "/llms.txt")}" target="_blank" style="color:var(--tx)">API docs</a>.
-          </p>
-        </div>`
+      ? renderEmptyState({ dashboardDomain })
       : `<table class="apps-tbl">
           <thead><tr><th>App</th><th>Status</th><th>Address</th><th>Runtime</th><th>Traffic, 7 days</th><th><span class="sr-only">Actions</span></th></tr></thead>
           <tbody>${appRows}</tbody>
@@ -2173,79 +2160,33 @@ webRoutes.get("/users", (c) => {
   const users = listUsers();
   const error = c.req.query("error");
   const adminCount = countAdmins();
-
-  const rows = users
-    .map((u) => {
-      const twofa = isTotpEnabled(u)
-        ? '<span class="badge badge-running">2FA on</span>'
-        : '<span class="badge badge-stopped">2FA off</span>';
-      const roleBadge =
-        u.role === "admin"
-          ? '<span class="badge badge-running">admin</span>'
-          : '<span class="badge badge-stopped">member</span>';
-      // Never let the current admin demote themselves or the last
-      // remaining admin — doing so would lock user management out.
-      const isLastAdmin = u.role === "admin" && adminCount <= 1;
-      const canToggleRole = u.id !== current.id && !isLastAdmin;
-      const roleToggle = canToggleRole
-        ? `<form method="POST" action="/users/${encodeURIComponent(u.id)}/role" style="margin:0">
-             <input type="hidden" name="role" value="${u.role === "admin" ? "member" : "admin"}" />
-             <button type="submit" class="ghost">${u.role === "admin" ? "Demote to member" : "Promote to admin"}</button>
-           </form>`
-        : "";
-      const actions =
-        u.id === current.id
-          ? '<span class="meta">you</span>'
-          : `<div class="flex" style="gap:0.5rem;margin:0;flex-wrap:wrap">
-               ${roleToggle}
-               ${
-                 isTotpEnabled(u)
-                   ? `<form method="POST" action="/users/${encodeURIComponent(u.id)}/2fa/reset" style="margin:0" class="flex">
-                        <input type="text" name="code" inputmode="numeric" placeholder="Your code" style="width:9rem" required />
-                        <button type="submit" class="ghost">Reset 2FA</button>
-                      </form>`
-                   : ""
-               }
-               <form method="POST" action="/users/${encodeURIComponent(u.id)}/delete" style="margin:0">
-                 <button class="danger" type="submit">Delete</button>
-               </form>
-             </div>`;
-      return `
-    <div class="card">
-      <div class="flex between">
-        <div>
-          <div class="flex" style="gap:0.75rem;flex-wrap:wrap">
-            <h2>${escapeHtml(u.username)}</h2>
-            ${roleBadge}
-            ${twofa}
-          </div>
-          <p class="meta" style="margin-top:0.25rem">Created ${escapeHtml(u.created_at)}</p>
-        </div>
-        ${actions}
-      </div>
-    </div>
-  `;
-    })
-    .join("");
+  const allApps = listApps();
+  const ctx = { currentUserId: current.id, adminCount };
+  const people: PersonRow[] = users.map((u) => ({
+    id: u.id,
+    username: u.username,
+    role: u.role === "admin" ? "admin" : "member",
+    totpEnabled: isTotpEnabled(u),
+    createdAt: u.created_at,
+    appNames: allApps
+      .filter((a) => a.created_by === u.username)
+      .map((a) => a.name ?? a.id),
+  }));
+  const rows = people.map((p) => renderPersonCard(p, ctx)).join("");
 
   return c.html(
     layout(
       "Users",
       `
       <h1>Users</h1>
-      ${
-        error === "last_admin"
-          ? '<div class="error">Refused: that would leave zero admins. Promote another user first.</div>'
-          : error === "needs_2fa"
-            ? '<div class="error">Enable 2FA on your own account before resetting it for others.</div>'
-            : error
-              ? '<div class="error">Invalid 2FA code. Please try again.</div>'
-              : ""
-      }
-      <form method="POST" action="/users">
+      <p class="hint">${escapeHtml(peopleSummary(people))}</p>
+      ${peopleError(error)}
+      <form method="POST" action="/users" class="card">
+        <h2>Add a user</h2>
+        <p class="hint">They sign in with this password (min 8 characters). Share it with them privately and ask them to change it on their Account page and turn on 2FA.</p>
         <div class="flex">
-          <input type="text" name="username" placeholder="Username" required />
-          <input type="password" name="password" placeholder="Password (min 8)" minlength="8" required />
+          <input type="text" name="username" placeholder="Username" aria-label="Username" autocomplete="off" autocapitalize="none" spellcheck="false" required />
+          <input type="password" name="password" placeholder="Temporary password" aria-label="Temporary password (min 8 characters)" autocomplete="new-password" minlength="8" required />
           <button type="submit">Add user</button>
         </div>
       </form>
@@ -2420,9 +2361,9 @@ webRoutes.get("/settings", (c) => {
           </div>
 
           <div class="card" id="notifications">
-            <h2>Deploy notifications</h2>
+            <h2>Notifications</h2>
             <p class="hint" style="margin:0.5rem 0 1rem">
-              Webhook URL called on deploy failure. Works with Slack, Discord, ntfy.
+              Webhook URL called on deploy failures, rebuild results and security events (KEV quarantine, automatic updates). Works with Slack, Discord, ntfy.
             </p>
             <form method="POST" action="/settings/webhook">
               <div class="flex">
@@ -2488,7 +2429,7 @@ webRoutes.get("/settings", (c) => {
               </div>
             </form>
             <form method="POST" action="/settings/prune-build-cache" style="margin-top:0.75rem">
-              <button type="submit" style="width:auto">Prune build cache now</button>
+              <button type="submit" class="ghost" style="width:auto" onclick="return confirm(\'Prune the build cache? The next builds will be slower while it refills.\')">Prune build cache now</button>
               <span class="hint" style="margin-left:0.75rem">Runs <code>buildctl prune --keep-duration 168h</code>.</span>
             </form>
           </div>
