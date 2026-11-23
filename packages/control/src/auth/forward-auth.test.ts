@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideForwardAuth, normalizeHost } from "./forward-auth.js";
+import { decideForwardAuth, normalizeHost, safeAppPath, takeTicket, withTicket, TICKET_PARAM } from "./forward-auth.js";
 
 const app = { id: "a1", domain: "shop.apps.example.com", sso_enabled: 1 };
 const allowAll = () => true;
@@ -39,10 +39,12 @@ describe("decideForwardAuth", () => {
     });
   });
 
-  it("denies the custom domain instead of looping through login", () => {
+  it("treats the custom domain like the app's own host (host-only app cookie makes that safe)", () => {
     const d = decideForwardAuth({ ...base, host: "www.example.test" });
-    expect(d).toMatchObject({ action: "deny", status: 403 });
-    expect((d as { message: string }).message).toMatch(/custom domain/i);
+    expect(d).toEqual({ action: "allow", user: "sam@corp.example" });
+    expect(decideForwardAuth({ ...base, host: "www.example.test", hasSession: false, user: undefined })).toEqual({
+      action: "login",
+    });
   });
 
   it("asks anonymous visitors to log in, but only on the app's own host", () => {
@@ -57,5 +59,41 @@ describe("decideForwardAuth", () => {
 
   it("compares hosts case-insensitively", () => {
     expect(decideForwardAuth({ ...base, host: "SHOP.apps.example.com" }).action).toBe("allow");
+  });
+});
+
+describe("safeAppPath", () => {
+  it("keeps plain absolute paths with a query", () => {
+    expect(safeAppPath("/")).toBe("/");
+    expect(safeAppPath("/a/b?x=1&y=2")).toBe("/a/b?x=1&y=2");
+  });
+  it("turns anything that could leave the host into /", () => {
+    for (const bad of [
+      "https://evil.example/",
+      "//evil.example/",
+      "/\\evil.example",
+      "javascript:alert(1)",
+      "evil",
+      "/a\r\nSet-Cookie: x=1",
+      "/" + "a".repeat(3000),
+      "",
+      undefined,
+      null,
+    ]) {
+      expect(safeAppPath(bad as string | undefined | null)).toBe("/");
+    }
+  });
+});
+
+describe("ticket in the URL", () => {
+  it("adds and removes the ticket without touching the rest of the query", () => {
+    const withIt = withTicket("/dash?tab=2", "T1");
+    expect(withIt).toBe(`/dash?tab=2&${TICKET_PARAM}=T1`);
+    expect(takeTicket(withIt)).toEqual({ uri: "/dash?tab=2", ticket: "T1" });
+    expect(takeTicket(withTicket("/dash", "T2"))).toEqual({ uri: "/dash", ticket: "T2" });
+  });
+  it("finds no ticket where there is none", () => {
+    expect(takeTicket("/dash?tab=2")).toEqual({ uri: "/dash?tab=2", ticket: null });
+    expect(takeTicket("/")).toEqual({ uri: "/", ticket: null });
   });
 });

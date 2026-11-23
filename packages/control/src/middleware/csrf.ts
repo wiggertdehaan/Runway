@@ -2,7 +2,12 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { Context, Next } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 
-const CSRF_COOKIE = "runway_csrf";
+// Over HTTPS the cookie is `__Host-` prefixed so a subdomain (an app) cannot
+// plant its own value for the dashboard host (cookie tossing defeats the
+// double-submit check otherwise).
+function csrfCookieName(c: Context): string {
+  return isSecureRequest(c) ? "__Host-runway_csrf" : "runway_csrf";
+}
 const CSRF_FIELD = "_csrf";
 const TOKEN_BYTES = 32;
 
@@ -17,10 +22,10 @@ function isSecureRequest(c: Context): boolean {
 }
 
 export function getCsrfToken(c: Context): string {
-  let token = getCookie(c, CSRF_COOKIE);
+  let token = getCookie(c, csrfCookieName(c));
   if (!token) {
     token = generateToken();
-    setCookie(c, CSRF_COOKIE, token, {
+    setCookie(c, csrfCookieName(c), token, {
       httpOnly: true,
       sameSite: "Lax",
       path: "/",
@@ -74,7 +79,7 @@ export async function verifyCsrf(c: Context, next: Next) {
     return next();
   }
 
-  const cookieToken = getCookie(c, CSRF_COOKIE);
+  const cookieToken = getCookie(c, csrfCookieName(c));
   if (!cookieToken) {
     return c.text("CSRF validation failed", 403);
   }

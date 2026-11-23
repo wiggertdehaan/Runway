@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { html, raw } from "hono/html";
-import { deleteCookie, setCookie } from "hono/cookie";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import { HTMX_INTEGRITY, HTMX_PATH } from "./assets.js";
 import { APP_CSS } from "../ui/styles.js";
@@ -86,6 +86,7 @@ import {
   ROLES,
 } from "../db/users.js";
 import { safeReturn } from "./oauth.js";
+import { safeReturnTo } from "../auth/oauth-access.js";
 import { parseAccessEntry } from "../auth/oauth-access.js";
 import { addAccess, listAccess, removeAccess } from "../db/oauth-access.js";
 import { createSession, deleteAllUserSessions, deleteSession, getSessionUser } from "../db/sessions.js";
@@ -141,12 +142,17 @@ import {
   type RebuildRun,
 } from "../db/rebuild-runs.js";
 import {
-  SESSION_COOKIE,
   requireAdmin,
   requireAppAccess,
   requireSession,
   type WebEnv,
 } from "../middleware/session.js";
+import {
+  clearSessionCookie,
+  expireLegacySessionCookie,
+  readSessionToken,
+  setSessionCookie,
+} from "../middleware/cookies.js";
 import { logAudit, getRecentAuditEntries } from "../db/audit.js";
 import { updateApp } from "../db/apps.js";
 import { getLatestDeployWithScan, getLatestDeploys, parseBaseImages } from "../db/deploys.js";
@@ -213,19 +219,14 @@ function isSecureRequest(c: Context): boolean {
 }
 
 const PREAUTH_COOKIE = "runway_preauth";
+// Where to go after a successful sign-in (the SSO handshake sends people to
+// /login first). A short host-only cookie, relative paths only.
+const LOGIN_RETURN_COOKIE = "runway_login_return";
 
-function sessionCookieOptions(c: Context) {
-  const baseDomain = getSetting("base_domain");
-  return {
-    httpOnly: true,
-    sameSite: "Lax" as const,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30,
-    secure: isSecureRequest(c),
-    // Set domain-wide cookie when base_domain is configured so the
-    // session is readable by forward-auth on app subdomains.
-    ...(baseDomain ? { domain: `.${baseDomain}` } : {}),
-  };
+function takeLoginReturn(c: Context): string {
+  const raw = getCookie(c, LOGIN_RETURN_COOKIE);
+  if (raw !== undefined) deleteCookie(c, LOGIN_RETURN_COOKIE, { path: "/", secure: isSecureRequest(c) });
+  return safeReturnTo(raw, () => false);
 }
 
 function preauthCookieOptions(c: Context) {
@@ -406,7 +407,7 @@ webRoutes.post("/setup", async (c) => {
   }
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "user_created", {
     targetUserId: user.id,
     targetUsername: user.username,
@@ -416,6 +417,17 @@ webRoutes.post("/setup", async (c) => {
 
 webRoutes.get("/login", (c) => {
   if (countUsers() === 0) return c.redirect("/setup");
+  expireLegacySessionCookie(c);
+  const wanted = safeReturnTo(c.req.query("return_to"), () => false);
+  if (wanted !== "/") {
+    setCookie(c, LOGIN_RETURN_COOKIE, wanted, {
+      httpOnly: true,
+      sameSite: "Lax",
+      path: "/",
+      maxAge: 5 * 60,
+      secure: isSecureRequest(c),
+    });
+  }
   const error = c.req.query("error");
   const locked = c.req.query("locked");
   const ip = getClientIp(c);
@@ -500,9 +512,9 @@ webRoutes.post("/login", async (c) => {
   }
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "login");
-  return c.redirect("/");
+  return c.redirect(takeLoginReturn(c));
 });
 
 // ── Second factor ────────────────────────────────────────
@@ -583,9 +595,9 @@ webRoutes.post("/login/2fa", async (c) => {
   deleteCookie(c, PREAUTH_COOKIE, { path: "/" });
 
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
   logAudit(user.id, user.username, "login_2fa");
-  return c.redirect("/");
+  return c.redirect(takeLoginReturn(c));
 });
 
 webRoutes.post("/login/2fa/cancel", (c) => {
@@ -596,9 +608,9 @@ webRoutes.post("/login/2fa/cancel", (c) => {
 });
 
 webRoutes.post("/logout", (c) => {
-  const token = getCookieValue(c, SESSION_COOKIE);
+  const token = readSessionToken(c);
   if (token) deleteSession(token);
-  deleteCookie(c, SESSION_COOKIE, { path: "/" });
+  clearSessionCookie(c);
   return c.redirect("/login");
 });
 
@@ -1721,7 +1733,7 @@ webRoutes.get("/apps/:id", async (c) => {
             <div class="card" id="sso">
               <h2>SSO protection</h2>
               <p class="hint" style="margin:0.5rem 0 1rem">
-                Protect this app with Single Sign-On via the subdomain.${app.custom_domain ? ' <strong style="color:var(--status-warn)">SSO does not work on a custom domain: visitors of the custom domain are refused until you turn SSO off or remove the custom domain.</strong>' : ""}${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
+                Protect this app with Single Sign-On, on its Runway address and on its custom domain.${app.sso_enabled && app.basic_auth_enabled ? ' <strong style="color:var(--status-warn)">SSO takes precedence over basic auth.</strong>' : ""}
               </p>
               <form method="POST" action="/apps/${encodeURIComponent(app.id)}/sso">
                 <label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
@@ -2847,7 +2859,7 @@ webRoutes.post("/apps/:id/auto-rebuild", async (c) => {
 // calls must carry `X-Requested-With: runway`, which a cross-site form
 // cannot set; the session cookie is SameSite=Lax as a second layer.
 async function adminApi(c: any, next: any) {
-  const token = getCookieValue(c, SESSION_COOKIE);
+  const token = readSessionToken(c);
   const user = token ? getSessionUser(token) : undefined;
   if (!user) return c.json({ error: "Not signed in" }, 401);
   if (!isAdmin(user)) return c.json({ error: "Admin only" }, 403);
@@ -3740,10 +3752,10 @@ webRoutes.post("/account/password", async (c) => {
   // fresh one so the current tab stays signed in. Other devices are
   // logged out on their next request.
   deleteAllUserSessions(user.id);
-  const oldToken = getCookieValue(c, SESSION_COOKIE);
+  const oldToken = readSessionToken(c);
   if (oldToken) deleteSession(oldToken);
   const session = createSession(user.id);
-  setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+  setSessionCookie(c, session.token);
 
   logAudit(user.id, user.username, "password_changed", {
     targetUserId: user.id,

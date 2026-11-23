@@ -1,11 +1,9 @@
 import type { Context, Next } from "hono";
-import { getCookie } from "hono/cookie";
+import { readSessionToken } from "./cookies.js";
 import { getSessionUser } from "../db/sessions.js";
 import { countUsers, isAdmin } from "../db/users.js";
 import type { User } from "../db/users.js";
 import { getApp, isAppOwner } from "../db/apps.js";
-
-export const SESSION_COOKIE = "runway_session";
 
 export type WebEnv = { Variables: { user: User } };
 
@@ -19,7 +17,7 @@ export async function requireSession(c: Context<WebEnv>, next: Next) {
     return c.redirect("/setup");
   }
 
-  const token = getCookie(c, SESSION_COOKIE);
+  const token = readSessionToken(c);
   if (!token) return c.redirect("/login");
 
   const user = getSessionUser(token);

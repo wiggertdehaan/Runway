@@ -23,10 +23,25 @@ import {
 import { decideOAuthLogin, safeReturnTo } from "../auth/oauth-access.js";
 import { isAccessAllowed, consumeInvite } from "../db/oauth-access.js";
 import { createSession, getSessionUser } from "../db/sessions.js";
+import { createSsoTicket, redeemSsoTicket, createSsoSession, getSsoSession } from "../db/sso-sessions.js";
+import { getUser } from "../db/users.js";
+import {
+  readSessionToken,
+  setSessionCookie,
+  ssoCookieName,
+  ssoCookieOptions,
+} from "../middleware/cookies.js";
 import { getAppByDomain } from "../db/apps.js";
 import { isEmailAllowedForApp } from "../db/app-emails.js";
 import { logAudit } from "../db/audit.js";
-import { decideForwardAuth, normalizeHost, type ForwardAuthDecision } from "../auth/forward-auth.js";
+import {
+  decideForwardAuth,
+  normalizeHost,
+  safeAppPath,
+  takeTicket,
+  withTicket,
+  type ForwardAuthDecision,
+} from "../auth/forward-auth.js";
 
 export const oauthRoutes = new Hono();
 
@@ -34,7 +49,6 @@ const STATE_COOKIE = "runway_oauth_state";
 const NONCE_COOKIE = "runway_oauth_nonce";
 const PKCE_COOKIE = "runway_oauth_pkce";
 const RETURN_COOKIE = "runway_oauth_return";
-const SESSION_COOKIE = "runway_session";
 
 function dashboardOrigin(): string {
   const domain = process.env.DASHBOARD_DOMAIN;
@@ -63,18 +77,6 @@ function isSecureRequest(c: { req: { header: (name: string) => string | undefine
     c.req.header("x-forwarded-proto") === "https" ||
     dashboardOrigin().startsWith("https")
   );
-}
-
-function sessionCookieOptions(c: { req: { header: (name: string) => string | undefined } }) {
-  const baseDomain = getSetting("base_domain");
-  return {
-    httpOnly: true,
-    sameSite: "Lax" as const,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30,
-    secure: isSecureRequest(c),
-    ...(baseDomain ? { domain: `.${baseDomain}` } : {}),
-  };
 }
 
 function getProviderConfig(
@@ -242,7 +244,7 @@ function callbackHandler(provider: OAuthProvider) {
 
     // Create session
     const session = createSession(user.id);
-    setCookie(c, SESSION_COOKIE, session.token, sessionCookieOptions(c));
+    setSessionCookie(c, session.token);
 
     logAudit(user.id, user.username, "login_oauth", { detail: `provider=${provider.name}` });
 
@@ -258,23 +260,59 @@ oauthRoutes.get("/auth/google/callback", callbackHandler(GOOGLE));
 oauthRoutes.get("/auth/microsoft/callback", callbackHandler(MICROSOFT));
 
 // ── Forward-auth verify ─────────────────────────────────
+//
+// S02: an app host has its own sign-in, separate from the dashboard session.
+//   1. No app cookie: send the visitor to the dashboard (/sso/start), where
+//      the host-only dashboard cookie proves who they are.
+//   2. The dashboard hands back a one-time ticket in the URL of THIS host.
+//   3. Here the ticket is swapped for a cookie that only this host's
+//      forward-auth accepts, and the URL is cleaned.
+// The dashboard cookie is never sent to an app, and the app cookie is no use
+// on the dashboard.
 
 oauthRoutes.get("/auth/verify", (c) => {
   const forwardedHost = c.req.header("x-forwarded-host");
   const forwardedUri = c.req.header("x-forwarded-uri") ?? "/";
   const forwardedProto = c.req.header("x-forwarded-proto") ?? "https";
+  const secure = forwardedProto.split(",")[0]?.trim() === "https";
+  const host = normalizeHost(forwardedHost);
+  const { uri: cleanUri, ticket } = takeTicket(safeAppPath(forwardedUri));
 
   // Fail closed: any error while deciding (database, parsing) is a "no".
   let decision: ForwardAuthDecision;
   try {
-    const host = normalizeHost(forwardedHost);
     const app = host ? getAppByDomain(host) : undefined;
-    const token = getCookie(c, SESSION_COOKIE);
+
+    if (ticket !== null && app && app.sso_enabled) {
+      const grant = redeemSsoTicket(ticket, host);
+      const user = grant && grant.appId === app.id ? getUser(grant.userId) : undefined;
+      if (!grant || !user || !user.email || !isEmailAllowedForApp(app.id, user.email)) {
+        // Used, expired, for another host, or no longer allowed. No bounce
+        // back to the dashboard: with cookies blocked that would loop.
+        return c.text(
+          "This sign-in link has expired or was already used. Open the app again to sign in.",
+          403
+        );
+      }
+      const token = createSsoSession({
+        host,
+        appId: app.id,
+        userId: user.id,
+        parentToken: grant.parentToken,
+      });
+      setCookie(c, ssoCookieName(secure), token, ssoCookieOptions(secure));
+      logAudit(user.id, user.username, "sso_login", { detail: `app=${app.id} host=${host}` });
+      return c.redirect(`${forwardedProto.split(",")[0]?.trim() || "https"}://${host}${cleanUri}`, 302);
+    }
+
+    const raw = getCookie(c, ssoCookieName(secure));
+    const grant = raw && app ? getSsoSession(raw, host) : undefined;
+    const user = grant && app && grant.appId === app.id ? getUser(grant.userId) : undefined;
     decision = decideForwardAuth({
       host,
       app,
-      hasSession: !!token,
-      user: token ? getSessionUser(token) : undefined,
+      hasSession: !!user,
+      user,
       emailAllowed: isEmailAllowedForApp,
     });
   } catch (err) {
@@ -284,19 +322,41 @@ oauthRoutes.get("/auth/verify", (c) => {
 
   if (decision.action === "deny") return c.text(decision.message, decision.status);
   if (decision.action === "login") {
-    return redirectToLogin(c, forwardedProto, normalizeHost(forwardedHost), forwardedUri);
+    return c.redirect(ssoStartUrl(host, cleanUri), 302);
   }
   c.header("X-Forwarded-User", decision.user);
   return c.text("OK", 200);
 });
 
-function redirectToLogin(
-  c: any,
-  proto: string,
-  host: string,
-  uri: string
-) {
-  const returnTo = `${proto}://${host}${uri}`;
-  const loginUrl = `${dashboardOrigin()}/login?return_to=${encodeURIComponent(returnTo)}`;
-  return c.redirect(loginUrl, 302);
+function ssoStartUrl(host: string, uri: string): string {
+  return `${dashboardOrigin()}${ssoStartPath(host, uri)}`;
 }
+
+function ssoStartPath(host: string, uri: string): string {
+  return `/sso/start?host=${encodeURIComponent(host)}&uri=${encodeURIComponent(uri)}`;
+}
+
+/**
+ * Dashboard side of the handshake. Needs the host-only dashboard session; the
+ * target must be a known SSO app host (its Runway address or its custom
+ * domain), which is what keeps this from being an open redirect.
+ */
+oauthRoutes.get("/sso/start", (c) => {
+  const host = normalizeHost(c.req.query("host"));
+  const uri = safeAppPath(c.req.query("uri"));
+  const app = host ? getAppByDomain(host) : undefined;
+  if (!app || !app.sso_enabled) return c.text("Forbidden", 403);
+
+  const token = readSessionToken(c);
+  const user = token ? getSessionUser(token) : undefined;
+  if (!token || !user) {
+    return c.redirect(`/login?return_to=${encodeURIComponent(ssoStartPath(host, uri))}`, 302);
+  }
+  if (!user.email || !isEmailAllowedForApp(app.id, user.email)) {
+    return c.text("Forbidden: your email is not in the allowlist for this app", 403);
+  }
+
+  const ticket = createSsoTicket({ host, appId: app.id, userId: user.id, dashboardToken: token });
+  const scheme = dashboardOrigin().startsWith("https") ? "https" : "http";
+  return c.redirect(`${scheme}://${host}${withTicket(uri, ticket)}`, 302);
+});

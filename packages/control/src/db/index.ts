@@ -32,6 +32,29 @@ export function migrate() {
 
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
+    -- S02: sign-ins of SSO app hosts, separate from the dashboard session.
+    CREATE TABLE IF NOT EXISTS sso_tickets (
+      hash TEXT PRIMARY KEY,
+      host TEXT NOT NULL,
+      app_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      parent_token TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sso_tickets_parent ON sso_tickets(parent_token);
+
+    CREATE TABLE IF NOT EXISTS sso_sessions (
+      hash TEXT PRIMARY KEY,
+      host TEXT NOT NULL,
+      app_id TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      parent_token TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sso_sessions_parent ON sso_sessions(parent_token);
+    CREATE INDEX IF NOT EXISTS idx_sso_sessions_user ON sso_sessions(user_id);
+
     CREATE TABLE IF NOT EXISTS preauth_sessions (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -485,4 +508,27 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_periodic_scans_app_recent
       ON app_periodic_scans(app_id, created_at DESC);
   `);
+
+  // S02: until now the session cookie was set on `.{base_domain}`, so every
+  // deployed app received a valid dashboard session. Those tokens are
+  // therefore treated as exposed: once, on the first start of this version,
+  // every dashboard session is ended. Users sign in again (one time). The
+  // marker keeps later starts from signing everyone out again. A fresh
+  // install has no sessions, so this is a no-op there.
+  const marker = db
+    .prepare(`SELECT 1 AS done FROM settings WHERE key = 'sessions_host_only_v1'`)
+    .get();
+  if (!marker) {
+    db.exec("BEGIN");
+    try {
+      db.exec(`DELETE FROM sessions`);
+      db.prepare(
+        `INSERT INTO settings (key, value, updated_at) VALUES ('sessions_host_only_v1', '1', datetime('now'))`
+      ).run();
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
 }
