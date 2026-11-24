@@ -40,4 +40,4 @@ Once a fix is released, we will:
 
 ## Security Design Notes
 
-For details about Runway's security architecture (password hashing, CSRF protection, API key model, Trivy scanning, etc.), see the [Security section in the README](README.md#security).
+For details about Runway's security architecture (password hashing, CSRF protection, API key model, Trivy scanning, etc.), see [docs/security.md](docs/security.md).

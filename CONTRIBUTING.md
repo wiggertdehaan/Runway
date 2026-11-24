@@ -31,8 +31,11 @@ Open an issue using the **Feature Request** template. Describe the problem you'r
    ```bash
    pnpm install
    pnpm typecheck
+   pnpm test                          # on macOS some tar tests fail, see below
    pnpm --filter @runway/control dev
    ```
+   On macOS, run the whole suite in a Linux container instead; the command is in
+   [docs/architecture.md](docs/architecture.md#working-on-runway).
 4. Commit with a clear message (we follow [Conventional Commits](https://www.conventionalcommits.org/)):
    - `feat: add invite flow for users`
    - `fix: correct health check interval`
@@ -45,7 +48,7 @@ Open an issue using the **Feature Request** template. Describe the problem you'r
 | Branch | Purpose |
 |--------|---------|
 | `main` | Stable, production-ready releases |
-| `develop` | Active development — target this for PRs |
+| `develop` | Active development: target this for PRs |
 | `feature/*` | Individual features branched from `develop` |
 
 ## Development Setup
