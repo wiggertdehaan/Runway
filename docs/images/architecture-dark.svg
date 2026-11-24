@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="960" height="520" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">Runway architecture</title><desc id="d">A browser and a coding agent reach the Traefik gateway over HTTPS. Traefik routes to the Runway control plane and to the deployed apps. Control builds images in BuildKit and runs app containers through the Docker socket, one network per app.</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6b6b6b"/></marker><marker id="ad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#9a9a9a"/></marker></defs>
+<rect x="545" y="30" width="390" height="460" rx="14" fill="#101010" stroke="#3d3d3d" stroke-width="1.25"/>
+<text x="565" y="56" font-size="12" font-weight="600" letter-spacing="0.6" fill="#b3b3b3">YOUR SERVER</text>
+<text x="30" y="56" font-size="12" font-weight="600" letter-spacing="0.6" fill="#b3b3b3">YOU</text>
+<rect x="30" y="80" width="190" height="76" rx="10" fill="#161616" stroke="#3d3d3d" stroke-width="1.25"/><text x="125.0" y="106" text-anchor="middle" font-size="15" font-weight="600" fill="#f2f2f2">Browser</text><text x="125.0" y="126" text-anchor="middle" font-size="12" fill="#b3b3b3">Dashboard, sign-in, SSO</text>
+<rect x="30" y="205" width="190" height="100" rx="10" fill="#161616" stroke="#3d3d3d" stroke-width="1.25"/><text x="125.0" y="231" text-anchor="middle" font-size="15" font-weight="600" fill="#f2f2f2">Coding agent</text><text x="125.0" y="251" text-anchor="middle" font-size="12" fill="#b3b3b3">Claude Code, Claude Desktop</text><text x="125.0" y="268" text-anchor="middle" font-size="12" fill="#b3b3b3">or any MCP client</text>
+<rect x="290" y="110" width="200" height="190" rx="10" fill="#161616" stroke="#6ea0ff" stroke-width="2"/><text x="390.0" y="136" text-anchor="middle" font-size="15" font-weight="600" fill="#f2f2f2">Traefik gateway</text><text x="390.0" y="156" text-anchor="middle" font-size="12" fill="#b3b3b3">:80 and :443</text><text x="390.0" y="173" text-anchor="middle" font-size="12" fill="#b3b3b3">TLS from Let's Encrypt</text><text x="390.0" y="190" text-anchor="middle" font-size="12" fill="#b3b3b3">reads route files</text><text x="390.0" y="207" text-anchor="middle" font-size="12" fill="#b3b3b3">no Docker socket</text>
+<rect x="570" y="76" width="340" height="104" rx="10" fill="#161616" stroke="#6ea0ff" stroke-width="2"/><text x="740.0" y="102" text-anchor="middle" font-size="15" font-weight="600" fill="#f2f2f2">Control plane</text><text x="740.0" y="122" text-anchor="middle" font-size="12" fill="#b3b3b3">Dashboard, REST API /api/v1, /mcp, /llms.txt</text><text x="740.0" y="139" text-anchor="middle" font-size="12" fill="#b3b3b3">SQLite, deploy pipeline, scans</text>
+<rect x="570" y="224" width="150" height="78" rx="10" fill="#161616" stroke="#3d3d3d" stroke-width="1.25"/><text x="645.0" y="250" text-anchor="middle" font-size="15" font-weight="600" fill="#f2f2f2">BuildKit</text><text x="645.0" y="270" text-anchor="middle" font-size="12" fill="#b3b3b3">isolated build network</text>
+<rect x="760" y="224" width="150" height="78" rx="10" fill="#161616" stroke="#3d3d3d" stroke-width="1.25"/><text x="835.0" y="250" text-anchor="middle" font-size="15" font-weight="600" fill="#f2f2f2">Docker engine</text><text x="835.0" y="270" text-anchor="middle" font-size="12" fill="#b3b3b3">only control</text><text x="835.0" y="287" text-anchor="middle" font-size="12" fill="#b3b3b3">holds the socket</text>
+<rect x="570" y="352" width="340" height="118" rx="10" fill="#161616" stroke="#3d3d3d" stroke-width="1.25"/>
+<text x="740" y="376" text-anchor="middle" font-size="15" font-weight="600" fill="#f2f2f2">Your apps</text>
+<text x="740" y="394" text-anchor="middle" font-size="12" fill="#b3b3b3">one container and one network each</text>
+<rect x="584" y="406" width="98" height="46" rx="8" fill="#101010" stroke="#3d3d3d" stroke-width="1"/>
+<text x="633" y="434" text-anchor="middle" font-size="12.5" fill="#f2f2f2">notes</text>
+<rect x="692" y="406" width="98" height="46" rx="8" fill="#101010" stroke="#3d3d3d" stroke-width="1"/>
+<text x="741" y="434" text-anchor="middle" font-size="12.5" fill="#f2f2f2">wiki</text>
+<rect x="800" y="406" width="98" height="46" rx="8" fill="#101010" stroke="#3d3d3d" stroke-width="1"/>
+<text x="849" y="434" text-anchor="middle" font-size="12.5" fill="#f2f2f2">docs</text>
+<path d="M220 118 L290 150" fill="none" stroke="#6b6b6b" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="250" y="120" text-anchor="middle" font-size="11.5" fill="#b3b3b3">HTTPS</text>
+<path d="M220 255 L290 255" fill="none" stroke="#6b6b6b" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="255" y="245" text-anchor="middle" font-size="11.5" fill="#b3b3b3">HTTPS</text>
+<path d="M490 150 L570 128" fill="none" stroke="#6b6b6b" stroke-width="1.6" marker-end="url(#a)"/>
+<path d="M490 270 L528 270 L528 411 L570 411" fill="none" stroke="#6b6b6b" stroke-width="1.6" marker-end="url(#a)"/>
+<text transform="translate(517 345) rotate(-90)" text-anchor="middle" font-size="11.5" fill="#b3b3b3">app traffic</text>
+<path d="M570 160 L490 190" fill="none" stroke="#9a9a9a" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ad)"/>
+<text x="518" y="212" text-anchor="middle" font-size="11.5" fill="#b3b3b3">routes</text>
+<path d="M645 180 L645 224" fill="none" stroke="#6b6b6b" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="653" y="207" text-anchor="start" font-size="11.5" fill="#b3b3b3">docker exec</text>
+<path d="M835 180 L835 224" fill="none" stroke="#6b6b6b" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="843" y="207" text-anchor="start" font-size="11.5" fill="#b3b3b3">docker.sock</text>
+<path d="M835 302 L835 352" fill="none" stroke="#6b6b6b" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="843" y="331" text-anchor="start" font-size="11.5" fill="#b3b3b3">runs containers</text>
+</svg>
