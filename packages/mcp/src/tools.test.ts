@@ -62,6 +62,10 @@ const ORIGINAL_TOOLS = [
   "runway_set_domain",
   "runway_set_healthcheck",
   "runway_set_description",
+  "runway_stop",
+  "runway_start",
+  "runway_restart",
+  "runway_delete",
   "runway_set_basic_auth",
   "runway_get_sso",
   "runway_set_sso",
@@ -276,6 +280,10 @@ describe("no credential in any answer", () => {
     runway_set_domain: { custom_domain: "bot.example.com" },
     runway_set_healthcheck: { path: "/healthz" },
     runway_set_description: { description: "Internal bot that posts the daily KPI digest to Slack." },
+    runway_stop: {},
+    runway_start: {},
+    runway_restart: {},
+    runway_delete: { confirm: "Bot" },
     runway_set_basic_auth: { enabled: true, username: "u", password: "pw-pw-pw-1" },
     runway_get_sso: {},
     runway_set_sso: { enabled: true, allowed_emails: ["a@example.com"] },
@@ -398,5 +406,35 @@ describe("runway_set_description", () => {
     const r = await call("runway_set_description", { description: "x".repeat(401) });
     expect(r.isError).toBe(true);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("lifecycle tools", () => {
+  it("stop, start, restart POST to their routes", async () => {
+    const calls = stubServers({ "legacy.example.com": () => json({ id: "appxone", status: "stopped", changed: true }) });
+    const { call } = await connect(legacyRegistry());
+    for (const [tool, path] of [["runway_stop", "/api/v1/app/stop"], ["runway_start", "/api/v1/app/start"], ["runway_restart", "/api/v1/app/restart"]] as const) {
+      const r = await call(tool, {});
+      expect(r.isError, tool).toBeFalsy();
+      expect(calls.at(-1)!.path).toBe(path);
+      expect(calls.at(-1)!.init.method).toBe("POST");
+    }
+  });
+  it("delete sends the confirmation in the body and needs it", async () => {
+    const calls = stubServers({ "legacy.example.com": () => json({ status: "in_trash" }) });
+    const { call } = await connect(legacyRegistry());
+    const ok = await call("runway_delete", { confirm: "My Bot" });
+    expect(ok.isError).toBeFalsy();
+    expect(calls[0]!.path).toBe("/api/v1/app");
+    expect(calls[0]!.init.method).toBe("DELETE");
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ confirm: "My Bot" });
+    const missing = await call("runway_delete", {});
+    expect(missing.isError).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+  it("has no tool that purges, and none that restores", async () => {
+    const { client } = await connect(legacyRegistry());
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names.filter((n) => /purge|restore/.test(n))).toEqual([]);
   });
 });

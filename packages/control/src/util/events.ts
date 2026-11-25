@@ -23,6 +23,7 @@ export const EVENT_TYPES = [
   "security",
   "dependency",
   "exception",
+  "lifecycle",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -68,6 +69,14 @@ export const EVENT_CODES = {
   deps_rolled_back: { type: "dependency", severity: "warning", summary: "A dependency update did not work and was not kept." },
   auto_minor_applied: { type: "dependency", severity: "info", summary: "The base image moved to the next minor version to fix a vulnerability." },
   major_available: { type: "dependency", severity: "info", summary: "A newer major version would fix a vulnerability. It is never applied automatically." },
+  // lifecycle: a person (or an agent with the app's key) stopped, started, restarted or removed the app
+  app_stopped: { type: "lifecycle", severity: "info", summary: "The app was stopped. Its data and settings are kept." },
+  app_started: { type: "lifecycle", severity: "info", summary: "The app was started again and is running." },
+  app_restarted: { type: "lifecycle", severity: "info", summary: "The app was restarted." },
+  app_start_failed: { type: "lifecycle", severity: "warning", summary: "The app did not become healthy when it was started." },
+  app_deleted: { type: "lifecycle", severity: "info", summary: "The app was moved to the trash. It can be restored for 7 days." },
+  app_restored: { type: "lifecycle", severity: "info", summary: "The app was restored from the trash (stopped)." },
+  app_purged: { type: "lifecycle", severity: "info", summary: "The app was removed for good." },
   // quarantine exemptions
   exemption_expiring: { type: "exception", severity: "warning", summary: "A quarantine exemption ends within 3 days." },
   exemption_expired: { type: "exception", severity: "warning", summary: "A quarantine exemption has ended." },

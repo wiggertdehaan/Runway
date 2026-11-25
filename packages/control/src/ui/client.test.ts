@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { CLIENT_JS, PREPAINT_JS } from "./client.js";
 
 /** Minimal DOM stub: enough for the scripts to load, `body` still null. */
-function stubWindow() {
+function stubWindow(open: unknown = null) {
   const listeners: Record<string, Array<(e: unknown) => void>> = {};
   const attrs = new Map<string, string>();
   const document = {
@@ -15,6 +15,7 @@ function stubWindow() {
     },
     addEventListener: (t: string, f: (e: unknown) => void) => void (listeners[t] ??= []).push(f),
     querySelectorAll: () => [] as unknown[],
+    querySelector: () => open,
     getElementById: () => null,
   };
   const ctx = vm.createContext({
@@ -27,6 +28,21 @@ function stubWindow() {
 }
 
 describe("dashboard client script", () => {
+  const poll = (open: unknown, id = "apps-live") => {
+    const { ctx, listeners } = stubWindow(open);
+    vm.runInContext(CLIENT_JS, ctx);
+    let prevented = false;
+    for (const f of listeners["htmx:beforeRequest"] ?? []) f({ detail: { elt: { id } }, preventDefault: () => (prevented = true) });
+    return prevented;
+  };
+  it("skips the 5s apps poll while a row menu or the delete dialog is open", () => {
+    expect(poll({ open: true })).toBe(true);
+  });
+  it("lets the poll run when nothing is open, and never touches other requests", () => {
+    expect(poll(null)).toBe(false);
+    expect(poll({ open: true }, "something-else")).toBe(false);
+  });
+
   it("loads without touching document.body (U7: it used to throw in <head>)", () => {
     const { ctx, listeners } = stubWindow();
     expect(() => vm.runInContext(CLIENT_JS, ctx)).not.toThrow();

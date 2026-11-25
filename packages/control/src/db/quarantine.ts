@@ -72,6 +72,31 @@ export function saveQuarantine(row: Omit<QuarantineRow, "updated_at">): void {
   );
 }
 
+/**
+ * An app that was switched off by a person cannot be exploited meanwhile, so
+ * the fix period does not run while it is off: push every first-seen time of a
+ * running grace period forward by the time it was stopped. A quarantined row is
+ * left alone (the term is over).
+ */
+export function shiftKevClocks(appId: string, ms: number): boolean {
+  if (!(ms > 0)) return false;
+  const row = getQuarantine(appId);
+  if (!row || row.state !== "grace") return false;
+  const shifted: Record<string, string> = {};
+  for (const [id, iso] of Object.entries(row.kev_first_seen)) {
+    const t = Date.parse(iso);
+    shifted[id] = Number.isFinite(t) ? new Date(t + ms).toISOString() : iso;
+  }
+  saveQuarantine({
+    app_id: row.app_id,
+    state: row.state,
+    kev_first_seen: shifted,
+    attempt_at: row.attempt_at,
+    quarantined_at: row.quarantined_at,
+  });
+  return true;
+}
+
 export function deleteQuarantine(appId: string): void {
   db.prepare(`DELETE FROM app_quarantine WHERE app_id = ?`).run(appId);
 }

@@ -401,6 +401,21 @@ export class RunwayClient {
     return this.request("/app/rescan", { method: "POST", ...(signal ? { signal } : {}) }, RESCAN_TIMEOUT_MS);
   }
 
+  /** Start/restart wait for the app to become healthy on the server (up to two minutes). */
+  async stop(): Promise<AppConfig> {
+    return this.request("/app/stop", { method: "POST" });
+  }
+  async start(): Promise<AppConfig> {
+    return this.request("/app/start", { method: "POST" }, RESCAN_TIMEOUT_MS);
+  }
+  async restart(): Promise<AppConfig> {
+    return this.request("/app/restart", { method: "POST" }, RESCAN_TIMEOUT_MS);
+  }
+  /** Move the app to the trash. `confirm` must be the exact app name. */
+  async deleteApp(confirm: string): Promise<unknown> {
+    return this.request("/app", { method: "DELETE", body: JSON.stringify({ confirm }) });
+  }
+
   /** Strip this client's credential from a piece of text. */
   scrub(text: string): string {
     return redactSecrets(text, [this.apiKey]);
