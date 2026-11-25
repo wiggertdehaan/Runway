@@ -37,6 +37,14 @@ function filterApps() {
   if (empty) empty.style.display = shown === 0 && (q || appChip !== 'all') ? '' : 'none';
 }
 // htmx events bubble, so one listener on document survives every swap.
+// The 5s poll replaces every row, which would close an open row menu under the
+// user's cursor. Skip a poll while a menu or the delete dialog is open; the
+// next one after it closes catches up.
+document.addEventListener('htmx:beforeRequest', function(e) {
+  var elt = e && e.detail && e.detail.elt;
+  if (!elt || elt.id !== 'apps-live') return;
+  if (document.querySelector('.overflow-menu[open], dialog[open]')) e.preventDefault();
+});
 // After the live-apps poll reinserts fresh rows, re-apply the search box
 // and the active chip so the user's filter keeps hiding what it hid.
 document.addEventListener('htmx:afterSwap', function(e) {
