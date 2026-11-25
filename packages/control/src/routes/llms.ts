@@ -197,6 +197,7 @@ for actions (configure, deploy, rollback). All paths are under
 | PUT    | \`/app/volumes\`                | \`{"mount_paths":["/app/data"]}\` — replaces the full list                              |
 | DELETE | \`/app/volumes/:path\`          | —                                                                                      |
 | PUT    | \`/app/healthcheck\`            | \`{"path":"/healthz"}\` — pass \`null\` to disable. **No GET; read \`health_check_path\` from \`/app\`.** |
+| PUT    | \`/app/description\`          | \`{"description":"What it is, for whom, what for (max 400 chars, plain text)"}\` — \`null\` clears. Shown in the dashboard; \`description\` is also in \`/app\`. Filled from the README's first paragraph on a deploy while empty, never overwritten. |
 | PUT    | \`/app/scan-threshold\`         | \`{"threshold":"low|medium|high|critical|none"}\`                                       |
 | PUT    | \`/app/domain\`                 | \`{"custom_domain":"app.example.com"}\` or \`{"custom_domain":null}\`                    |
 | PUT    | \`/app/basic-auth\`             | \`{"enabled":true,"username":"…","password":"…"}\` or \`{"enabled":false}\`              |

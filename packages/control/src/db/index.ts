@@ -505,6 +505,12 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "readonly_rootfs")) {
     db.exec(`ALTER TABLE apps ADD COLUMN readonly_rootfs INTEGER NOT NULL DEFAULT 0`);
   }
+  // Short plain-text description ("what is it, for whom"). NULL = none. Filled
+  // from the README on a deploy only while it is empty; a hand-written one is
+  // never overwritten (db/apps.ts setDescriptionIfEmpty).
+  if (!appCols.some((c) => c.name === "description")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN description TEXT`);
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS dep_update_attempts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

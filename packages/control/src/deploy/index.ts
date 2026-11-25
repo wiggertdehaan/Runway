@@ -1,5 +1,6 @@
 import type { Readable } from "node:stream";
-import { updateApp, type App } from "../db/apps.js";
+import { setDescriptionIfEmpty, updateApp, type App } from "../db/apps.js";
+import { readmeDescription } from "./readme.js";
 import {
   recordDeploy,
   getPreviousSuccessfulDeploy,
@@ -407,6 +408,18 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     image_tag: imageTag,
     container_id: run.containerId,
   });
+
+  // First deploy of an app without a description: take it from the README.
+  // setDescriptionIfEmpty never overwrites one that is there (also not one set
+  // while this deploy was running). Best effort, a deploy never fails on it.
+  if (tarBuffer && !app.description?.trim()) {
+    try {
+      const fromReadme = readmeDescription(tarBuffer);
+      if (fromReadme) setDescriptionIfEmpty(app.id, fromReadme);
+    } catch {
+      // ignore
+    }
+  }
 
   const deploy = recordDeploy(app.id, imageTag, "success", {
     silentEvent: !!input.scanGate,

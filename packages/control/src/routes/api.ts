@@ -31,6 +31,7 @@ import {
   revokeUserToken,
 } from "../db/user-tokens.js";
 import { scopeCovers } from "../util/token-scopes.js";
+import { cleanDescription } from "../util/description.js";
 import { forgetKey } from "../util/key-reveal.js";
 import { mayRebuild, mayRescan, rebuildBlockedReason, rescanBlockedReason } from "../ui/app-page.js";
 import { RebuildBusyError, startRebuildRun } from "../deploy/rebuild.js";
@@ -126,6 +127,7 @@ function toConfigResponse(app: App) {
     id: app.id,
     name: app.name,
     runtime: app.runtime,
+    description: app.description ?? null,
     domain: app.domain,
     custom_domain: app.custom_domain,
     port: app.port,
@@ -782,6 +784,22 @@ apiRoutes.put("/app/basic-auth", async (c) => {
   });
 });
 
+// ── Description ─────────────────────────────────────────
+// Short plain text: what the app is, for whom, what for. Same rights as the
+// other settings (apiAuthorize: deploy scope, owner or admin). null or "" clears.
+apiRoutes.put("/app/description", async (c) => {
+  const app = c.get("app");
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("description" in body)) {
+    return c.json({ error: 'Body must be {"description": "..."} (or null to clear)' }, 400);
+  }
+  const checked = cleanDescription((body as { description: unknown }).description);
+  if (!checked.ok) return c.json({ error: checked.error }, 400);
+  const updated = updateApp(app.id, { description: checked.value });
+  if (!updated) return c.json({ error: "App not found" }, 404);
+  return c.json(toConfigResponse(updated));
+});
+
 // ── Health check ────────────────────────────────────────
 apiRoutes.put("/app/healthcheck", async (c) => {
   const app = c.get("app");
@@ -980,6 +998,7 @@ apiRoutes.get("/apps", (c) => {
       id: a.id,
       name: a.name,
       runtime: a.runtime,
+      description: a.description ?? null,
       status: a.status,
       domain: a.custom_domain ?? a.domain,
       configured: isConfigured(a),
