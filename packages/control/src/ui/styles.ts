@@ -137,8 +137,9 @@ const COMPONENTS = `
 .danger-ghost:hover{color:var(--err);border-color:var(--err)}
 .stopped-banner{margin:0.75rem 0;border-color:var(--line2)}
 .status-deleted{opacity:0.85}
-.del-dlg{border:1px solid var(--line);border-radius:var(--r1);background:var(--bg);color:var(--tx);padding:1.25rem;max-width:26rem;width:calc(100% - 2rem)}
+.del-dlg{margin:auto;border:1px solid var(--line);border-radius:var(--r1);background:var(--bg);color:var(--tx);padding:1.25rem;max-width:26rem;width:calc(100% - 2rem)}
 .del-dlg::backdrop{background:rgba(0,0,0,0.5)}
+.del-dlg button:disabled{opacity:0.4;cursor:not-allowed}
 .del-dlg h2{margin:0 0 0.5rem}
 .del-dlg input{display:block;width:100%;margin:0.35rem 0 0.9rem}
 .del-buttons{display:flex;justify-content:flex-end;gap:0.5rem}
