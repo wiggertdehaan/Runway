@@ -69,6 +69,12 @@ export interface App {
   /** Administrator's hardening profile for this app; NULL = instance default. */
   hardening_profile: string | null;
   readonly_rootfs: number;
+  /** Plain text, at most 400 characters (util/description.ts). NULL = none. */
+  description: string | null;
+  /** ISO time a person stopped the app; null when it is not stopped by a person. */
+  stopped_at: string | null;
+  /** ISO time the app was moved to the trash; null = a normal app. */
+  deleted_at: string | null;
   basic_auth_enabled: number;
   basic_auth_username: string | null;
   basic_auth_htpasswd: string | null;
@@ -306,10 +312,35 @@ export function appsVisibleTo(userId: string, admin: boolean): App[] {
   return listApps().filter((a) => appVisibleTo(user, a));
 }
 
+/**
+ * The apps that are in use: everything except the trash. Every job and page
+ * that works on "the apps" (rebuild, scans, health, quarantine, lists, rights)
+ * goes through this, so a trashed app is invisible to all of them at once.
+ */
 export function listApps(): App[] {
+  return db
+    .prepare(`SELECT * FROM apps WHERE deleted_at IS NULL ORDER BY created_at DESC`)
+    .all() as unknown as App[];
+}
+
+/** Every app including the trash: for the purge job and for resource cleanup. */
+export function listAllApps(): App[] {
   return db
     .prepare(`SELECT * FROM apps ORDER BY created_at DESC`)
     .all() as unknown as App[];
+}
+
+/** The trash, newest first. */
+export function listDeletedApps(): App[] {
+  return db
+    .prepare(`SELECT * FROM apps WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
+    .all() as unknown as App[];
+}
+
+/** The trashed apps this viewer may see (an admin all, an owner their own). */
+export function deletedAppsVisibleTo(userId: string, admin: boolean): App[] {
+  const user = { id: userId, role: admin ? "admin" : "member" };
+  return listDeletedApps().filter((a) => appVisibleTo(user, a));
 }
 
 type UpdatableAppFields = Partial<
@@ -336,6 +367,9 @@ type UpdatableAppFields = Partial<
     | "auto_update_deps_major"
     | "hardening_profile"
     | "readonly_rootfs"
+    | "description"
+    | "stopped_at"
+    | "deleted_at"
     | "basic_auth_enabled"
     | "basic_auth_username"
     | "basic_auth_htpasswd"
@@ -362,6 +396,21 @@ export function updateApp(
   db.prepare(`UPDATE apps SET ${sets.join(", ")} WHERE id = ?`).run(...values);
 
   return getApp(id);
+}
+
+/**
+ * Fill the description from a README, but only while it is empty. One
+ * statement, so a description somebody sets while a deploy is running is never
+ * overwritten by it. Returns whether it was written.
+ */
+export function setDescriptionIfEmpty(id: string, text: string): boolean {
+  const r = db
+    .prepare(
+      `UPDATE apps SET description = ?, updated_at = datetime('now')
+       WHERE id = ? AND (description IS NULL OR TRIM(description) = '')`
+    )
+    .run(text, id);
+  return r.changes > 0;
 }
 
 export function deleteApp(id: string): boolean {

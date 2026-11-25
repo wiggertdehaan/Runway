@@ -501,6 +501,34 @@ export async function stopContainerByName(name: string): Promise<void> {
   }
 }
 
+/**
+ * Start an existing (stopped) container. Tolerates "already started" (304).
+ * A 404 (no such container) is thrown so the caller can recreate it.
+ */
+export async function startContainerByName(name: string): Promise<void> {
+  try {
+    await docker.getContainer(name).start();
+  } catch (err: any) {
+    if (err.statusCode !== 304) throw err;
+  }
+}
+
+/** Restart a running container (stop with a grace period, then start). */
+export async function restartContainerByName(name: string): Promise<void> {
+  await docker.getContainer(name).restart({ t: 10 });
+}
+
+/** The image reference an existing container was created from, or null when there is none. */
+export async function containerImageTag(name: string): Promise<string | null> {
+  try {
+    const info = await docker.getContainer(name).inspect();
+    return (info.Config?.Image as string | undefined) ?? null;
+  } catch (err: any) {
+    if (err.statusCode === 404) return null;
+    throw err;
+  }
+}
+
 export interface ContainerStatus {
   exists: boolean;
   state?: string;

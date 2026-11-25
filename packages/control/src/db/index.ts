@@ -505,6 +505,21 @@ export function migrate() {
   if (!appCols.some((c) => c.name === "readonly_rootfs")) {
     db.exec(`ALTER TABLE apps ADD COLUMN readonly_rootfs INTEGER NOT NULL DEFAULT 0`);
   }
+  // Short plain-text description ("what is it, for whom"). NULL = none. Filled
+  // from the README on a deploy only while it is empty; a hand-written one is
+  // never overwritten (db/apps.ts setDescriptionIfEmpty).
+  if (!appCols.some((c) => c.name === "description")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN description TEXT`);
+  }
+  // Lifecycle: `stopped_at` = when a person stopped the app (kept while it is
+  // stopped, used to pause the KEV clock); `deleted_at` = moved to the trash
+  // (7 days, then purged). A trashed app keeps its row, domain and data.
+  if (!appCols.some((c) => c.name === "stopped_at")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN stopped_at TEXT`);
+  }
+  if (!appCols.some((c) => c.name === "deleted_at")) {
+    db.exec(`ALTER TABLE apps ADD COLUMN deleted_at TEXT`);
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS dep_update_attempts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

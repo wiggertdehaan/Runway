@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ConfigError, loadRunwayConfig } from "./config.js";
 import { RunwayRegistry } from "./registry.js";
-import { registerTools } from "./tools.js";
+import { createRunwayServer } from "./server.js";
 
 let registry: RunwayRegistry;
 try {
@@ -16,12 +15,7 @@ try {
   process.exit(1);
 }
 
-const server = new McpServer({
-  name: "runway",
-  version: "0.1.0",
-});
-
-registerTools(server, registry);
+const server = createRunwayServer(registry);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

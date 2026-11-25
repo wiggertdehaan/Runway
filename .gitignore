@@ -23,3 +23,6 @@ sources/
 # CHANGELOG / release notes, not as raw findings dumps.
 SECURITY-AUDIT.md
 security-audits/
+
+# Runtime KEV cache written next to the DB (also by the control tests)
+kev.json

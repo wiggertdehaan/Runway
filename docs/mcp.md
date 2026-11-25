@@ -80,7 +80,7 @@ layers are served over the same endpoint.
 ## Local MCP server
 
 `packages/mcp` is an MCP server that runs on your machine and gives the agent
-typed tools (deploy, env, volumes, scans, events) instead of `curl`.
+typed tools (deploy, env, volumes, scans, events, lifecycle) instead of `curl`: 34 in all.
 
 ```bash
 git clone https://github.com/wiggertdehaan/Runway.git
@@ -189,13 +189,34 @@ cannot use them.
   `runway_list_deploys`, `runway_rollback`, `runway_pull`, `runway_rebuild`
 - **Run**: `runway_logs`, `runway_get_env`, `runway_set_env`, `runway_delete_env`,
   `runway_get_volumes`, `runway_set_volumes`, `runway_set_domain`,
-  `runway_set_healthcheck`, `runway_set_basic_auth`, `runway_get_sso`,
-  `runway_set_sso`
+  `runway_set_healthcheck`, `runway_set_description`, `runway_set_basic_auth`,
+  `runway_get_sso`, `runway_set_sso`
+- **Lifecycle**: `runway_stop`, `runway_start`, `runway_restart`, `runway_delete`
 - **Security**: `runway_get_scan`, `runway_set_scan_threshold`, `runway_rescan`
 - **Events**: `runway_events`, `runway_event_detail`
 
-Rotating an app key is deliberately not an MCP tool: the new key would be shown
-to the model. Do it in the dashboard.
+`runway_delete` moves the app to the trash and needs `confirm` set to the app's
+exact name; the tool description tells the agent to ask the user first. There is no
+tool to restore or to delete for good: those are dashboard actions, so an agent can
+never destroy data. Rotating an app key is deliberately not an MCP tool either: the
+new key would be shown to the model. Do it in the dashboard.
+
+`runway_set_description` and the descriptions that come back from `runway_get_config`
+and `runway_list_apps` are text people (or a README) wrote: the tool says so, and
+the client cleans it, cuts it to 400 characters and never treats it as an instruction.
+
+## Tasks
+
+`runway_deploy`, `runway_rescan` and `runway_rollback` can take minutes. A client
+that supports MCP Tasks (spec 2025-11-25) may call them as a task: it gets a task id
+at once, can read the phase in `statusMessage` ("Scanning the running image...") and
+fetches the result with `tasks/result`. When the task ends, `statusMessage` becomes
+the outcome ("Completed in 41 s", or the first line of the error). Tasks can be
+cancelled, and with several Runways the task carries the name of its server.
+
+It is fully backwards compatible: the tools are advertised with `taskSupport:
+"optional"`, never `"required"`, and a call without a task is handled exactly as
+before. Tasks live in the MCP process (in memory), not on the server.
 
 ## Events
 
@@ -204,7 +225,8 @@ to the model. Do it in the dashboard.
 without polling the dashboard: a deploy finished or failed, health changed, a
 rebuild ended, an actively exploited vulnerability (KEV) deadline is near or the
 app was quarantined, a dependency was updated or rolled back, a newer major
-version is available, an exemption is ending.
+version is available, an exemption is ending, or the app was stopped, started,
+restarted, deleted or restored (type `lifecycle`).
 
 An event is a type, an app id and a code from a fixed list. It never carries logs,
 environment variables, error messages or text from the app. The caller keeps the

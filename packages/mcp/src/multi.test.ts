@@ -142,6 +142,16 @@ describe("cleaning what a server says about a person and apps", () => {
   });
 });
 
+describe("description in the app list", () => {
+  it("is kept as one clean line, bounded, and absent when there is none", () => {
+    expect(cleanApp({ id: "a1", description: "Daily digest.\nSecond line\u202e hidden" })!.description).toBe("Daily digest. Second line hidden");
+    expect(cleanApp({ id: "a1", description: "x".repeat(900) })!.description!.length).toBe(400);
+    expect(cleanApp({ id: "a1", description: "" })).not.toHaveProperty("description");
+    expect(cleanApp({ id: "a1", description: null })).not.toHaveProperty("description");
+    expect(cleanApp({ id: "a1", description: 42 })).not.toHaveProperty("description");
+  });
+});
+
 describe("list_apps", () => {
   it("groups by server, and one server being down does not hide the others", async () => {
     stubServers({

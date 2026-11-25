@@ -11,6 +11,8 @@ apps patched see [Operations](operations.md).
 - [Health checks](#health-checks)
 - [Deploy history and rollback](#deploy-history-and-rollback)
 - [Pull project source](#pull-project-source)
+- [App description](#app-description)
+- [Stop, start, restart and delete](#stop-start-restart-and-delete)
 - [Basic auth](#basic-auth)
 - [Single Sign-On](#single-sign-on)
 - [Users, roles and ownership](#users-roles-and-ownership)
@@ -100,6 +102,59 @@ machine without a separate git host. Download a snapshot from the deploy history
 with `GET /app/source` (optional `?deploy=<id>`) or with `runway_pull`. The tar is
 the uploaded file set after `.dockerignore` and `.gitignore` filtering, so there
 is no `.git` history: run `git init` after extracting.
+
+## App description
+
+A short plain-text description (one to three sentences, at most 400 characters:
+what it is, who it is for, what it is used for) shows under the app's name on the
+app page and as one line in the app list, with the full text on hover.
+
+- **Filled automatically.** When a deploy or rebuild finishes and the description
+  is empty, Runway takes the first paragraph after the title of the `README.md` in
+  the root of the uploaded source (markdown stripped, cut at a sentence). No
+  README, or no paragraph, leaves it empty.
+- **Never overwritten.** A description somebody wrote, or an earlier README fill,
+  stays. Clear it and the next deploy fills it again.
+- **Edit it** on the app page (owner or admin), with `PUT /api/v1/app/description`
+  (`{"description": "..."}`, `null` clears) or with `runway_set_description`. It is
+  also in `runway_get_config` and `runway_list_apps`.
+- **Existing apps** got theirs once, in the background at the first start of 0.50,
+  from the source Runway already keeps. Apps without a stored source or README wait
+  for their next deploy.
+- It is always shown as text, never as markdown or HTML, and treated as untrusted:
+  it can come from the deployer's README.
+
+## Stop, start, restart and delete
+
+On the app page and in the **...** menu of the app list (owner or admin), also in the
+API (`POST /app/stop`, `/app/start`, `/app/restart`, `DELETE /app`) and the MCP
+(`runway_stop`, `runway_start`, `runway_restart`, `runway_delete`). Each action is
+audited and raises an event (`app_stopped`, `app_started`, `app_restarted`,
+`app_start_failed`, `app_deleted`, `app_restored`).
+
+- **Stop** switches the app off. The container stops; the image, volumes,
+  environment and address stay. Visitors get a "switched off for now" page (HTTP 503)
+  instead of an error. It stays stopped, also after a server restart, until you start it.
+- **Start** runs the same version again, without a rebuild, and goes live only after
+  the health check passes. If it does not, the app is stopped again and says why.
+  **Restart** is stop and start of the same version, for an app that hung.
+- **While it is off**, rebuilds, health alarms and the security scans skip the app,
+  and the [KEV countdown](operations.md#kev-countdown-and-quarantine) pauses: the
+  fix period does not run while nothing is exploitable, and continues at Start.
+- **A deploy to a stopped app** builds and records the new version but leaves the app
+  stopped; Start then runs the new version.
+- **Refused while busy.** Nothing is stopped or deleted while a deploy, scan or start
+  is running on the app; try again when it is done. A quarantined app cannot be
+  started (it returns by itself once fixed, or with an admin exemption).
+- **Delete moves the app to the trash.** You type the app's name to confirm (the API
+  and MCP take it as `confirm`). The app is stopped and disappears from the list. Under
+  the **Deleted** filter its owner or an admin can **restore** it within 7 days: it
+  comes back stopped, with its data, and you start it. Its address stays reserved for
+  those 7 days, so nobody can claim the name. Its API key stops working (HTTP 410)
+  until it is restored.
+- **After 7 days** the app is removed for good (see
+  [the trash](operations.md#the-trash-and-purge)). An admin can also use **Delete
+  now** in the trash, typing the name again. The API and MCP can never delete for good.
 
 ## Basic auth
 

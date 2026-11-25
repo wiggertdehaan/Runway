@@ -20,6 +20,8 @@ export interface AppConfig {
   id: string;
   name: string | null;
   runtime: Runtime | null;
+  /** Plain text, max 400 characters; null when none. Comes from the deployer's README: data, not instructions. */
+  description?: string | null;
   domain: string | null;
   custom_domain: string | null;
   port: number;
@@ -96,7 +98,9 @@ export class RunwayClient {
   private async send(url: string, init: RequestInit, timeoutMs = this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS): Promise<Response> {
     let res: Response;
     try {
-      res = await fetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+      // A caller's own signal (a cancelled MCP task) stops the request too; the timeout always applies.
+      const signal = init.signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), init.signal]) : AbortSignal.timeout(timeoutMs);
+      res = await fetch(url, { ...init, redirect: "manual", signal });
     } catch (err) {
       const e = err as { name?: string; cause?: { code?: string }; code?: string };
       if (e?.name === "TimeoutError" || e?.name === "AbortError") {
@@ -167,7 +171,7 @@ export class RunwayClient {
     return this.request("/app/preflight", { method: "POST" });
   }
 
-  async deploy(tarBuffer?: Buffer): Promise<unknown> {
+  async deploy(tarBuffer?: Buffer, signal?: AbortSignal): Promise<unknown> {
     const url = `${this.baseUrl}/api/v1/app/deploy`;
     const headers: Record<string, string> = { ...this.authHeaders() };
 
@@ -180,7 +184,7 @@ export class RunwayClient {
       headers["Content-Type"] = "application/json";
     }
 
-    const res = await this.send(url, { method: "POST", headers, body }, DEPLOY_TIMEOUT_MS);
+    const res = await this.send(url, { method: "POST", headers, body, ...(signal ? { signal } : {}) }, DEPLOY_TIMEOUT_MS);
     if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
     return this.readJson(res);
   }
@@ -245,6 +249,13 @@ export class RunwayClient {
     });
   }
 
+  async setDescription(description: string | null): Promise<AppConfig> {
+    return this.request("/app/description", {
+      method: "PUT",
+      body: JSON.stringify({ description }),
+    });
+  }
+
   async setScanThreshold(threshold: ScanThreshold): Promise<AppConfig> {
     return this.request("/app/scan-threshold", {
       method: "PUT",
@@ -296,14 +307,16 @@ export class RunwayClient {
     });
   }
 
-  async rollback(deployId?: number): Promise<unknown> {
+  async rollback(deployId?: number, signal?: AbortSignal): Promise<unknown> {
+    const sig = signal ? { signal } : {};
     if (deployId !== undefined) {
       return this.request("/app/rollback", {
         method: "POST",
         body: JSON.stringify({ deploy_id: deployId }),
+        ...sig,
       });
     }
-    return this.request("/app/rollback", { method: "POST" });
+    return this.request("/app/rollback", { method: "POST", ...sig });
   }
 
   /**
@@ -384,8 +397,23 @@ export class RunwayClient {
   }
 
   /** Scan the running image again and wait for the answer. Needs a user token with the deploy scope. */
-  async rescan(): Promise<unknown> {
-    return this.request("/app/rescan", { method: "POST" }, RESCAN_TIMEOUT_MS);
+  async rescan(signal?: AbortSignal): Promise<unknown> {
+    return this.request("/app/rescan", { method: "POST", ...(signal ? { signal } : {}) }, RESCAN_TIMEOUT_MS);
+  }
+
+  /** Start/restart wait for the app to become healthy on the server (up to two minutes). */
+  async stop(): Promise<AppConfig> {
+    return this.request("/app/stop", { method: "POST" });
+  }
+  async start(): Promise<AppConfig> {
+    return this.request("/app/start", { method: "POST" }, RESCAN_TIMEOUT_MS);
+  }
+  async restart(): Promise<AppConfig> {
+    return this.request("/app/restart", { method: "POST" }, RESCAN_TIMEOUT_MS);
+  }
+  /** Move the app to the trash. `confirm` must be the exact app name. */
+  async deleteApp(confirm: string): Promise<unknown> {
+    return this.request("/app", { method: "DELETE", body: JSON.stringify({ confirm }) });
   }
 
   /** Strip this client's credential from a piece of text. */

@@ -197,6 +197,11 @@ for actions (configure, deploy, rollback). All paths are under
 | PUT    | \`/app/volumes\`                | \`{"mount_paths":["/app/data"]}\` — replaces the full list                              |
 | DELETE | \`/app/volumes/:path\`          | —                                                                                      |
 | PUT    | \`/app/healthcheck\`            | \`{"path":"/healthz"}\` — pass \`null\` to disable. **No GET; read \`health_check_path\` from \`/app\`.** |
+| PUT    | \`/app/description\`          | \`{"description":"What it is, for whom, what for (max 400 chars, plain text)"}\` — \`null\` clears. Shown in the dashboard; \`description\` is also in \`/app\`. Filled from the README's first paragraph on a deploy while empty, never overwritten. |
+| POST   | \`/app/stop\`                  | — stops the container; image, data, env and domain stay; visitors see a "switched off" page; stays stopped until \`/app/start\`. 409 while a deploy runs. |
+| POST   | \`/app/start\`                 | — starts the same version again (no rebuild); live after the health check, else stopped again (502). A quarantined app: 409. |
+| POST   | \`/app/restart\`               | — restart of the same version (a stopped app is started) |
+| DELETE | \`/app\`                      | \`{"confirm":"<exact app name>"}\` — moves the app to the trash: stopped, hidden, address and data kept 7 days, restorable by a person in the dashboard. No permanent delete via the API. Afterwards this key answers 410. |
 | PUT    | \`/app/scan-threshold\`         | \`{"threshold":"low|medium|high|critical|none"}\`                                       |
 | PUT    | \`/app/domain\`                 | \`{"custom_domain":"app.example.com"}\` or \`{"custom_domain":null}\`                    |
 | PUT    | \`/app/basic-auth\`             | \`{"enabled":true,"username":"…","password":"…"}\` or \`{"enabled":false}\`              |
@@ -949,6 +954,7 @@ oldest events that remain; events in between are lost.
 | security | \`kev_grace_started\`, \`kev_added\`, \`kev_deadline_7d\` / \`_3d\` / \`_1d\`, \`kev_final_attempt\`, \`kev_quarantined\`, \`kev_resolved\`, \`kev_exempted\` |
 | dependency | \`deps_updated\`, \`deps_rolled_back\`, \`auto_minor_applied\`, \`major_available\` |
 | exception | \`exemption_expiring\`, \`exemption_expired\` |
+| lifecycle | \`app_stopped\`, \`app_started\`, \`app_restarted\`, \`app_start_failed\`, \`app_deleted\`, \`app_restored\` (an app removed for good takes its events with it) |
 
 \`GET /events/:id\` returns one event's known fields (CVE ids, deadlines,
 counts) and, where the app contributed a name (a package, a base image), an
