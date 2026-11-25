@@ -7,6 +7,7 @@ import {
   appRouteExists,
   appBasicAuth,
 } from "./deploy/gateway.js";
+import { runDescriptionBackfillOnce } from "./deploy/description-backfill.js";
 import { repairSsoRoutes, refreshAppRoutes } from "./deploy/gateway-sync.js";
 import { listApps } from "./db/apps.js";
 import { appContainerName } from "./deploy/index.js";
@@ -150,6 +151,10 @@ startGatewayNetworkReconciler({
   appIds: () => new Set(listApps().map((a) => a.id)),
   log: (m) => console.log(m),
 });
+
+// One-time fill of empty app descriptions from the stored sources. Background:
+// the server starts without waiting for it and it never throws.
+void runDescriptionBackfillOnce({ log: (m) => console.log(m) });
 
 const port = parseInt(process.env.PORT || "3000", 10);
 
