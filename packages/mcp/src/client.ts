@@ -96,7 +96,9 @@ export class RunwayClient {
   private async send(url: string, init: RequestInit, timeoutMs = this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS): Promise<Response> {
     let res: Response;
     try {
-      res = await fetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+      // A caller's own signal (a cancelled MCP task) stops the request too; the timeout always applies.
+      const signal = init.signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), init.signal]) : AbortSignal.timeout(timeoutMs);
+      res = await fetch(url, { ...init, redirect: "manual", signal });
     } catch (err) {
       const e = err as { name?: string; cause?: { code?: string }; code?: string };
       if (e?.name === "TimeoutError" || e?.name === "AbortError") {
@@ -167,7 +169,7 @@ export class RunwayClient {
     return this.request("/app/preflight", { method: "POST" });
   }
 
-  async deploy(tarBuffer?: Buffer): Promise<unknown> {
+  async deploy(tarBuffer?: Buffer, signal?: AbortSignal): Promise<unknown> {
     const url = `${this.baseUrl}/api/v1/app/deploy`;
     const headers: Record<string, string> = { ...this.authHeaders() };
 
@@ -180,7 +182,7 @@ export class RunwayClient {
       headers["Content-Type"] = "application/json";
     }
 
-    const res = await this.send(url, { method: "POST", headers, body }, DEPLOY_TIMEOUT_MS);
+    const res = await this.send(url, { method: "POST", headers, body, ...(signal ? { signal } : {}) }, DEPLOY_TIMEOUT_MS);
     if (!res.ok) throw await apiErrorFromResponse(res, [this.apiKey]);
     return this.readJson(res);
   }
@@ -296,14 +298,16 @@ export class RunwayClient {
     });
   }
 
-  async rollback(deployId?: number): Promise<unknown> {
+  async rollback(deployId?: number, signal?: AbortSignal): Promise<unknown> {
+    const sig = signal ? { signal } : {};
     if (deployId !== undefined) {
       return this.request("/app/rollback", {
         method: "POST",
         body: JSON.stringify({ deploy_id: deployId }),
+        ...sig,
       });
     }
-    return this.request("/app/rollback", { method: "POST" });
+    return this.request("/app/rollback", { method: "POST", ...sig });
   }
 
   /**
@@ -384,8 +388,8 @@ export class RunwayClient {
   }
 
   /** Scan the running image again and wait for the answer. Needs a user token with the deploy scope. */
-  async rescan(): Promise<unknown> {
-    return this.request("/app/rescan", { method: "POST" }, RESCAN_TIMEOUT_MS);
+  async rescan(signal?: AbortSignal): Promise<unknown> {
+    return this.request("/app/rescan", { method: "POST", ...(signal ? { signal } : {}) }, RESCAN_TIMEOUT_MS);
   }
 
   /** Strip this client's credential from a piece of text. */

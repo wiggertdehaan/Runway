@@ -697,6 +697,39 @@ the 2FA page has its own key (`2fa:<ip>`) so the password step cannot wipe it.
 - Not built on purpose: rotating an app key from the MCP (the new key would be
   shown to the model).
 
+### MCP Tasks for the slow tools (packages/mcp)
+- `runway_deploy`, `runway_rescan` and `runway_rollback` can run as an MCP Task
+  (spec 2025-11-25): the client sends `tools/call` with `task`, gets a task id
+  at once, polls `tasks/get` (`statusMessage` = the phase + elapsed seconds) and
+  fetches the answer with `tasks/result`. `runway_rebuild` is not one: it already
+  returns at once. List: `TASK_TOOLS` in `tasks.ts`.
+- Backwards compatible by construction: the tools are advertised with
+  `execution.taskSupport: "optional"` (never `"required"`), and `installTasks`
+  only intercepts a `tools/call` that carries `task`. A call without it goes to
+  the exact handler it always did (`tasks.test.ts` compares the result of both
+  servers byte for byte). A task runs that same handler in the background and
+  stores its result: `isError` result = status `failed`, otherwise `completed`.
+  We deliberately do NOT use the SDK's `registerToolTask`: for `optional` tools
+  it would route plain calls through the task store and a polling loop too.
+- `installTasks` reads the SDK's private `_requestHandlers` map to wrap
+  `tools/list` and `tools/call`; it throws at start-up if that is gone (an SDK
+  bump that breaks this fails `tasks.test.ts` and the server start, not a user).
+  The SDK marks its tasks API `experimental`; recheck on every SDK bump.
+- The store (`RunwayTaskStore`, in memory) lives in the stdio process: tasks are
+  gone when it stops. Task objects carry `runway` (the local config name, set
+  from the registry, never from the server) in `tasks/get` and `tasks/list`;
+  the status text starts with `[name]` when several Runways are configured. TTL
+  defaults to 1 hour, capped at 24.
+- The control API has no deploy-status endpoint (deploy is one blocking request),
+  so the phases come from the MCP process itself (`reportPhase` in `tools.ts`; a
+  no-op outside a task). Do not invent finer phases (build/scan) without a real
+  status endpoint.
+- Cancel (`tasks/cancel`) aborts the HTTP request this process has open
+  (`taskSignal()` goes to `RunwayClient.deploy/rescan/rollback`). That stops
+  packaging and the upload. Once the server has the request, build, scan,
+  rescan and rollback cannot be stopped through the API: they finish on the
+  server (see `runway_status` / `runway_events`); only the wait is cancelled.
+
 ### Instance identity is a colour and a name, for display only
 - `instance/identity.ts` (pure helpers + `getInstanceIdentity()` over the
   settings keys `instance_color`, `instance_name`; no migration). The colour
