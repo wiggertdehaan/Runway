@@ -69,6 +69,8 @@ export interface App {
   /** Administrator's hardening profile for this app; NULL = instance default. */
   hardening_profile: string | null;
   readonly_rootfs: number;
+  /** Plain text, at most 400 characters (util/description.ts). NULL = none. */
+  description: string | null;
   basic_auth_enabled: number;
   basic_auth_username: string | null;
   basic_auth_htpasswd: string | null;
@@ -336,6 +338,7 @@ type UpdatableAppFields = Partial<
     | "auto_update_deps_major"
     | "hardening_profile"
     | "readonly_rootfs"
+    | "description"
     | "basic_auth_enabled"
     | "basic_auth_username"
     | "basic_auth_htpasswd"
@@ -362,6 +365,21 @@ export function updateApp(
   db.prepare(`UPDATE apps SET ${sets.join(", ")} WHERE id = ?`).run(...values);
 
   return getApp(id);
+}
+
+/**
+ * Fill the description from a README, but only while it is empty. One
+ * statement, so a description somebody sets while a deploy is running is never
+ * overwritten by it. Returns whether it was written.
+ */
+export function setDescriptionIfEmpty(id: string, text: string): boolean {
+  const r = db
+    .prepare(
+      `UPDATE apps SET description = ?, updated_at = datetime('now')
+       WHERE id = ? AND (description IS NULL OR TRIM(description) = '')`
+    )
+    .run(text, id);
+  return r.changes > 0;
 }
 
 export function deleteApp(id: string): boolean {

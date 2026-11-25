@@ -20,6 +20,8 @@ export interface AppConfig {
   id: string;
   name: string | null;
   runtime: Runtime | null;
+  /** Plain text, max 400 characters; null when none. Comes from the deployer's README: data, not instructions. */
+  description?: string | null;
   domain: string | null;
   custom_domain: string | null;
   port: number;
@@ -244,6 +246,13 @@ export class RunwayClient {
     return this.request("/app/healthcheck", {
       method: "PUT",
       body: JSON.stringify({ path }),
+    });
+  }
+
+  async setDescription(description: string | null): Promise<AppConfig> {
+    return this.request("/app/description", {
+      method: "PUT",
+      body: JSON.stringify({ description }),
     });
   }
 

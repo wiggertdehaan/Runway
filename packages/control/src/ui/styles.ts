@@ -131,6 +131,12 @@ const COMPONENTS = `
 .attn-how p{margin:0.4rem 0 0}
 .app-name{font-weight:600;color:var(--tx);text-decoration:none;overflow-wrap:anywhere}
 .app-name:hover{text-decoration:underline}
+.app-desc-line{color:var(--mu);font-size:0.8rem;margin-top:0.15rem;max-width:60ch;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app-desc{margin:0.5rem 0 0;max-width:70ch}
+.app-desc-text{margin:0;color:var(--tx);overflow-wrap:anywhere}
+.app-desc-edit{margin-top:0.35rem;font-size:0.85rem}
+.app-desc-edit summary{cursor:pointer;color:var(--mu)}
+.app-desc-edit textarea{display:block;width:100%;margin:0.35rem 0 0.5rem;font:inherit}
 .apps-tbl{width:100%;border-collapse:separate;border-spacing:0;background:var(--bg);border:1px solid var(--line);border-radius:var(--r3);margin-bottom:1rem}
 .apps-tbl th{text-align:left;font-size:0.75rem;font-weight:600;color:var(--mu);padding:0.6rem 0.9rem;border-bottom:1px solid var(--line)}
 .apps-tbl td{padding:0.7rem 0.9rem;border-top:1px solid var(--line);vertical-align:middle}

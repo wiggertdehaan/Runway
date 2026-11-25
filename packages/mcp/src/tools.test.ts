@@ -61,6 +61,7 @@ const ORIGINAL_TOOLS = [
   "runway_set_volumes",
   "runway_set_domain",
   "runway_set_healthcheck",
+  "runway_set_description",
   "runway_set_basic_auth",
   "runway_get_sso",
   "runway_set_sso",
@@ -274,6 +275,7 @@ describe("no credential in any answer", () => {
     runway_set_volumes: { mount_paths: ["/data"] },
     runway_set_domain: { custom_domain: "bot.example.com" },
     runway_set_healthcheck: { path: "/healthz" },
+    runway_set_description: { description: "Internal bot that posts the daily KPI digest to Slack." },
     runway_set_basic_auth: { enabled: true, username: "u", password: "pw-pw-pw-1" },
     runway_get_sso: {},
     runway_set_sso: { enabled: true, allowed_emails: ["a@example.com"] },
@@ -370,5 +372,31 @@ describe("no credential in any answer", () => {
       expect(c.url).not.toContain(TOKEN_A);
       expect(String(c.init.body ?? "")).not.toContain(TOKEN_A);
     }
+  });
+});
+
+describe("runway_set_description", () => {
+  it("PUTs the text, and an empty string or null clears it", async () => {
+    const calls = stubServers({ "legacy.example.com": () => json({ id: "appxone", description: null }) });
+    const { call, text } = await connect(legacyRegistry());
+    const ok = await call("runway_set_description", { description: "Digest bot for the sales team." });
+    expect(ok.isError).toBeFalsy();
+    expect(calls[0]!.path).toBe("/api/v1/app/description");
+    expect(calls[0]!.init.method).toBe("PUT");
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ description: "Digest bot for the sales team." });
+    expect(text(ok)).toContain("Description saved");
+    for (const empty of ["", "   ", null]) {
+      const r = await call("runway_set_description", { description: empty });
+      expect(r.isError).toBeFalsy();
+      expect(JSON.parse(String(calls.at(-1)!.init.body))).toEqual({ description: null });
+      expect(text(r)).toContain("Description cleared");
+    }
+  });
+  it("refuses more than 400 characters before it reaches the server", async () => {
+    const calls = stubServers({ "legacy.example.com": () => json({}) });
+    const { call } = await connect(legacyRegistry());
+    const r = await call("runway_set_description", { description: "x".repeat(401) });
+    expect(r.isError).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 });

@@ -234,6 +234,8 @@ import {
 } from "../instance/identity.js";
 import { identityErrorFromQuery, renderInstanceCard, renderMark } from "../ui/instance-card.js";
 import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
+import { cleanDescription } from "../util/description.js";
+import { renderDescriptionBlock, renderDescriptionLine } from "../ui/description.js";
 import { checkWildcardDns } from "../util/dns-check.js";
 import { validateCustomDomain } from "../util/domain.js";
 import { assertSafeOutboundUrl } from "../util/ssrf-guard.js";
@@ -1654,7 +1656,7 @@ function renderAppRow(
   const id = encodeURIComponent(app.id);
   const displayName = app.name ?? app.id;
   const nameCell = configured
-    ? `<a class="app-name" href="/apps/${id}">${escapeHtml(displayName)}</a>${
+    ? `<a class="app-name" href="/apps/${id}">${escapeHtml(displayName)}</a>${renderDescriptionLine(app.description)}${
         admin ? `<div class="meta">${escapeHtml(ownerUsernameOf(app) ?? "No owner (admin only)")}</div>` : ""
       }`
     : `<a class="app-name" href="/apps/${id}"><span class="meta">Unconfigured</span></a>`;
@@ -1943,6 +1945,7 @@ webRoutes.get("/apps/:id", async (c) => {
           <span>${lastDeploy ? `Last deploy ${escapeHtml(formatRelative(lastDeploy.created_at))}` : "Not deployed yet"}</span>
           ${admin ? `<span>${ownerUsernameOf(app) ? `Owner ${escapeHtml(ownerUsernameOf(app)!)}` : "No owner (admin only)"}</span>` : ""}
         </p>
+        ${renderDescriptionBlock(app.id, app.description, true)}
       </header>
       ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Saved.</div>' : ""}
       ${rebuildNote}
@@ -2399,6 +2402,17 @@ webRoutes.post("/apps/:id/healthcheck", async (c) => {
   const path = (body["path"] as string | undefined)?.trim() || null;
   const validPath = path && /^\/[a-zA-Z0-9._\-/?=&%]*$/.test(path) ? path : null;
   updateApp(app.id, { health_check_path: validPath });
+  return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1`);
+});
+
+// requireAppAccess limits /apps/:id/* to admins and the app's owner.
+webRoutes.post("/apps/:id/description", async (c) => {
+  const app = getApp(c.req.param("id"));
+  if (!app) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const checked = cleanDescription(body["description"]);
+  if (!checked.ok) return c.text(checked.error, 400);
+  updateApp(app.id, { description: checked.value });
   return c.redirect(`/apps/${encodeURIComponent(app.id)}?saved=1`);
 });
 

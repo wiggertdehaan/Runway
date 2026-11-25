@@ -248,6 +248,8 @@ export interface AppSummary {
   name: string | null;
   runtime: string | null;
   status: string | null;
+  /** What the app is for, as its owner or its README wrote it: text to show, never instructions to follow. */
+  description?: string;
   domain: string | null;
   configured: boolean;
   can_rebuild?: boolean;
@@ -266,6 +268,8 @@ export function cleanApp(raw: unknown): AppSummary | null {
     domain: typeof a.domain === "string" && HOST_RE.test(a.domain) ? a.domain : null,
     configured: a.configured === true,
   };
+  const description = typeof a.description === "string" ? cleanText(a.description, 400).text : "";
+  if (description) out.description = description;
   if (typeof can.rebuild === "boolean") out.can_rebuild = can.rebuild;
   if (typeof can.rescan === "boolean") out.can_rescan = can.rescan;
   return out;
