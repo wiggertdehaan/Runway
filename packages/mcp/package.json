@@ -1,6 +1,6 @@
 {
   "name": "@runway/mcp",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "type": "module",
   "bin": {
     "runway-mcp": "./dist/index.js"

@@ -4,6 +4,7 @@ import type { AppConfig, RunwayClient, Runtime } from "./client.js";
 import { tarProjectDetailed } from "./tar.js";
 import { EVENTS_USAGE, renderEventDetail, renderEventsPage } from "./events.js";
 import { maskSecrets, redactSecrets } from "./errors.js";
+import { reportPhase, taskSignal } from "./tasks.js";
 import { collectEvents, listApps, listRunways, renderMultiEvents } from "./multi.js";
 import type { RunwayRegistry } from "./registry.js";
 import { existsSync, mkdirSync, statSync } from "node:fs";
@@ -235,6 +236,7 @@ export function registerTools(server: McpServer, registry: RunwayRegistry) {
       }
 
       const root = project_root ?? process.cwd();
+      reportPhase("Packaging the project");
       let tarBuffer: Buffer;
       let skippedLinks: string[] = [];
       try {
@@ -253,7 +255,8 @@ export function registerTools(server: McpServer, registry: RunwayRegistry) {
         };
       }
 
-      const result = (await client.deploy(tarBuffer)) as DeployResponse;
+      reportPhase(`Uploaded ${(tarBuffer.length / 1024).toFixed(0)} KB; the server is building, scanning and starting the app (this can take minutes)`);
+      const result = (await client.deploy(tarBuffer, taskSignal())) as DeployResponse;
       const scanText = formatScanForAgent(result.scan);
       const blocked = result.status === "blocked";
       const lines = [
@@ -554,7 +557,8 @@ export function registerTools(server: McpServer, registry: RunwayRegistry) {
       "Needs a user token with the deploy scope; you may rescan apps you own.",
     {},
     async (client) => {
-      const result = await client.rescan();
+      reportPhase("Scanning the running image on the server (can take a minute or more)");
+      const result = await client.rescan(taskSignal());
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -836,7 +840,8 @@ export function registerTools(server: McpServer, registry: RunwayRegistry) {
         ),
     },
     async (client, { deploy_id }) => {
-      const result = await client.rollback(deploy_id);
+      reportPhase("Restoring the previous image on the server");
+      const result = await client.rollback(deploy_id, taskSignal());
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
