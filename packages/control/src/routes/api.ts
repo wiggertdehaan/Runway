@@ -32,6 +32,7 @@ import {
 } from "../db/user-tokens.js";
 import { scopeCovers } from "../util/token-scopes.js";
 import { cleanDescription } from "../util/description.js";
+import { failureStatus, restartApp, startApp, stopApp, trashApp, type LifecycleResult } from "../deploy/lifecycle.js";
 import { forgetKey } from "../util/key-reveal.js";
 import { mayRebuild, mayRescan, rebuildBlockedReason, rescanBlockedReason } from "../ui/app-page.js";
 import { RebuildBusyError, startRebuildRun } from "../deploy/rebuild.js";
@@ -370,7 +371,10 @@ apiRoutes.post("/app/deploy", async (c) => {
   try {
     const result = await deployApp({ app, tar: tarBuffer });
     return c.json({
-      status: "deployed",
+      status: result.stopped ? "deployed_stopped" : "deployed",
+      ...(result.stopped
+        ? { message: "The new version is built and recorded, but the app is stopped. Call /app/start (runway_start) to run it." }
+        : {}),
       ...result,
       scan: summarizeScanForResponse(result.scan),
       note: result.domain
@@ -798,6 +802,31 @@ apiRoutes.put("/app/description", async (c) => {
   const updated = updateApp(app.id, { description: checked.value });
   if (!updated) return c.json({ error: "App not found" }, 404);
   return c.json(toConfigResponse(updated));
+});
+
+// ── Lifecycle: stop, start, restart, delete (to the trash) ──────────
+// Audited by apiAudit like every other change. A deploy to a stopped app
+// builds and records the new version but leaves the app stopped until /start.
+function lifecycleJson(c: Context<ApiEnv>, r: LifecycleResult) {
+  if (!r.ok) return c.json({ error: r.message, code: r.code }, failureStatus(r.code));
+  return c.json({ ...toConfigResponse(r.app), changed: r.changed, ...(r.note ? { note: r.note } : {}) });
+}
+apiRoutes.post("/app/stop", async (c) => lifecycleJson(c, await stopApp(c.get("app").id)));
+apiRoutes.post("/app/start", async (c) => lifecycleJson(c, await startApp(c.get("app").id)));
+apiRoutes.post("/app/restart", async (c) => lifecycleJson(c, await restartApp(c.get("app").id)));
+
+/**
+ * Delete = move to the trash (7 days, restorable in the dashboard). The body
+ * must carry `confirm` equal to the app's exact name. There is no purge here.
+ */
+apiRoutes.delete("/app", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const r = await trashApp(c.get("app").id, body && typeof body === "object" ? (body as { confirm?: unknown }).confirm : undefined);
+  if (!r.ok) return c.json({ error: r.message, code: r.code }, failureStatus(r.code));
+  return c.json({
+    status: "in_trash",
+    note: "The app is stopped and in the trash for 7 days; its address stays reserved. An owner or admin can restore it in the dashboard.",
+  });
 });
 
 // ── Health check ────────────────────────────────────────

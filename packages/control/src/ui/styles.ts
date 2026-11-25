@@ -132,6 +132,16 @@ const COMPONENTS = `
 .app-name{font-weight:600;color:var(--tx);text-decoration:none;overflow-wrap:anywhere}
 .app-name:hover{text-decoration:underline}
 .app-desc-line{color:var(--mu);font-size:0.8rem;margin-top:0.15rem;max-width:60ch;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app-actions{display:flex;flex-wrap:wrap;gap:0.4rem;margin:0.6rem 0 0}
+.app-act{width:auto;padding:0.3rem 0.8rem;font-size:0.85rem}
+.danger-ghost:hover{color:var(--err);border-color:var(--err)}
+.stopped-banner{margin:0.75rem 0;border-color:var(--line2)}
+.status-deleted{opacity:0.85}
+.del-dlg{border:1px solid var(--line);border-radius:var(--r1);background:var(--bg);color:var(--tx);padding:1.25rem;max-width:26rem;width:calc(100% - 2rem)}
+.del-dlg::backdrop{background:rgba(0,0,0,0.5)}
+.del-dlg h2{margin:0 0 0.5rem}
+.del-dlg input{display:block;width:100%;margin:0.35rem 0 0.9rem}
+.del-buttons{display:flex;justify-content:flex-end;gap:0.5rem}
 .app-desc{margin:0.5rem 0 0;max-width:70ch}
 .app-desc-text{margin:0;color:var(--tx);overflow-wrap:anywhere}
 .app-desc-edit{margin-top:0.35rem;font-size:0.85rem}

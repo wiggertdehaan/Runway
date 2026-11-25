@@ -189,7 +189,7 @@ cannot use them.
   `runway_list_deploys`, `runway_rollback`, `runway_pull`, `runway_rebuild`
 - **Run**: `runway_logs`, `runway_get_env`, `runway_set_env`, `runway_delete_env`,
   `runway_get_volumes`, `runway_set_volumes`, `runway_set_domain`,
-  `runway_set_healthcheck`, `runway_set_description`, `runway_set_basic_auth`, `runway_get_sso`,
+  `runway_set_healthcheck`, `runway_set_description`, `runway_stop`, `runway_start`, `runway_restart`, `runway_delete`, `runway_set_basic_auth`, `runway_get_sso`,
   `runway_set_sso`
 - **Security**: `runway_get_scan`, `runway_set_scan_threshold`, `runway_rescan`
 - **Events**: `runway_events`, `runway_event_detail`

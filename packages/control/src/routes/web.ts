@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { html, raw } from "hono/html";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import type { Context } from "hono";
+import type { Context, Next } from "hono";
 import { HTMX_INTEGRITY, HTMX_PATH } from "./assets.js";
 import { APP_CSS } from "../ui/styles.js";
 import { CLIENT_JS, PREPAINT_JS } from "../ui/client.js";
@@ -35,7 +35,7 @@ const APP_VERSION = (() => {
     return "dev";
   }
 })();
-import { listApps, createApp, deleteApp, getApp, ownerUsernameOf, setAppOwner, type App } from "../db/apps.js";
+import { getAppByDomain, listApps, createApp, deleteApp, deletedAppsVisibleTo, getApp, ownerUsernameOf, setAppOwner, type App } from "../db/apps.js";
 import { getEnvVars, setEnvVars, deleteEnvVar } from "../db/env.js";
 import { getVolumes, setVolumes, deleteVolume } from "../db/volumes.js";
 import {
@@ -233,8 +233,29 @@ import {
   pageTitle,
 } from "../instance/identity.js";
 import { identityErrorFromQuery, renderInstanceCard, renderMark } from "../ui/instance-card.js";
+import { requestHost } from "../middleware/internal-routes.js";
 import { csrfField, injectCsrfFields } from "../middleware/csrf.js";
 import { cleanDescription } from "../util/description.js";
+import {
+  confirmationName,
+  failureStatus,
+  purgeApp,
+  restartApp,
+  restoreFromTrash,
+  startApp,
+  stopApp,
+  trashApp,
+  type LifecycleResult,
+} from "../deploy/lifecycle.js";
+import {
+  renderAppActions,
+  renderDeleteDialog,
+  renderDeleteMenuItem,
+  renderLifecycleMenuItems,
+  renderLifecycleNote,
+  renderStoppedBanner,
+  renderTrashRow,
+} from "../ui/lifecycle.js";
 import { renderDescriptionBlock, renderDescriptionLine } from "../ui/description.js";
 import { checkWildcardDns } from "../util/dns-check.js";
 import { validateCustomDomain } from "../util/domain.js";
@@ -784,6 +805,16 @@ function getCookieValue(c: Context, name: string): string | undefined {
 
 // ── Protected routes ─────────────────────────────────────
 
+async function trashGuard(c: Context<WebEnv>, next: Next) {
+  const app = getApp(c.req.param("id") ?? "");
+  if (app?.deleted_at) {
+    const last = c.req.path.split("/").filter(Boolean).pop();
+    if (c.req.method === "POST" && (last === "restore" || last === "purge")) return next();
+    return c.redirect("/");
+  }
+  return next();
+}
+
 webRoutes.use("/", requireSession);
 webRoutes.use("/partials/*", requireSession);
 webRoutes.use("/security", requireSession);
@@ -792,6 +823,10 @@ webRoutes.use("/apps", requireSession);
 webRoutes.use("/apps/*", requireSession);
 webRoutes.use("/apps/:id", requireAppAccess);
 webRoutes.use("/apps/:id/*", requireAppAccess);
+// An app in the trash can only be restored or removed for good: every other
+// /apps/:id page or action goes back to the list.
+webRoutes.use("/apps/:id", trashGuard);
+webRoutes.use("/apps/:id/*", trashGuard);
 webRoutes.use("/users", requireSession);
 webRoutes.use("/users/*", requireSession);
 webRoutes.use("/users", requireAdmin);
@@ -931,6 +966,15 @@ async function renderAppsLive(
   const statuses = apps.map((app, i) =>
     statusOf(app, allStats[i] ?? null, atRisk.get(app.id), now)
   );
+  const trashed = deletedAppsVisibleTo(user.id, admin);
+  const trashRows = trashed
+    .map((a) =>
+      renderTrashRow(
+        { id: a.id, name: a.name, description: a.description, domain: a.domain, custom_domain: a.custom_domain, deleted_at: a.deleted_at! },
+        { admin, expectedName: confirmationName(a), now: Date.now() }
+      )
+    )
+    .join("");
   const appRows = apps
     .map((app, i) =>
       renderAppRow(
@@ -956,19 +1000,23 @@ async function renderAppsLive(
     configuredIdx.filter((i) => needsAttention(statuses[i])).length,
     apps.length - configuredIdx.length
   );
+  if (trashed.length > 0) {
+    if (chips.length === 0) chips.push({ key: "all", label: "All", count: 0 });
+    chips.push({ key: "deleted", label: "Deleted", count: trashed.length });
+  }
 
   // The search input is rendered (and preserved) whenever there are
   // any apps, not only past the old >=4 threshold, so its value
   // survives live updates even if the app count briefly dips.
   const filterBlock =
-    apps.length > 0
+    apps.length > 0 || trashed.length > 0
       ? `<div class="dashboard-filter" id="app-search-wrap" hx-preserve="true">
           <input type="search" id="app-search" placeholder="Search apps..." oninput="filterApps()" style="font-size:0.85rem" />
         </div>`
       : "";
 
   const header =
-    apps.length > 0
+    apps.length > 0 || trashed.length > 0
       ? `<div class="apps-bar">
           ${renderChips(chips)}
           ${filterBlock}
@@ -976,11 +1024,11 @@ async function renderAppsLive(
       : "";
 
   const body =
-    apps.length === 0
+    apps.length === 0 && trashed.length === 0
       ? renderEmptyState({ dashboardDomain })
       : `<table class="apps-tbl">
           <thead><tr><th>App</th><th>Status</th><th>Address</th><th>Runtime</th><th>Traffic, 7 days</th><th><span class="sr-only">Actions</span></th></tr></thead>
-          <tbody>${appRows}</tbody>
+          <tbody>${appRows}${trashRows}</tbody>
         </table>
          <p id="no-match" class="meta" style="display:none;text-align:center;padding:2rem 0">No apps match your filter.</p>`;
 
@@ -1149,9 +1197,11 @@ webRoutes.get("/", async (c) => {
         });
       </script>
       ${!baseDomain && isAdmin(user) ? '<p class="hint">No base domain configured. <a href="/settings" style="color:var(--brand)">Set one in settings</a> to get automatic subdomains.</p>' : ""}
+      ${c.req.query("trashed") ? '<div class="card" style="border-color:var(--ok);color:var(--ok);margin-bottom:1rem">The app was moved to the trash. Open the <strong>Deleted</strong> filter to restore it within 7 days.</div>' : ""}
       <div id="apps-live" hx-get="/partials/apps" hx-trigger="every 5s" hx-swap="innerHTML">
         ${appsHtml}
       </div>
+      ${renderDeleteDialog()}
     `,
       { username: user.username, userId: user.id, csrf: csrfField(c), isAdmin: isAdmin(user) }
     )
@@ -1700,9 +1750,8 @@ function renderAppRow(
             ? `<button type="button" data-copy="${escapeHtml(revealedKey)}" onclick="copyText(this)">Copy API key</button>`
             : `<a href="/apps/${id}#access" class="overflow-item" style="text-decoration:none">Rotate API key</a>`
         }
-        <form method="POST" action="/apps/${id}/delete" style="margin:0" data-app-name="${escapeHtml(displayName)}" onsubmit="return confirmDelete(this)">
-          <button type="submit" class="overflow-danger">Delete app</button>
-        </form>
+        ${renderLifecycleMenuItems(app.id, app.status, !!app.image_tag)}
+        ${renderDeleteMenuItem(app.id, confirmationName(app))}
       </div>
     </details>`;
 
@@ -1755,12 +1804,79 @@ webRoutes.get("/apps/:id/stats", async (c) => {
   `);
 });
 
-webRoutes.post("/apps/:id/delete", async (c) => {
-  const app = getApp(c.req.param("id"));
-  if (app) {
-    await destroyApp(app);
-    deleteApp(app.id);
+/** The notice key shown on the app page after a lifecycle action. */
+function lifecycleKey(r: LifecycleResult, ok: { changed: string; same: string }): string {
+  if (r.ok) return r.changed ? ok.changed : ok.same;
+  return r.code === "busy" || r.code === "quarantined" || r.code === "no_image" || r.code === "unhealthy" ? r.code : "error";
+}
+
+async function lifecycleRoute(
+  c: Context<WebEnv>,
+  action: "stop" | "start" | "restart",
+  run: (id: string) => Promise<LifecycleResult>
+) {
+  const user = c.get("user");
+  const id = c.req.param("id") ?? "";
+  let r: LifecycleResult;
+  try {
+    r = await run(id);
+  } catch (err) {
+    console.error(`[lifecycle] ${action} ${id} failed:`, err);
+    logAudit(user.id, user.username, `app_${action}_failed`, { detail: id });
+    return c.redirect(`/apps/${encodeURIComponent(id)}?lc=error`);
   }
+  if (r.ok && r.changed) logAudit(user.id, user.username, `app_${action === "restart" ? "restarted" : action === "stop" ? "stopped" : "started"}`, { detail: id });
+  const key = lifecycleKey(r, {
+    changed: action === "stop" ? "stopped" : action === "restart" ? "restarted" : "started",
+    same: action === "stop" ? "stopped-noop" : "started-noop",
+  });
+  return c.redirect(`/apps/${encodeURIComponent(id)}?lc=${key}`);
+}
+
+webRoutes.post("/apps/:id/stop", (c) => lifecycleRoute(c, "stop", stopApp));
+webRoutes.post("/apps/:id/start", (c) => lifecycleRoute(c, "start", startApp));
+webRoutes.post("/apps/:id/restart", (c) => lifecycleRoute(c, "restart", restartApp));
+
+// Delete = the trash. The name must be typed (the dialog does it in the browser,
+// this checks it again). Nothing is destroyed here: that is the purge.
+webRoutes.post("/apps/:id/delete", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id") ?? "";
+  if (!getApp(id)) return c.redirect("/");
+  const body = await c.req.parseBody();
+  const r = await trashApp(id, body["confirm"]).catch((err) => {
+    console.error(`[lifecycle] delete ${id} failed:`, err);
+    return null;
+  });
+  if (!r) return c.redirect(`/apps/${encodeURIComponent(id)}?lc=error`);
+  if (!r.ok) {
+    if (r.code === "confirm") return c.text(r.message, failureStatus(r.code));
+    return c.redirect(`/apps/${encodeURIComponent(id)}?lc=${r.code === "busy" ? "busy" : "error"}`);
+  }
+  logAudit(user.id, user.username, "app_deleted", { detail: `${id}: moved to the trash` });
+  return c.redirect("/?trashed=1");
+});
+
+webRoutes.post("/apps/:id/restore", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id") ?? "";
+  const r = await restoreFromTrash(id);
+  if (r.ok) logAudit(user.id, user.username, "app_restored", { detail: `${id}: restored from the trash (stopped)` });
+  return c.redirect(r.ok ? `/apps/${encodeURIComponent(id)}` : "/");
+});
+
+// "Delete now": only an administrator, only from the trash, name typed again.
+webRoutes.post("/apps/:id/purge", async (c) => {
+  const user = c.get("user");
+  if (!isAdmin(user)) return c.redirect("/?forbidden=1");
+  const id = c.req.param("id") ?? "";
+  const body = await c.req.parseBody();
+  const r = await purgeApp(id, { confirm: body["confirm"] }).catch((err) => {
+    console.error(`[lifecycle] purge ${id} failed:`, err);
+    return null;
+  });
+  if (r && !r.ok && r.code === "confirm") return c.text(r.message, failureStatus(r.code));
+  if (r?.ok) logAudit(user.id, user.username, "app_purged", { detail: `${id}: removed for good (delete now)` });
   return c.redirect("/");
 });
 
@@ -1946,7 +2062,11 @@ webRoutes.get("/apps/:id", async (c) => {
           ${admin ? `<span>${ownerUsernameOf(app) ? `Owner ${escapeHtml(ownerUsernameOf(app)!)}` : "No owner (admin only)"}</span>` : ""}
         </p>
         ${renderDescriptionBlock(app.id, app.description, true)}
+        ${renderAppActions(app.id, app.status, !!app.image_tag, confirmationName(app))}
       </header>
+      ${renderLifecycleNote(c.req.query("lc"))}
+      ${renderStoppedBanner(app, fmtUtc)}
+      ${renderDeleteDialog()}
       ${saved ? '<div class="card" style="border-color:var(--ok);color:var(--ok)">Saved.</div>' : ""}
       ${rebuildNote}
       ${rescanNote}
@@ -3532,13 +3652,20 @@ webRoutes.post("/apps/:id/quarantine-exception/remove", async (c) => {
  * name, no reason, no CVE ids.
  */
 webRoutes.get("/maintenance", (c) => {
+  // Only the app's state picks the sentence; the page still names nothing.
+  const host = requestHost(c.req.header("host"), c.req.url);
+  const target = host ? getAppByDomain(host) : undefined;
+  const offlineReason =
+    target && (target.deleted_at || target.status === "stopped")
+      ? "This app is switched off for now. Please check back later."
+      : "This site is offline for security maintenance. Please check back later.";
   c.header("Retry-After", "3600");
   c.header("Cache-Control", "no-store");
   c.header("X-Robots-Tag", "noindex");
   return c.html(
     `<!doctype html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Temporarily offline</title>
     <style>body{font-family:system-ui,sans-serif;background:#faf7f2;color:#2b2926;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:1rem}main{max-width:32rem;text-align:center}h1{font-size:1.5rem}p{color:#6b665e;line-height:1.5}@media (prefers-color-scheme:dark){body{background:#1d1b18;color:#ece8e1}p{color:#a39d93}}</style></head>
-    <body><main><h1>Temporarily offline</h1><p>This site is offline for security maintenance. Please check back later.</p></main></body></html>`,
+    <body><main><h1>Temporarily offline</h1><p>${offlineReason}</p></main></body></html>`,
     503
   );
 });

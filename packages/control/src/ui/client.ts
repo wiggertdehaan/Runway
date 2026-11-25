@@ -25,8 +25,8 @@ function filterApps() {
   var rows = document.querySelectorAll('[data-app-row]');
   var shown = 0;
   rows.forEach(function(r) {
-    var okChip = appChip === 'all'
-      || (appChip === 'attention' ? r.getAttribute('data-attn') === '1' : r.getAttribute('data-status') === appChip);
+    var okChip = appChip === 'all' ? r.getAttribute('data-status') !== 'deleted'
+      : (appChip === 'attention' ? r.getAttribute('data-attn') === '1' : r.getAttribute('data-status') === appChip);
     var okText = !q || (r.getAttribute('data-name') || '').toLowerCase().indexOf(q) !== -1
       || (r.getAttribute('data-domain') || '').toLowerCase().indexOf(q) !== -1;
     var match = okChip && okText;
@@ -103,6 +103,36 @@ function featureToggle(checkbox) {
   var body = checkbox.closest('.card').querySelector('.feature-body');
   if (body) { body.classList.toggle('disabled', !checkbox.checked); }
 }
+// Delete / "Delete now": the confirmation dialog. The submit button stays
+// disabled until the typed text equals the app's name; the server checks again.
+document.addEventListener('click', function(e) {
+  var b = e && e.target && e.target.closest ? e.target.closest('[data-del-open]') : null;
+  var dlg = document.getElementById('del-dlg');
+  if (!b || !dlg || !dlg.showModal) return;
+  e.preventDefault();
+  var purge = b.getAttribute('data-del-mode') === 'purge';
+  var expected = b.getAttribute('data-del-name') || '';
+  dlg.querySelector('#del-form').setAttribute('action', b.getAttribute('data-del-action') || '');
+  dlg.querySelector('#del-title').textContent = purge ? 'Delete now' : 'Delete app';
+  dlg.querySelector('#del-body').textContent = purge ? dlg.getAttribute('data-purge-body') : dlg.getAttribute('data-trash-body');
+  dlg.querySelector('#del-expect').textContent = expected;
+  dlg.querySelector('#del-go').textContent = purge ? 'Delete now' : 'Move to trash';
+  var input = dlg.querySelector('#del-input');
+  input.value = '';
+  dlg.querySelector('#del-go').disabled = true;
+  dlg.setAttribute('data-expected', expected);
+  dlg.showModal();
+  input.focus();
+});
+document.addEventListener('input', function(e) {
+  var t = e && e.target;
+  if (!t || t.id !== 'del-input') return;
+  var dlg = document.getElementById('del-dlg');
+  dlg.querySelector('#del-go').disabled = t.value.trim() !== dlg.getAttribute('data-expected');
+});
+document.addEventListener('click', function(e) {
+  if (e && e.target && e.target.id === 'del-cancel') document.getElementById('del-dlg').close();
+});
 function confirmDelete(form) {
   var expected = form.getAttribute('data-app-name');
   var input = prompt('Type "' + expected + '" to confirm deletion:');

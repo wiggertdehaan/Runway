@@ -750,6 +750,41 @@ export function registerTools(server: McpServer, registry: RunwayRegistry) {
   );
 
   tool(
+    "runway_stop",
+    "Stop the Runway app. The container stops; its image, data, environment and address are kept, and visitors see a 'temporarily offline' page instead of an error. It stays stopped (also after a server restart) until runway_start. " +
+      "Refused while a deploy or rebuild is running on the app. Stopped apps are skipped by rebuilds and by the security countdown.",
+    {},
+    async (client) => ({ content: [{ type: "text", text: `${JSON.stringify(await client.stop(), null, 2)}` }] })
+  );
+
+  tool(
+    "runway_start",
+    "Start a stopped Runway app again from the same version (no rebuild). It goes live only after its health check passes; if it does not, it is stopped again and the error says so. " +
+      "A quarantined app cannot be started this way: it returns by itself once the vulnerability is fixed. A deploy to a stopped app builds the new version but leaves it stopped until this call.",
+    {},
+    async (client) => ({ content: [{ type: "text", text: `${JSON.stringify(await client.start(), null, 2)}` }] })
+  );
+
+  tool(
+    "runway_restart",
+    "Restart the Runway app (same version, no rebuild): for an app that has hung. Goes back to normal only after its health check passes. On a stopped app this is the same as runway_start.",
+    {},
+    async (client) => ({ content: [{ type: "text", text: `${JSON.stringify(await client.restart(), null, 2)}` }] })
+  );
+
+  tool(
+    "runway_delete",
+    "Move the Runway app to the trash: it is stopped, disappears from the app list, and its address and data are kept for 7 days. A person can restore it in the dashboard within that time; after that it is removed for good. " +
+      "This tool cannot delete permanently. Because it ends this app's own API key from working until restored, ask the user first, and pass `confirm` with the app's exact name.",
+    {
+      confirm: z.string().min(1).max(64).describe("The app's exact name (see runway_get_config). Anything else is refused."),
+    },
+    async (client, { confirm }) => ({
+      content: [{ type: "text", text: `${JSON.stringify(await client.deleteApp(confirm), null, 2)}` }],
+    })
+  );
+
+  tool(
     "runway_set_basic_auth",
     "Put HTTP basic auth in front of the Runway app at the gateway, or remove it. Useful for quickly password-protecting an internal tool without writing login code in the app. Only one username is supported per app. Takes effect immediately, no redeploy required.",
     {

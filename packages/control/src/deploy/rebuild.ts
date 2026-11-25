@@ -151,7 +151,7 @@ function selectionContext(kev: Set<string>): SelectionContext {
 
 /** Apps that have something to rebuild at all (a deployed image). */
 export function rebuildableApps(): App[] {
-  return listApps().filter((a) => a.image_tag);
+  return listApps().filter((a) => a.image_tag && a.status !== "stopped");
 }
 
 /**
@@ -280,6 +280,10 @@ export async function rebuildApp(
   if (!app.image_tag) return done("skipped", { detail: "never deployed" });
   if (BUSY_STATUSES.has(app.status)) {
     return done("skipped", { detail: `a deploy is in progress (${app.status})` });
+  }
+  // Somebody switched it off: a rebuild must not bring it back.
+  if (app.status === "stopped" || app.deleted_at) {
+    return done("skipped", { detail: "the app is stopped; start it first" });
   }
   const source = latestSource(app.id);
   if (!source) {
@@ -696,7 +700,7 @@ async function executeRun(runId: number, opts: RunOptions): Promise<void> {
       );
     }
 
-    let apps = listApps().filter((a) => a.image_tag);
+    let apps = listApps().filter((a) => a.image_tag && a.status !== "stopped");
     if (opts.appIds) apps = apps.filter((a) => opts.appIds!.includes(a.id));
     const reasons = new Map<string, string>();
     if (opts.onlyVulnerable || opts.onlyWithIssues) {

@@ -94,7 +94,7 @@ export async function apiAuthorize(c: Context<ApiEnv>, next: Next) {
       );
     }
     const app = getApp(id);
-    if (!app || !appVisibleTo({ id: actor.userId, role: actor.role }, app)) {
+    if (!app || app.deleted_at || !appVisibleTo({ id: actor.userId, role: actor.role }, app)) {
       return refuse(c, 404, "App not found.", `app=${id}`);
     }
     c.set("app", app);

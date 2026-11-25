@@ -9,7 +9,7 @@
  */
 import { APP_STATES, stateLabel, type AppState, type AppStatus, type StateCounts } from "./status.js";
 
-export type ChipKey = "all" | "attention" | AppState;
+export type ChipKey = "all" | "attention" | "deleted" | AppState;
 
 export interface Chip {
   key: ChipKey;

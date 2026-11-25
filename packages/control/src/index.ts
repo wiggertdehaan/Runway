@@ -7,9 +7,10 @@ import {
   appRouteExists,
   appBasicAuth,
 } from "./deploy/gateway.js";
+import { startTrashPurger } from "./deploy/lifecycle.js";
 import { runDescriptionBackfillOnce } from "./deploy/description-backfill.js";
 import { repairSsoRoutes, refreshAppRoutes } from "./deploy/gateway-sync.js";
-import { listApps } from "./db/apps.js";
+import { listAllApps, listApps } from "./db/apps.js";
 import { appContainerName } from "./deploy/index.js";
 import { deleteExpiredSessions } from "./db/sessions.js";
 import { cleanupExpiredEntries } from "./middleware/rate-limit.js";
@@ -148,13 +149,16 @@ try {
 // them. Reattach at startup and every minute, and sweep networks of deleted apps.
 startGatewayNetworkReconciler({
   docker: docker as unknown as NetworkDocker,
-  appIds: () => new Set(listApps().map((a) => a.id)),
+  appIds: () => new Set(listAllApps().map((a) => a.id)),
   log: (m) => console.log(m),
 });
 
 // One-time fill of empty app descriptions from the stored sources. Background:
 // the server starts without waiting for it and it never throws.
 void runDescriptionBackfillOnce({ log: (m) => console.log(m) });
+
+// The trash: apps older than 7 days are removed for good (sweeps now, then hourly).
+startTrashPurger(console);
 
 const port = parseInt(process.env.PORT || "3000", 10);
 
