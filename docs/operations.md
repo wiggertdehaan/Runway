@@ -6,6 +6,7 @@ the server figures and limiting what apps can reach.
 - [Update Runway](#update-runway)
 - [Keep apps patched](#keep-apps-patched)
 - [KEV countdown and quarantine](#kev-countdown-and-quarantine)
+- [The trash and purge](#the-trash-and-purge)
 - [Server figures](#server-figures)
 - [Limit what apps can reach (egress rules)](#limit-what-apps-can-reach-egress-rules)
 - [Health, audit and backups](#health-audit-and-backups)
@@ -111,6 +112,33 @@ grant a time-boxed **exemption** (a reason and an end date, at most 90 days, aud
 on the app page, which lifts an active quarantine. Ordinary criticals never
 quarantine anything.
 
+## The trash and purge
+
+Deleting an app in the dashboard, API or MCP moves it to the trash. It is stopped,
+hidden from the lists and from every job (rebuilds, scans, health, quarantine), and
+keeps its row, container, image, volumes, environment, stored source and address for
+7 days. Its domain stays reserved: no other app can take the name or the hostname
+meanwhile. The owner or an admin restores it from the **Deleted** filter; it returns
+as a stopped app. A trashed app's key answers HTTP 410.
+
+**Purge.** Control removes trashed apps older than 7 days: once at every start (so a
+long downtime catches up) and then every hour, logged as `[trash] purged <id>`. A
+purge removes the container, the app's network, the gateway route and the stored
+sources, then the database row, which takes the app's deploys, settings and events with
+it. The sweep is idempotent and one failing app does not stop the rest; a failed one is
+retried at the next sweep. An admin can purge at once with **Delete now** in the trash
+(name typed again). Every purge is in the audit log (`app_purged`); the app's own events
+go with the app.
+
+**Named Docker volumes are not removed** by a purge, as before: an app's data volumes
+(`runway-data-<id>-...`) stay on the server until you remove them yourself
+(`docker volume ls`, `docker volume rm`). Do that only when you are sure the data is
+not needed, because it cannot be recovered.
+
+**Stopped apps** (stopped by a person, as opposed to quarantined) are skipped by the
+weekly rebuild and manual rebuilds, the health watcher, the daily scans and the KEV
+quarantine; their KEV fix period pauses and continues at Start.
+
 ## Server figures
 
 On `/overview`, admins also see the server's disk, CPU, memory and Docker data
@@ -196,4 +224,9 @@ Things that change behaviour for people when you upgrade from an older install:
   `domain_duplicates_detected` audit line instead of failing; rename one of the apps.
 - **Ownerless apps.** Apps whose owner no longer exists become admin-only
   (`app_owner_unlinked` in the audit log). Assign an owner on the app's **Config** tab.
+- **App descriptions** (0.49 and 0.50). The first start of 0.50 fills empty descriptions
+  once, in the background, from the stored sources (`[description-backfill]` lines in
+  the control log; it does not delay the start).
+- **Stop and the trash** (0.51). Existing apps are unaffected: nothing is stopped or in
+  the trash until somebody does it. The purge sweep starts with control.
 - **Skill tokens** (`rwd_`) that had no expiry got one of 90 days at the upgrade.

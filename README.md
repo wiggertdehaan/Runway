@@ -115,7 +115,10 @@ light and dark themes that follow your system, a colour and name per instance so
 tell several Runways apart, server disk, CPU, memory and Docker data for admins, custom
 domains with automatic certificates, environment variables, persistent volumes, health
 checks, deploy history with one-click rollback, source you can pull back to a new machine,
-HTTP basic auth and SSO per app. See [Deploying and running apps](docs/deploying-apps.md).
+HTTP basic auth and SSO per app. Each app can carry a short **description** (taken from the
+first paragraph of its `README.md` on the first deploy, editable by hand), and an owner can
+**stop, start or restart** an app and **delete** it into a trash that keeps it for 7 days.
+See [Deploying and running apps](docs/deploying-apps.md).
 
 ## Quickstart
 
@@ -173,7 +176,13 @@ output. The servers know nothing of each other.
 
 Agents can also ask **what happened**, without polling the dashboard: `runway_events` returns
 deploys that finished or failed, health changes, rebuild results, KEV deadlines and quarantines,
-as a type, an app id and a fixed code, never logs or secrets.
+as a type, an app id and a fixed code, never logs or secrets. There are 34 tools in all,
+including `runway_stop`, `runway_start`, `runway_restart` and `runway_delete` (to the trash,
+with the exact app name as confirmation; restoring and deleting for good are dashboard-only).
+
+Slow tools support **MCP Tasks**: a client that knows them can start `runway_deploy`,
+`runway_rescan` or `runway_rollback` as a task, watch the phase and fetch the result later.
+Every other client calls the tools as before (`taskSupport` is `optional`, never `required`).
 
 Everything is in [MCP and agents](docs/mcp.md).
 
@@ -238,9 +247,9 @@ retention, upload limits, and the settings under **Settings** in the dashboard, 
 
 | Page | What is in it |
 |---|---|
-| [Deploying and running apps](docs/deploying-apps.md) | Deploy, environment, volumes, domains, health, rollback, SSO, roles, scanning. |
-| [MCP and agents](docs/mcp.md) | `/llms.txt`, the skill server, the local MCP server, several Runways, tokens, events. |
-| [Operations](docs/operations.md) | Updating Runway, rebuilds and patching, KEV quarantine, server figures, egress rules, upgrade notes. |
+| [Deploying and running apps](docs/deploying-apps.md) | Deploy, environment, volumes, domains, health, rollback, description, stop and delete, SSO, roles, scanning. |
+| [MCP and agents](docs/mcp.md) | `/llms.txt`, the skill server, the local MCP server, several Runways, tasks, tokens, events. |
+| [Operations](docs/operations.md) | Updating Runway, rebuilds and patching, KEV quarantine, the trash and purge, server figures, egress rules, upgrade notes. |
 | [Security](docs/security.md) | The model, what is protected and how, known limits, hardening checklist. |
 | [Configuration](docs/configuration.md) | Installer options, environment variables, dashboard settings, where state lives. |
 | [Architecture](docs/architecture.md) | The pieces, a deploy step by step, networks, tech stack, working on Runway. |
