@@ -63,10 +63,28 @@ export class RunwayTaskStore extends InMemoryTaskStore {
     this.aborters.delete(taskId);
   }
 
+  /**
+   * Store the outcome and replace the phase text ("Scanning… (0s)") by it: a finished task must not keep
+   * telling a client what it was doing a moment ago.
+   */
+  async finish(taskId: string, status: "completed" | "failed", result: unknown, message: string): Promise<void> {
+    await this.storeTaskResult(taskId, status, result as Parameters<InMemoryTaskStore["storeTaskResult"]>[2]);
+    const stored = (this as unknown as { tasks: Map<string, { task: Record<string, unknown> }> }).tasks.get(taskId);
+    if (stored) stored.task.statusMessage = message;
+  }
+
   override async updateTaskStatus(taskId: string, status: Parameters<InMemoryTaskStore["updateTaskStatus"]>[1], statusMessage?: string, sessionId?: string): Promise<void> {
     await super.updateTaskStatus(taskId, status, statusMessage, sessionId);
     if (status === "cancelled") this.aborters.get(taskId)?.abort(new Error("task cancelled"));
   }
+}
+
+/** The one-line outcome shown as a finished task's statusMessage: how long it took, or why it failed. */
+export function outcomeMessage(tag: string, failed: boolean, text: string, startedMs: number, nowMs: number): string {
+  if (!failed) return `${tag}Completed in ${Math.max(0, Math.round((nowMs - startedMs) / 1000))} s`;
+  const first = text.split("\n").find((l) => l.trim()) ?? "Failed";
+  const line = first.replace(/\s+/g, " ").trim();
+  return `${tag}${line.length > 200 ? line.slice(0, 199) + "…" : line}`;
 }
 
 type Handler = (request: any, extra: any) => Promise<any>;
@@ -140,13 +158,15 @@ export function installTasks(server: McpServer, registry: RunwayRegistry, store:
           () => call(synthetic, { ...extra, signal: ctrl.signal })
         );
         if (ctrl.signal.aborted) return; // cancelled: the store already says so
-        await taskStore.storeTaskResult(task.taskId, result?.isError ? "failed" : "completed", result);
+        const failed = !!result?.isError;
+        const text = String(result?.content?.find((c: { type: string }) => c.type === "text")?.text ?? "");
+        await store.finish(task.taskId, failed ? "failed" : "completed", result, outcomeMessage(tag, failed, text, started, Date.now()));
       } catch (err) {
         if (ctrl.signal.aborted) return;
         const message = redactSecrets(err instanceof Error ? err.message : String(err), registry.secrets());
         const failed = { isError: true, content: [{ type: "text", text: `${tag}${message}` }] };
         try {
-          await taskStore.storeTaskResult(task.taskId, "failed", failed);
+          await store.finish(task.taskId, "failed", failed, outcomeMessage(tag, true, `${message}`, started, Date.now()));
         } catch {
           /* already terminal */
         }

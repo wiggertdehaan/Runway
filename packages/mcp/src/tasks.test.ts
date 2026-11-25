@@ -2,6 +2,7 @@
  * MCP Tasks, through the real protocol (an in-memory client/server pair): the slow tools can run as tasks, and
  * a call without `task` is exactly what it always was.
  */
+import { outcomeMessage } from "./tasks.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -177,6 +178,22 @@ describe("a call as a task", () => {
     expect((await settled(client, t.task.taskId)).status).toBe("completed");
   });
 
+  it("a finished task's statusMessage is the outcome, not the last phase", async () => {
+    stubServers({ "legacy.example.com": api });
+    const client = await withTasks(legacyRegistry());
+    const t = await startTask(client, "runway_rescan");
+    expect((await settled(client, t.task.taskId)).status).toBe("completed");
+    expect((await getTask(client, t.task.taskId)).statusMessage).toMatch(/^Completed in \d+ s$/);
+  });
+
+  it("a failed task's statusMessage is the error, not 'Scanning… (0s)'", async () => {
+    stubServers({ "legacy.example.com": () => new Response("nope", { status: 500 }) });
+    const client = await withTasks(legacyRegistry());
+    const t = await startTask(client, "runway_rescan");
+    expect((await settled(client, t.task.taskId)).status).toBe("failed");
+    expect((await getTask(client, t.task.taskId)).statusMessage).toBe("Runway API error 500: nope");
+  });
+
   it("a failing tool ends as 'failed' with the tool's own error text", async () => {
     stubServers({ "legacy.example.com": () => new Response("nope", { status: 500 }) });
     const client = await withTasks(legacyRegistry());
@@ -284,5 +301,19 @@ describe("several Runways", () => {
     const t = await startTask(client, "runway_rescan", { runway: "nope", app: "x" });
     expect((await settled(client, t.task.taskId)).status).toBe("failed");
     expect((await taskResult(client, t.task.taskId)).isError).toBe(true);
+  });
+});
+
+describe("outcomeMessage", () => {
+  it("completed: how long it took, with the Runway tag", () => {
+    expect(outcomeMessage("", false, "", 1000, 42_400)).toBe("Completed in 41 s");
+    expect(outcomeMessage("[alpha] ", false, "", 0, 0)).toBe("[alpha] Completed in 0 s");
+  });
+  it("failed: the first non-empty line of the error, one line, bounded", () => {
+    expect(outcomeMessage("", true, "\n\nDEPLOY BLOCKED\nmore detail", 0, 5000)).toBe("DEPLOY BLOCKED");
+    const long = outcomeMessage("", true, "x".repeat(500), 0, 0);
+    expect(long.length).toBeLessThanOrEqual(200);
+    expect(long.endsWith("…")).toBe(true);
+    expect(outcomeMessage("", true, "", 0, 0)).toBe("Failed");
   });
 });
