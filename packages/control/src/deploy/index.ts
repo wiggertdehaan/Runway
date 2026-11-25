@@ -1,5 +1,5 @@
 import type { Readable } from "node:stream";
-import { setDescriptionIfEmpty, updateApp, type App } from "../db/apps.js";
+import { getApp, setDescriptionIfEmpty, updateApp, type App } from "../db/apps.js";
 import { readmeDescription } from "./readme.js";
 import {
   recordDeploy,
@@ -78,7 +78,7 @@ function volumeSafeName(mountPath: string): string {
   return mountPath.replace(/^\//, "").replace(/[^a-z0-9]/gi, "-").toLowerCase();
 }
 
-function buildVolumeBinds(appId: string) {
+export function buildVolumeBinds(appId: string) {
   const volumes = getVolumes(appId);
   return volumes.map(
     (v) =>
@@ -125,6 +125,8 @@ export interface DeployInput {
 }
 
 export interface DeployResult {
+  /** True when the app was stopped by a person: the new version is built and recorded but not started. */
+  stopped?: boolean;
   app_id: string;
   image_tag: string;
   container_id: string;
@@ -260,6 +262,8 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   const imageTag = newImageTag(app.id);
   const containerName = appContainerName(app.id);
   const threshold = resolveThreshold(app);
+  // Read before the status flips to "building" below.
+  const wasStopped = getApp(app.id)?.status === "stopped";
 
   const tarBuffer = Buffer.isBuffer(tar) ? tar : null;
 
@@ -323,12 +327,19 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     throw err;
   }
 
-  updateApp(app.id, { status: "starting" });
+  // A deploy to an app somebody stopped: build, scan and record the new
+  // version, but do not start it. The app stays stopped until Start (the old
+  // container is removed so Start creates one from the new image).
+  const keepStopped = !input.keepOffline && !input.dryRun && wasStopped;
+  if (keepStopped) await removeContainerByName(containerName).catch(() => {});
+  else updateApp(app.id, { status: "starting" });
 
   const env = getEnvVars(app.id);
 
   const previousTag = app.image_tag;
-  const run = await runContainer({
+  const run = keepStopped
+    ? { containerId: "" }
+    : await runContainer({
     appId: app.id,
     containerName,
     imageTag,
@@ -342,7 +353,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     healthCheckPath: app.health_check_path,
   });
 
-  if (input.verifyHealth) {
+  if (input.verifyHealth && !keepStopped) {
     const health = await waitForHealthy(containerName, {
       hasHealthcheck: !!app.health_check_path,
     });
@@ -391,7 +402,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     }
   }
 
-  if (app.domain) {
+  if (app.domain && !keepStopped) {
     await writeAppRoute({
       appId: app.id,
       containerName,
@@ -404,9 +415,9 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
   }
 
   updateApp(app.id, {
-    status: "running",
+    status: keepStopped ? "stopped" : "running",
     image_tag: imageTag,
-    container_id: run.containerId,
+    container_id: keepStopped ? null : run.containerId,
   });
 
   // First deploy of an app without a description: take it from the README.
@@ -476,6 +487,7 @@ export async function deployApp(input: DeployInput): Promise<DeployResult> {
     log_tail: logTail,
     scan,
     base_images: baseImages,
+    ...(keepStopped ? { stopped: true } : {}),
   };
 }
 

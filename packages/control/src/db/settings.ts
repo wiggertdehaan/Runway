@@ -23,6 +23,7 @@ export type SettingKey =
   | "auto_rebuild_last_date"
   | "quarantine_term_days"
   | "sessions_host_only_v1"
+  | "description_backfill_v1"
   | "setup_token"
   | "instance_color"
   | "instance_name";

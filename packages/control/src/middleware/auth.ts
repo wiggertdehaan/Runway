@@ -103,6 +103,11 @@ export async function apiAuth(c: Context, next: Next) {
     return c.json({ error: "Invalid API key" }, 401);
   }
 
+  if (app.deleted_at) {
+    // The key is right but the app is in the trash: say so, do not pretend the key is wrong.
+    denied(c, "app_deleted");
+    return c.json({ error: "This app is in the trash. An owner or admin can restore it in the dashboard." }, 410);
+  }
   c.set("app", app);
   c.set("actor", { kind: "app-key", appId: app.id } satisfies Actor);
   await next();

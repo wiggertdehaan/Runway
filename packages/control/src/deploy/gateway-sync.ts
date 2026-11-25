@@ -16,7 +16,8 @@ export function needsSsoRouteRepair(app: App): boolean {
     !!app.sso_enabled &&
     !!app.domain &&
     !!app.custom_domain &&
-    app.status !== "quarantined"
+    app.status !== "quarantined" &&
+    app.status !== "stopped"
   );
 }
 
@@ -59,7 +60,7 @@ export async function repairSsoRoutes(deps: SsoRepairDeps): Promise<string[]> {
  * page) and apps with no domain.
  */
 export function needsRouteRefresh(app: App): boolean {
-  return !!app.domain && app.status !== "quarantined";
+  return !!app.domain && app.status !== "quarantined" && app.status !== "stopped";
 }
 
 export interface RouteRefreshDeps extends SsoRepairDeps {
